@@ -409,6 +409,142 @@ func TestHandleInitTeam(t *testing.T) {
 		assert.Equal(t, teamID, resp["team_id"])
 	})
 
+	t.Run("team admin in request mode submits request", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		teamID := mmModel.NewId()
+		teamAdminUser := &mmModel.User{Id: "ta-id", Username: "teamadmin"}
+		api.On("GetUser", "ta-id").Return(teamAdminUser, nil)
+		api.On("GetTeamMember", teamID, "ta-id").Return(&mmModel.TeamMember{SchemeAdmin: true}, nil)
+
+		// getSystemAdmins
+		admin := &mmModel.User{Id: "admin-id", Username: "admin", Roles: mmModel.SystemAdminRoleId}
+		api.On("GetUsers", &mmModel.UserGetOptions{
+			Role: mmModel.SystemAdminRoleId, Page: 0, PerPage: 100,
+		}).Return([]*mmModel.User{admin}, nil)
+		api.On("GetUsers", &mmModel.UserGetOptions{
+			Role: mmModel.SystemAdminRoleId, Page: 1, PerPage: 100,
+		}).Return([]*mmModel.User{}, nil)
+
+		api.On("GetTeam", teamID).Return(&mmModel.Team{Id: teamID, Name: "test", DisplayName: "Test"}, nil)
+		api.On("GetDirectChannel", "bot-user-id", "admin-id").Return(&mmModel.Channel{Id: "dm-id"}, nil)
+		api.On("GetDirectChannel", "bot-user-id", "ta-id").Return(&mmModel.Channel{Id: "requester-dm-id"}, nil)
+		api.On("CreatePost", mock.Anything).Return(&mmModel.Post{Id: "post-id"}, nil)
+
+		p, kvs := setupTestPluginWithRouter(api)
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins: &boolTrue,
+			AllowTeamAdminRequests: &boolTrue,
+			OutboundConnections:    `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		kvs.getConnectionRequestFn = func(tID, ck string) (*store.ConnectionRequest, error) {
+			return nil, nil
+		}
+		kvs.createConnectionRequestFn = func(tID, ck string, req *store.ConnectionRequest) (bool, error) {
+			return true, nil
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/teams/"+teamID+"/init", nil, "ta-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		resp := decodeJSONResponse(t, w)
+		assert.Equal(t, "request_submitted", resp["status"])
+	})
+
+	t.Run("team admin in request mode with resolve error", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		teamID := mmModel.NewId()
+		teamAdminUser := &mmModel.User{Id: "ta-id", Username: "teamadmin"}
+		api.On("GetUser", "ta-id").Return(teamAdminUser, nil)
+		api.On("GetTeamMember", teamID, "ta-id").Return(&mmModel.TeamMember{SchemeAdmin: true}, nil)
+
+		p, _ := setupTestPluginWithRouter(api)
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins: &boolTrue,
+			AllowTeamAdminRequests: &boolTrue,
+			OutboundConnections:    `[{"name":"a","nats":{"address":"nats://localhost:4222","subject":"a"}},{"name":"b","nats":{"address":"nats://localhost:4222","subject":"b"}}]`,
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/teams/"+teamID+"/init?connection_name=nonexistent", nil, "ta-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("team admin in request mode with createConnectionRequest error", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		teamID := mmModel.NewId()
+		teamAdminUser := &mmModel.User{Id: "ta-id", Username: "teamadmin"}
+		api.On("GetUser", "ta-id").Return(teamAdminUser, nil)
+		api.On("GetTeamMember", teamID, "ta-id").Return(&mmModel.TeamMember{SchemeAdmin: true}, nil)
+
+		p, kvs := setupTestPluginWithRouter(api)
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins: &boolTrue,
+			AllowTeamAdminRequests: &boolTrue,
+			OutboundConnections:    `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		kvs.getConnectionRequestFn = func(tID, ck string) (*store.ConnectionRequest, error) {
+			return &store.ConnectionRequest{RequesterID: "other"}, nil
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/teams/"+teamID+"/init", nil, "ta-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusConflict, w.Code)
+	})
+
+	t.Run("sysadmin connection resolve error", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		teamID := mmModel.NewId()
+		adminUser := &mmModel.User{Id: "admin-id", Roles: mmModel.SystemAdminRoleId}
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			OutboundConnections: `[{"name":"a","nats":{"address":"nats://localhost:4222","subject":"a"}},{"name":"b","nats":{"address":"nats://localhost:4222","subject":"b"}}]`,
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/teams/"+teamID+"/init?connection_name=nonexistent", nil, "admin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		resp := decodeJSONResponse(t, w)
+		assert.Contains(t, resp["error"], "connection not found")
+	})
+
+	t.Run("initTeamForCrossGuard error returns error status", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		teamID := mmModel.NewId()
+		adminUser := &mmModel.User{Id: "admin-id", Roles: mmModel.SystemAdminRoleId}
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		api.On("GetTeam", teamID).Return(nil, &mmModel.AppError{Message: "team not found"})
+
+		p, _ := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			OutboundConnections: `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/teams/"+teamID+"/init", nil, "admin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		assert.NotEqual(t, http.StatusOK, w.Code)
+	})
+
 	t.Run("already linked returns 200", func(t *testing.T) {
 		api := &plugintest.API{}
 		mockLog(api)

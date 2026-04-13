@@ -138,6 +138,7 @@ type configuration struct {
 	OutboundConnections    string `json:"OutboundConnections"`
 	UsernameLookup         *bool  `json:"UsernameLookup"`
 	RestrictToSystemAdmins *bool  `json:"RestrictToSystemAdmins"`
+	AllowTeamAdminRequests *bool  `json:"AllowTeamAdminRequests"`
 }
 
 func (c *configuration) isUsernameLookupEnabled() bool {
@@ -146,6 +147,14 @@ func (c *configuration) isUsernameLookupEnabled() bool {
 
 func (c *configuration) isRestrictedToSystemAdmins() bool {
 	return c.RestrictToSystemAdmins != nil && *c.RestrictToSystemAdmins
+}
+
+func (c *configuration) isTeamAdminRequestsAllowed() bool {
+	return c.AllowTeamAdminRequests != nil && *c.AllowTeamAdminRequests
+}
+
+func (c *configuration) isRequestMode() bool {
+	return c.isRestrictedToSystemAdmins() && c.isTeamAdminRequestsAllowed()
 }
 
 func parseConnections(raw string) ([]ConnectionConfig, error) {

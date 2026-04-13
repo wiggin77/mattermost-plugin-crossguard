@@ -129,6 +129,103 @@ func TestConnectionDisplayNames(t *testing.T) {
 	})
 }
 
+func TestTeamTownSquareLink(t *testing.T) {
+	team := &model.Team{Id: "t1", Name: "my-team", DisplayName: "My Team"}
+	assert.Equal(t, "[**My Team**](/my-team/channels/town-square)", teamTownSquareLink(team))
+}
+
+func TestBuildRequestDMMessage(t *testing.T) {
+	t.Run("full details", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {
+				Name:                "high",
+				Provider:            "nats",
+				MessageFormat:       "xml",
+				FileTransferEnabled: true,
+				FileFilterMode:      "allow",
+				FileFilterTypes:     ".pdf,.docx",
+			},
+		}
+		out := buildRequestDMMessage("@alice (Alice Smith)", "[**My Team**](/my-team/channels/town-square)", "outbound:high", m)
+		assert.Contains(t, out, "#### :link: Connection Link Request")
+		assert.Contains(t, out, "| **Requested by** | @alice (Alice Smith) |")
+		assert.Contains(t, out, "| **Team** | [**My Team**](/my-team/channels/town-square) |")
+		assert.Contains(t, out, "| **Connection** | `outbound:high` |")
+		assert.Contains(t, out, "| **Direction** | outbound |")
+		assert.Contains(t, out, "| **Provider** | nats |")
+		assert.Contains(t, out, "| **Message format** | xml |")
+		assert.Contains(t, out, "| **File transfer** | Enabled (allow: .pdf,.docx) |")
+	})
+
+	t.Run("defaults for empty provider and message format", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"inbound:low": {Name: "low"},
+		}
+		out := buildRequestDMMessage("@bob", "[**T**](/t/channels/town-square)", "inbound:low", m)
+		assert.Contains(t, out, "| **Direction** | inbound |")
+		assert.Contains(t, out, "| **Provider** | nats |")
+		assert.Contains(t, out, "| **Message format** | json |")
+		assert.Contains(t, out, "| **File transfer** | Disabled |")
+	})
+
+	t.Run("file transfer enabled without filter", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:x": {Name: "x", FileTransferEnabled: true},
+		}
+		out := buildRequestDMMessage("@u", "team", "outbound:x", m)
+		assert.Contains(t, out, "| **File transfer** | Enabled |")
+	})
+
+	t.Run("connection not in map still renders table rows", func(t *testing.T) {
+		out := buildRequestDMMessage("@u", "team", "outbound:missing", nil)
+		assert.Contains(t, out, "| **Connection** | `outbound:missing` |")
+		assert.Contains(t, out, "| **Direction** | outbound |")
+		assert.Contains(t, out, "| **Provider** | nats |")
+		assert.NotContains(t, out, "**File transfer**")
+	})
+}
+
+func TestBuildRequestConfirmationMessage(t *testing.T) {
+	t.Run("basic confirmation", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {
+				Name:     "high",
+				Provider: "nats",
+			},
+		}
+		out := buildRequestConfirmationMessage("[**T**](/t/channels/town-square)", "outbound:high", m)
+		assert.Contains(t, out, "#### :link: Connection Link Request Submitted")
+		assert.Contains(t, out, "Your request has been sent to system admins for approval.")
+		assert.Contains(t, out, "| **Team** | [**T**](/t/channels/town-square) |")
+		assert.Contains(t, out, "| **Connection** | `outbound:high` |")
+		assert.Contains(t, out, "| **Direction** | outbound |")
+		assert.Contains(t, out, "| **Provider** | nats |")
+		assert.NotContains(t, out, "**Requested by**")
+	})
+
+	t.Run("file transfer enabled with filter", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {
+				Name:                "high",
+				Provider:            "nats",
+				FileTransferEnabled: true,
+				FileFilterMode:      "allow",
+				FileFilterTypes:     ".pdf",
+			},
+		}
+		out := buildRequestConfirmationMessage("team", "outbound:high", m)
+		assert.Contains(t, out, "| **File transfer** | Enabled (allow: .pdf) |")
+	})
+
+	t.Run("file transfer disabled", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:low": {Name: "low"},
+		}
+		out := buildRequestConfirmationMessage("team", "outbound:low", m)
+		assert.Contains(t, out, "| **File transfer** | Disabled |")
+	})
+}
+
 // -------------------------------------------------------------------
 // addCrossguardHeaderPrefix / removeCrossguardHeaderPrefix
 // -------------------------------------------------------------------
@@ -1204,7 +1301,7 @@ func TestGetTeamStatus(t *testing.T) {
 
 		api.On("GetTeam", "team-id").Return(nil, &model.AppError{Message: "not found"})
 
-		resp, svcErr := p.getTeamStatus("team-id")
+		resp, svcErr := p.getTeamStatus("team-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 404, svcErr.Status)
@@ -1221,7 +1318,7 @@ func TestGetTeamStatus(t *testing.T) {
 			return nil, errors.New("db error")
 		}
 
-		resp, svcErr := p.getTeamStatus("team-id")
+		resp, svcErr := p.getTeamStatus("team-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 500, svcErr.Status)
@@ -1243,7 +1340,7 @@ func TestGetTeamStatus(t *testing.T) {
 			}, nil
 		}
 
-		resp, svcErr := p.getTeamStatus("team-id")
+		resp, svcErr := p.getTeamStatus("team-id", nil)
 		require.Nil(t, svcErr)
 		require.NotNil(t, resp)
 		assert.Equal(t, "team-id", resp.TeamID)
@@ -1287,7 +1384,7 @@ func TestGetTeamStatus(t *testing.T) {
 			return []store.TeamConnection{}, nil
 		}
 
-		resp, svcErr := p.getTeamStatus("team-id")
+		resp, svcErr := p.getTeamStatus("team-id", nil)
 		require.Nil(t, svcErr)
 		require.NotNil(t, resp)
 		assert.False(t, resp.Initialized)

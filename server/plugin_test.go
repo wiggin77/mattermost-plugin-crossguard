@@ -202,6 +202,42 @@ func TestOnActivate(t *testing.T) {
 		assert.Equal(t, botID, p.botUserID, "botUserID should be set before registerCommand runs")
 	})
 
+	t.Run("happy_path_no_connections", func(t *testing.T) {
+		api := &plugintest.API{}
+		defaultLogMocks(api)
+		botID := model.NewId()
+		mockEnsureBotSuccess(api, botID)
+
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "assets"), 0o750))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(tmpDir, "assets", "crossguard.png"),
+			[]byte("fake-png-bytes"),
+			0o600,
+		))
+
+		api.On("GetBundlePath").Return(tmpDir, nil)
+		api.On("SetProfileImage", botID, mock.Anything).Return((*model.AppError)(nil))
+		api.On("RegisterPluginForClusterEvents").Return((*model.AppError)(nil)).Maybe()
+		api.On("RegisterCommand", mock.Anything).Return(nil)
+
+		p := &Plugin{}
+		p.SetAPI(api)
+		// Set empty configuration so connectOutbound/connectInbound do nothing.
+		p.configuration = &configuration{}
+
+		err := p.OnActivate()
+		require.NoError(t, err)
+		assert.Equal(t, botID, p.botUserID)
+		assert.NotNil(t, p.kvstore)
+		assert.NotNil(t, p.ctx)
+		assert.NotEmpty(t, p.nodeID)
+
+		// Clean up goroutines started by OnActivate.
+		err = p.OnDeactivate()
+		require.NoError(t, err)
+	})
+
 	t.Run("set_profile_image_fails", func(t *testing.T) {
 		api := &plugintest.API{}
 		defaultLogMocks(api)

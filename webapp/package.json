@@ -12,8 +12,8 @@
     "test-ci": "playwright test --config=playwright.config.ts",
     "test:pw": "playwright test --config=playwright.config.ts",
     "test:pw-ct": "playwright test --config=playwright-ct.config.ts",
-    "test:coverage": "c8 --reporter=text --reporter=html --reports-dir=coverage playwright test --config=playwright.config.ts",
-    "test:pw-ct-coverage": "c8 --reporter=text --reporter=html --reports-dir=coverage-ct playwright test --config=playwright-ct.config.ts",
+    "test:coverage": "c8 --config=c8-unit.json --reporter=text --reporter=html --reports-dir=coverage playwright test --config=playwright.config.ts",
+    "test:pw-ct-coverage": "rm -rf .v8-ct-coverage && playwright test --config=playwright-ct.config.ts && c8 report --temp-directory=.v8-ct-coverage --reports-dir=coverage-ct --reporter=text --reporter=html --exclude='**/node_modules/**'",
     "check-types": "tsc"
   },
   "devDependencies": {

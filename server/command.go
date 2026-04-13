@@ -263,6 +263,9 @@ func (p *Plugin) executeHelp() *model.CommandResponse {
 
 func (p *Plugin) executeInitTeam(args *model.CommandArgs) *model.CommandResponse {
 	if !p.isTeamAdminOrSystemAdmin(args.UserId, args.TeamId) {
+		if p.isTeamAdminInRequestMode(args.UserId, args.TeamId) {
+			return p.executeInitTeamRequest(args)
+		}
 		return respondEphemeral("You don't have permissions to run this command. You must be a team admin or system admin.")
 	}
 
@@ -301,6 +304,38 @@ func (p *Plugin) executeInitTeam(args *model.CommandArgs) *model.CommandResponse
 	return &model.CommandResponse{}
 }
 
+func (p *Plugin) executeInitTeamRequest(args *model.CommandArgs) *model.CommandResponse {
+	user, appErr := p.API.GetUser(args.UserId)
+	if appErr != nil {
+		return respondEphemeral("Failed to look up user.")
+	}
+
+	parts := strings.Fields(args.Command)
+	inputName := ""
+	if len(parts) >= 3 {
+		inputName = parts[2]
+	}
+
+	conn, allConns, resolveErr := p.resolveConnectionName(inputName, p.getAllConnectionNames())
+	if resolveErr != "" {
+		if len(allConns) == 0 {
+			return respondEphemeral("No connections configured. Add connections in the System Console first.")
+		}
+		if inputName == "" && len(allConns) > 1 {
+			p.openConnectionDialog(args.TriggerId, args.TeamId, allConns, actionInitTeam)
+			return &model.CommandResponse{}
+		}
+		return respondEphemeral("%s\n\nAvailable connections: %s", resolveErr, strings.Join(connectionDisplayNames(allConns), ", "))
+	}
+
+	msg, err := p.createConnectionRequest(user, args.TeamId, conn)
+	if err != nil {
+		return respondEphemeral("%s", err.Error())
+	}
+
+	return respondEphemeral("%s", msg)
+}
+
 func (p *Plugin) executeStatus(args *model.CommandArgs) *model.CommandResponse {
 	user, appErr := p.API.GetUser(args.UserId)
 	if appErr != nil {
@@ -315,7 +350,7 @@ func (p *Plugin) executeStatus(args *model.CommandArgs) *model.CommandResponse {
 }
 
 func (p *Plugin) executeStatusTeam(teamID, channelID string) *model.CommandResponse {
-	resp, svcErr := p.getTeamStatus(teamID)
+	resp, svcErr := p.getTeamStatus(teamID, nil)
 	if svcErr != nil {
 		return respondEphemeral("%s", svcErr.Message)
 	}
@@ -591,7 +626,9 @@ func (p *Plugin) executeTeardownChannel(args *model.CommandArgs) *model.CommandR
 
 func (p *Plugin) executeTeardownTeam(args *model.CommandArgs) *model.CommandResponse {
 	if !p.isTeamAdminOrSystemAdmin(args.UserId, args.TeamId) {
-		return respondEphemeral("You don't have permissions to run this command. You must be a team admin or system admin.")
+		if !p.isTeamAdminInRequestMode(args.UserId, args.TeamId) {
+			return respondEphemeral("You don't have permissions to run this command. You must be a team admin or system admin.")
+		}
 	}
 
 	user, appErr := p.API.GetUser(args.UserId)
@@ -625,6 +662,8 @@ func (p *Plugin) executeTeardownTeam(args *model.CommandArgs) *model.CommandResp
 	if _, svcErr := p.teardownTeamForCrossGuard(user, args.TeamId, connName); svcErr != nil {
 		return respondEphemeral("%s", svcErr.Message)
 	}
+
+	p.cancelPendingConnectionRequest(args.TeamId, connKey(connName))
 
 	return &model.CommandResponse{}
 }

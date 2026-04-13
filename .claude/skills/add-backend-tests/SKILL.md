@@ -30,15 +30,15 @@ make coverage-backend 2>&1
 **Apply a two-gate check before exiting early.** Only stop here if BOTH gates pass:
 
 1. **Overall gate**: total coverage is ≥ 90%.
-2. **Per-file floor gate**: no individual source file (excluding `*_test.go` files) is below 70%.
+2. **Per-file floor gate**: no individual source file (excluding `*_test.go` files) is below 80%.
 
 If both gates pass, report the overall number plus the lowest per-file coverage, congratulate the user, and exit plan mode. No additional tests are needed.
 
-If the overall gate passes but one or more files are under the 70% per-file floor, do NOT exit early. Treat those under-floor files as the priority targets for this run, even though overall coverage looks healthy. A high average can hide a single poorly-tested file.
+If the overall gate passes but one or more files are under the 80% per-file floor, do NOT exit early. Treat those under-floor files as the priority targets for this run, even though overall coverage looks healthy. A high average can hide a single poorly-tested file.
 
-Quick way to list files below the 70% per-file floor (skipping test files):
+Quick way to list files below the 80% per-file floor (skipping test files):
 ```bash
-make coverage-backend 2>&1 | awk '/\.go:/ && $NF ~ /%$/ {sub("%","",$NF); pkg=$1; sub(":.*","",pkg); cov[pkg]+=$NF; n[pkg]++} END {for (f in cov) if (cov[f]/n[f] < 70 && f !~ /_test\.go$/) printf "%-60s %.1f%%\n", f, cov[f]/n[f]}' | sort -k2 -n
+make coverage-backend 2>&1 | awk '/\.go:/ && $NF ~ /%$/ {sub("%","",$NF); pkg=$1; sub(":.*","",pkg); cov[pkg]+=$NF; n[pkg]++} END {for (f in cov) if (cov[f]/n[f] < 80 && f !~ /_test\.go$/) printf "%-60s %.1f%%\n", f, cov[f]/n[f]}' | sort -k2 -n
 ```
 
 If either gate fails, parse the output to build a prioritized list:

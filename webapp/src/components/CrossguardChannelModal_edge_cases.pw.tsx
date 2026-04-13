@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import CrossguardChannelModal from './CrossguardChannelModal';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 function statusResponse(overrides?: any) {
     return {channel_id: 'ch1', channel_name: 'town-square', channel_display_name: 'Town Square', team_name: 'Test Team', team_connections: [], ...overrides};

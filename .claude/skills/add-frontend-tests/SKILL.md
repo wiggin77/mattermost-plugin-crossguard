@@ -21,24 +21,26 @@ Call `EnterPlanMode` to ensure no edits are made during analysis.
 
 ### Step 2: Measure Current Coverage
 
-Run `make coverage-frontend` and capture the output. This runs C8 coverage for both unit tests (Playwright Test) and component tests (Playwright CT).
+Run `make coverage-frontend` and capture the output. This runs two separate coverage reports: unit test coverage and component test (CT) coverage.
 
 ```bash
 make coverage-frontend 2>&1
 ```
 
 This executes two commands:
-- `npm run test:coverage` - unit tests (`.spec.ts`) with C8, reports to `webapp/coverage/`
-- `npm run test:pw-ct-coverage` - component tests (`.pw.tsx`) with C8, reports to `webapp/coverage-ct/`
+- `npm run test:coverage` - unit tests (`.spec.ts`) with C8 line coverage, reports to `webapp/coverage/`
+- `npm run test:pw-ct-coverage` - component tests (`.pw.tsx`) with V8 browser coverage collected via a custom Playwright fixture, reported to `webapp/coverage-ct/`
+
+Both produce real line-level coverage numbers. The CT coverage works by using the CDP Coverage API to capture V8 coverage from Chromium, fetching Vite source maps, and feeding both to c8 report for source-map resolution.
 
 **Two-gate exit check.** Only stop if BOTH gates pass:
 
-1. **Overall gate**: total coverage is ≥ 90%.
-2. **Per-file floor gate**: no individual source file is below 70% coverage. When evaluating this gate, exclude test files and test utilities: any `*.pw.tsx`, any `*.spec.ts`, and anything under `test-utils/`.
+1. **Overall gate**: total coverage across both reports is ≥ 90%.
+2. **Per-file floor gate**: no individual source file (in either report) is below 80% coverage. When evaluating this gate, exclude test files and test utilities: any `*.pw.tsx`, any `*.spec.ts`, and anything under `test-utils/`.
 
-If both gates pass, report the overall coverage number plus confirmation that every non-test source file is at or above the 70% floor, congratulate the user, and exit plan mode. No additional tests are needed.
+If both gates pass, report the overall coverage number plus confirmation that every non-test source file is at or above the 80% floor, congratulate the user, and exit plan mode. No additional tests are needed.
 
-If either gate fails (overall < 90%, OR any non-test source file < 70%), parse the C8 text output to build a prioritized list:
+If either gate fails (overall < 90%, OR any non-test source file < 80%), parse the C8 text output to build a prioritized list:
 - **Tier 1**: Files/functions at 0% coverage (completely untested)
 - **Tier 2**: Files/functions below 60% coverage (significant gaps)
 - **Tier 3**: Files/functions below 80% coverage (moderate gaps)

@@ -84,6 +84,9 @@ type flexibleKVStore struct {
 	setTeamRewriteIndexFn           func(string, string, string) error
 	deleteTeamRewriteIndexFn        func(string, string) error
 	isDeletingFlagSetFn             func(string) (bool, error)
+	getConnectionRequestFn          func(string, string) (*store.ConnectionRequest, error)
+	createConnectionRequestFn       func(string, string, *store.ConnectionRequest) (bool, error)
+	deleteConnectionRequestFn       func(string, string) error
 }
 
 func (s *flexibleKVStore) GetTeamConnections(teamID string) ([]store.TeamConnection, error) {
@@ -245,6 +248,27 @@ func (s *flexibleKVStore) IsDeletingFlagSet(postID string) (bool, error) {
 		return s.isDeletingFlagSetFn(postID)
 	}
 	return s.testKVStore.IsDeletingFlagSet(postID)
+}
+
+func (s *flexibleKVStore) GetConnectionRequest(teamID, connKey string) (*store.ConnectionRequest, error) {
+	if s.getConnectionRequestFn != nil {
+		return s.getConnectionRequestFn(teamID, connKey)
+	}
+	return nil, nil
+}
+
+func (s *flexibleKVStore) CreateConnectionRequest(teamID, connKey string, req *store.ConnectionRequest) (bool, error) {
+	if s.createConnectionRequestFn != nil {
+		return s.createConnectionRequestFn(teamID, connKey, req)
+	}
+	return true, nil
+}
+
+func (s *flexibleKVStore) DeleteConnectionRequest(teamID, connKey string) error {
+	if s.deleteConnectionRequestFn != nil {
+		return s.deleteConnectionRequestFn(teamID, connKey)
+	}
+	return nil
 }
 
 // setupTestPluginWithRouter creates a Plugin with the router initialized and

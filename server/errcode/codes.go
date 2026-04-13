@@ -280,6 +280,27 @@ const (
 	StoreCachePublishInvalidationFailed = 23000
 )
 
+// request.go (24000-24999)
+const (
+	RequestGetFailed             = 24000
+	RequestGetDMChannelFailed    = 24002
+	RequestCreateDMPostFailed    = 24003
+	RequestSaveFailed            = 24004
+	RequestApproveGetFailed      = 24005
+	RequestApproveExecFailed     = 24006
+	RequestApproveDeleteFailed   = 24007
+	RequestApproveNotifyFailed   = 24008
+	RequestDenyDialogFailed      = 24009
+	RequestDenyGetFailed         = 24010
+	RequestDenyDeleteFailed      = 24011
+	RequestDenyNotifyFailed      = 24012
+	RequestUpdatePostFailed      = 24013
+	RequestNoSystemAdmins        = 24014
+	RequestConnRemovedFromConfig = 24015
+	RequestConfirmDMFailed       = 24016
+	RequestNoAdminsNotified      = 24017
+)
+
 // AllCodes lists every code declared in this package. Used by
 // TestCodesUnique to assert that no two call sites share a value.
 // Keep in sync when adding new constants.
@@ -513,4 +534,22 @@ var AllCodes = []int{
 	RetryDispatchDropMaxRetries,
 
 	StoreCachePublishInvalidationFailed,
+
+	RequestGetFailed,
+	RequestGetDMChannelFailed,
+	RequestCreateDMPostFailed,
+	RequestSaveFailed,
+	RequestApproveGetFailed,
+	RequestApproveExecFailed,
+	RequestApproveDeleteFailed,
+	RequestApproveNotifyFailed,
+	RequestDenyDialogFailed,
+	RequestDenyGetFailed,
+	RequestDenyDeleteFailed,
+	RequestDenyNotifyFailed,
+	RequestUpdatePostFailed,
+	RequestNoSystemAdmins,
+	RequestConnRemovedFromConfig,
+	RequestConfirmDMFailed,
+	RequestNoAdminsNotified,
 }

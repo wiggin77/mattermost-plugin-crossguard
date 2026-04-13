@@ -1712,3 +1712,146 @@ func TestProviderDetails(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// executeInitTeamRequest
+// ---------------------------------------------------------------------------
+
+func TestExecuteInitTeamRequest(t *testing.T) {
+	t.Run("GetUser error returns ephemeral", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, _ := setupTestPluginWithRouter(api)
+		p.setConfiguration(singleOutboundConfig())
+
+		api.On("GetUser", "user-id").
+			Return(nil, &mmModel.AppError{Message: "user not found"})
+
+		args := &mmModel.CommandArgs{
+			Command: "/crossguard init-request",
+			UserId:  "user-id",
+			TeamId:  "team-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Contains(t, resp.Text, "Failed to look up user")
+	})
+
+	t.Run("no connections configured returns ephemeral", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, _ := setupTestPluginWithRouter(api)
+		p.setConfiguration(&configuration{})
+
+		api.On("GetUser", "user-id").
+			Return(&mmModel.User{Id: "user-id", Username: "tester"}, nil)
+
+		args := &mmModel.CommandArgs{
+			Command: "/crossguard init-request",
+			UserId:  "user-id",
+			TeamId:  "team-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Contains(t, resp.Text, "No connections configured")
+	})
+
+	t.Run("multiple connections without input opens dialog", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, _ := setupTestPluginWithRouter(api)
+		p.setConfiguration(multiConnectionConfig())
+
+		api.On("GetUser", "user-id").
+			Return(&mmModel.User{Id: "user-id", Username: "tester"}, nil)
+		api.On("OpenInteractiveDialog", mock.Anything).Return(nil)
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-request",
+			UserId:    "user-id",
+			TeamId:    "team-id",
+			TriggerId: "trigger-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Empty(t, resp.Text)
+		api.AssertCalled(t, "OpenInteractiveDialog", mock.Anything)
+	})
+
+	t.Run("invalid connection name returns available connections", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, _ := setupTestPluginWithRouter(api)
+		p.setConfiguration(singleOutboundConfig())
+
+		api.On("GetUser", "user-id").
+			Return(&mmModel.User{Id: "user-id", Username: "tester"}, nil)
+
+		args := &mmModel.CommandArgs{
+			Command: "/crossguard init-request badname",
+			UserId:  "user-id",
+			TeamId:  "team-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Contains(t, resp.Text, "connection not found")
+		assert.Contains(t, resp.Text, "Available connections")
+	})
+
+	t.Run("createConnectionRequest error returns ephemeral", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+		p.setConfiguration(singleOutboundConfig())
+
+		api.On("GetUser", "user-id").
+			Return(&mmModel.User{Id: "user-id", Username: "tester"}, nil)
+
+		kvs.getConnectionRequestFn = func(_, _ string) (*store.ConnectionRequest, error) {
+			return nil, fmt.Errorf("kv error")
+		}
+
+		args := &mmModel.CommandArgs{
+			Command: "/crossguard init-request",
+			UserId:  "user-id",
+			TeamId:  "team-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Contains(t, resp.Text, "failed to check existing requests")
+	})
+
+	t.Run("happy path returns success message", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+		p.setConfiguration(singleOutboundConfig())
+
+		api.On("GetUser", "user-id").
+			Return(&mmModel.User{Id: "user-id", Username: "tester"}, nil)
+		api.On("GetTeam", "team-id").
+			Return(&mmModel.Team{Id: "team-id", Name: "test-team", DisplayName: "Test Team"}, nil)
+		api.On("GetUsers", &mmModel.UserGetOptions{
+			Role: mmModel.SystemAdminRoleId, Page: 0, PerPage: 100,
+		}).Return([]*mmModel.User{{Id: "admin1", Username: "admin1"}}, nil)
+		api.On("GetUsers", &mmModel.UserGetOptions{
+			Role: mmModel.SystemAdminRoleId, Page: 1, PerPage: 100,
+		}).Return([]*mmModel.User{}, nil)
+		api.On("GetDirectChannel", "bot-user-id", "admin1").
+			Return(&mmModel.Channel{Id: "dm-chan-1"}, nil)
+		api.On("GetDirectChannel", "bot-user-id", "user-id").
+			Return(&mmModel.Channel{Id: "requester-dm"}, nil)
+		api.On("CreatePost", mock.Anything).
+			Return(&mmModel.Post{Id: "post-1"}, nil)
+
+		kvs.getConnectionRequestFn = func(_, _ string) (*store.ConnectionRequest, error) {
+			return nil, nil
+		}
+		kvs.createConnectionRequestFn = func(_, _ string, _ *store.ConnectionRequest) (bool, error) {
+			return true, nil
+		}
+
+		args := &mmModel.CommandArgs{
+			Command: "/crossguard init-request",
+			UserId:  "user-id",
+			TeamId:  "team-id",
+		}
+		resp := p.executeInitTeamRequest(args)
+		assert.Contains(t, resp.Text, "has been submitted for system admin approval")
+	})
+}

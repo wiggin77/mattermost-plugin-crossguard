@@ -29,6 +29,7 @@ type TeamStatusResponse struct {
 	Initialized       bool                   `json:"initialized"`
 	LinkedConnections []store.TeamConnection `json:"linked_connections"`
 	Connections       []ConnectionStatus     `json:"connections"`
+	RequestMode       bool                   `json:"request_mode,omitempty"`
 }
 
 // TeamStatusEntry represents one initialized team in the global status response.
@@ -78,6 +79,86 @@ func connectionDisplayNames(conns []store.TeamConnection) []string {
 		names[i] = connKey(tc)
 	}
 	return names
+}
+
+// teamTownSquareLink returns a Markdown link to a team's Town Square channel.
+func teamTownSquareLink(team *model.Team) string {
+	return fmt.Sprintf("[**%s**](/%s/channels/town-square)", team.DisplayName, team.Name)
+}
+
+// connDetails holds resolved display properties for a connection key.
+type connDetails struct {
+	direction string
+	provider  string
+	msgFmt    string
+	files     string
+}
+
+// resolveConnDetails extracts display properties for a connection key from the
+// connection config map, applying defaults for missing values.
+func resolveConnDetails(ck string, connMap map[string]ConnectionConfig) connDetails {
+	d := connDetails{
+		direction: strings.SplitN(ck, ":", 2)[0],
+	}
+	if cc, ok := connMap[ck]; ok {
+		d.provider = cc.Provider
+		d.msgFmt = cc.MessageFormat
+		d.files = "Disabled"
+		if cc.FileTransferEnabled {
+			d.files = "Enabled"
+			if cc.FileFilterMode != "" && cc.FileFilterTypes != "" {
+				d.files += fmt.Sprintf(" (%s: %s)", cc.FileFilterMode, cc.FileFilterTypes)
+			}
+		}
+	}
+	if d.provider == "" {
+		d.provider = "nats"
+	}
+	if d.msgFmt == "" {
+		d.msgFmt = "json"
+	}
+	return d
+}
+
+// writeConnDetailRows appends the standard connection detail table rows to a
+// strings.Builder.
+func writeConnDetailRows(sb *strings.Builder, teamLink, ck string, d connDetails) {
+	fmt.Fprintf(sb, "| **Team** | %s |\n", teamLink)
+	fmt.Fprintf(sb, "| **Connection** | `%s` |\n", ck)
+	fmt.Fprintf(sb, "| **Direction** | %s |\n", d.direction)
+	fmt.Fprintf(sb, "| **Provider** | %s |\n", d.provider)
+	fmt.Fprintf(sb, "| **Message format** | %s |\n", d.msgFmt)
+	if d.files != "" {
+		fmt.Fprintf(sb, "| **File transfer** | %s |\n", d.files)
+	}
+}
+
+// buildRequestDMMessage builds the full Markdown message for a connection link
+// request DM sent to system admins. It consolidates all request details into a
+// single table.
+func buildRequestDMMessage(userLabel, teamLink, ck string, connMap map[string]ConnectionConfig) string {
+	d := resolveConnDetails(ck, connMap)
+
+	var sb strings.Builder
+	sb.WriteString("#### :link: Connection Link Request\n\n")
+	sb.WriteString("| Property | Details |\n|:--|:--|\n")
+	fmt.Fprintf(&sb, "| **Requested by** | %s |\n", userLabel)
+	writeConnDetailRows(&sb, teamLink, ck, d)
+
+	return sb.String()
+}
+
+// buildRequestConfirmationMessage builds a Markdown message sent to the
+// requester confirming their link request has been submitted.
+func buildRequestConfirmationMessage(teamLink, ck string, connMap map[string]ConnectionConfig) string {
+	d := resolveConnDetails(ck, connMap)
+
+	var sb strings.Builder
+	sb.WriteString("#### :link: Connection Link Request Submitted\n\n")
+	sb.WriteString("Your request has been sent to system admins for approval.\n\n")
+	sb.WriteString("| Property | Details |\n|:--|:--|\n")
+	writeConnDetailRows(&sb, teamLink, ck, d)
+	return sb.String()
 }
 
 func addCrossguardHeaderPrefix(header string) string {
@@ -168,7 +249,8 @@ func (p *Plugin) initTeamForCrossGuard(user *model.User, teamID string, conn sto
 }
 
 // getTeamStatus returns the initialization status and linked connections for a team.
-func (p *Plugin) getTeamStatus(teamID string) (*TeamStatusResponse, *apiError) {
+// If callingUser is non-nil, RequestMode and RequestPending fields are populated.
+func (p *Plugin) getTeamStatus(teamID string, callingUser *model.User) (*TeamStatusResponse, *apiError) {
 	team, appErr := p.API.GetTeam(teamID)
 	if appErr != nil {
 		return nil, &apiError{Message: "team not found", Status: 404}
@@ -207,13 +289,16 @@ func (p *Plugin) getTeamStatus(teamID string) (*TeamStatusResponse, *apiError) {
 		linkedSet[connKey(tc)] = struct{}{}
 	}
 
+	cfg := p.getConfiguration()
+	checkPending := cfg.isRequestMode()
+
 	statuses := make([]ConnectionStatus, 0, len(relevantKeys))
 	for _, key := range relevantKeys {
 		tc := connSet[key]
 		_, inConfig := configSet[key]
 		_, isLinked := linkedSet[key]
 		cc := connMap[key]
-		statuses = append(statuses, ConnectionStatus{
+		cs := ConnectionStatus{
 			Name:                tc.Connection,
 			Direction:           tc.Direction,
 			Provider:            cc.Provider,
@@ -224,17 +309,34 @@ func (p *Plugin) getTeamStatus(teamID string) (*TeamStatusResponse, *apiError) {
 			FileFilterMode:      cc.FileFilterMode,
 			FileFilterTypes:     cc.FileFilterTypes,
 			MessageFormat:       cc.MessageFormat,
-		})
+		}
+		if checkPending && !isLinked {
+			req, reqErr := p.kvstore.GetConnectionRequest(teamID, key)
+			if reqErr != nil {
+				p.API.LogWarn("Failed to check pending connection request",
+					"error_code", errcode.RequestGetFailed,
+					"team_id", teamID, "conn_key", key, "error", reqErr.Error())
+			} else if req != nil {
+				cs.RequestPending = true
+			}
+		}
+		statuses = append(statuses, cs)
 	}
 
-	return &TeamStatusResponse{
+	resp := &TeamStatusResponse{
 		TeamID:            team.Id,
 		TeamName:          team.Name,
 		TeamDisplayName:   team.DisplayName,
 		Initialized:       len(conns) > 0,
 		LinkedConnections: conns,
 		Connections:       statuses,
-	}, nil
+	}
+
+	if callingUser != nil {
+		resp.RequestMode = cfg.isRequestMode() && !callingUser.IsSystemAdmin()
+	}
+
+	return resp, nil
 }
 
 // getGlobalStatus returns the status of all initialized teams and redacted connections.
@@ -321,6 +423,7 @@ type ConnectionStatus struct {
 	FileFilterMode      string `json:"file_filter_mode,omitempty"`
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
 	MessageFormat       string `json:"message_format,omitempty"`
+	RequestPending      bool   `json:"request_pending,omitempty"`
 }
 
 // getChannelStatus returns the connection status for a channel, showing

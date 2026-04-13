@@ -17,6 +17,7 @@ type Client struct {
 	connPromptPrefix     string
 	chanConnPromptPrefix string
 	rewriteIndexPrefix   string
+	connRequestPrefix    string
 }
 
 // NewKVStore creates a new KV store client.
@@ -29,6 +30,7 @@ func NewKVStore(client *pluginapi.Client, pluginID string) KVStore {
 		connPromptPrefix:     pluginID + "-connprompt-",
 		chanConnPromptPrefix: pluginID + "-chanprompt-",
 		rewriteIndexPrefix:   pluginID + "-rwi-",
+		connRequestPrefix:    pluginID + "-connreq-",
 	}
 }
 
@@ -366,6 +368,37 @@ func (kv Client) CreateChannelConnectionPrompt(channelID, connName string, promp
 		return false, errors.Wrap(err, "failed to create channel connection prompt")
 	}
 	return saved, nil
+}
+
+// GetConnectionRequest retrieves a pending connection request for a team+connKey.
+func (kv Client) GetConnectionRequest(teamID, connKey string) (*ConnectionRequest, error) {
+	var req ConnectionRequest
+	err := kv.client.KV.Get(kv.connRequestPrefix+teamID+"-"+connKey, &req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get connection request")
+	}
+	if req.RequesterID == "" {
+		return nil, nil
+	}
+	return &req, nil
+}
+
+// CreateConnectionRequest atomically creates a connection request only if none exists.
+// Returns true if created, false if a request already exists.
+func (kv Client) CreateConnectionRequest(teamID, connKey string, req *ConnectionRequest) (bool, error) {
+	saved, err := kv.client.KV.Set(kv.connRequestPrefix+teamID+"-"+connKey, req, pluginapi.SetAtomic(nil))
+	if err != nil {
+		return false, errors.Wrap(err, "failed to create connection request")
+	}
+	return saved, nil
+}
+
+// DeleteConnectionRequest removes a pending connection request.
+func (kv Client) DeleteConnectionRequest(teamID, connKey string) error {
+	if err := kv.client.KV.Delete(kv.connRequestPrefix + teamID + "-" + connKey); err != nil {
+		return errors.Wrap(err, "failed to delete connection request")
+	}
+	return nil
 }
 
 func rewriteIndexKey(prefix, connName, remoteTeamName string) string {

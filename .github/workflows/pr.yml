@@ -34,8 +34,12 @@ jobs:
       - name: Run style checks
         run: make check-style
 
+      - name: Install Playwright browsers
+        run: cd webapp && npx playwright install --with-deps chromium
+
       - name: Run tests
         run: make test
+        timeout-minutes: 10
 
       - name: Build plugin
         run: make dist

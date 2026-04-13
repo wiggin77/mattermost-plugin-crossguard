@@ -36,6 +36,9 @@ func (p *Plugin) initAPI() {
 	router.HandleFunc("/api/v1/prompt/block", p.handlePromptBlock).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/prompt/channel/accept", p.handleChannelPromptAccept).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/prompt/channel/block", p.handleChannelPromptBlock).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/request/approve", p.handleRequestApprove).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/request/deny", p.handleRequestDeny).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/request/deny-submit", p.handleRequestDenySubmit).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/status", p.handleGlobalStatus).Methods(http.MethodGet)
 	router.HandleFunc("/api/v1/teams/{team_id}/status", p.handleTeamStatus).Methods(http.MethodGet)
 	router.HandleFunc("/api/v1/channels/{channel_id}/status", p.handleChannelStatus).Methods(http.MethodGet)
@@ -367,6 +370,28 @@ func (p *Plugin) handleInitTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !p.isTeamAdminOrSystemAdmin(user.Id, teamID) {
+		if p.isTeamAdminInRequestMode(user.Id, teamID) {
+			conn, allConns, resolveErr := p.resolveConnectionName(r.URL.Query().Get("connection_name"), p.getAllConnectionNames())
+			if resolveErr != "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error":       resolveErr,
+					"connections": connectionDisplayNames(allConns),
+				})
+				return
+			}
+			msg, err := p.createConnectionRequest(user, teamID, conn)
+			if err != nil {
+				writeJSONError(w, err.Error(), http.StatusConflict)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":          "request_submitted",
+				"message":         msg,
+				"team_id":         teamID,
+				"connection_name": connKey(conn),
+			})
+			return
+		}
 		writeJSONError(w, "insufficient permissions", http.StatusForbidden)
 		return
 	}
@@ -517,8 +542,10 @@ func (p *Plugin) handleTeardownTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !p.isTeamAdminOrSystemAdmin(user.Id, teamID) {
-		writeJSONError(w, "insufficient permissions", http.StatusForbidden)
-		return
+		if !p.isTeamAdminInRequestMode(user.Id, teamID) {
+			writeJSONError(w, "insufficient permissions", http.StatusForbidden)
+			return
+		}
 	}
 
 	teamConns, err := p.kvstore.GetTeamConnections(teamID)
@@ -544,6 +571,8 @@ func (p *Plugin) handleTeardownTeam(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, svcErr.Message, svcErr.Status)
 		return
 	}
+
+	p.cancelPendingConnectionRequest(teamID, connKey(connName))
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":          "ok",
@@ -625,8 +654,21 @@ func (p *Plugin) handleDialogSelectConnection(w http.ResponseWriter, r *http.Req
 	switch action {
 	case actionInitTeam, actionTeardownTeam:
 		if !p.isTeamAdminOrSystemAdmin(userID, targetID) {
-			writeJSONError(w, "insufficient permissions", http.StatusForbidden)
-			return
+			if action == actionInitTeam && p.isTeamAdminInRequestMode(userID, targetID) {
+				msg, err := p.createConnectionRequest(user, targetID, connName)
+				if err != nil {
+					responseText = err.Error()
+				} else {
+					responseText = msg
+				}
+				break
+			}
+			if action == actionTeardownTeam && p.isTeamAdminInRequestMode(userID, targetID) {
+				// Team admins in request mode can unlink directly; fall through.
+			} else {
+				writeJSONError(w, "insufficient permissions", http.StatusForbidden)
+				return
+			}
 		}
 		if action == actionInitTeam {
 			team, alreadyLinked, svcErr := p.initTeamForCrossGuard(user, targetID, connName)
@@ -643,6 +685,7 @@ func (p *Plugin) handleDialogSelectConnection(w http.ResponseWriter, r *http.Req
 			if svcErr != nil {
 				responseText = svcErr.Message
 			} else {
+				p.cancelPendingConnectionRequest(targetID, connKey(connName))
 				responseText = fmt.Sprintf("Connection `%s` unlinked from this team successfully.", displayName)
 			}
 		}
@@ -708,7 +751,7 @@ func (p *Plugin) handleTeamStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, svcErr := p.getTeamStatus(teamID)
+	resp, svcErr := p.getTeamStatus(teamID, user)
 	if svcErr != nil {
 		writeJSONError(w, svcErr.Message, svcErr.Status)
 		return

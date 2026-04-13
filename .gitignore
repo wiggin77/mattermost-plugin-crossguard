@@ -4,6 +4,7 @@ coverage.txt
 coverage.out
 webapp/coverage/
 webapp/coverage-ct/
+webapp/.v8-ct-coverage/
 webapp/src/manifest.ts
 server/manifest.go
 

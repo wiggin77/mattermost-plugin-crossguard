@@ -187,6 +187,19 @@
   "connection_name": "outbound:relay-to-b"
 }</code></pre>
 
+                <h4>Request Mode Response - 200</h4>
+                <p>
+                    When the caller is a Team Admin and both <code>RestrictToSystemAdmins</code> and
+                    <code>AllowTeamAdminRequests</code> are enabled, the endpoint submits a link request
+                    instead of linking directly:
+                </p>
+<pre><code>{
+  "status": "request_submitted",
+  "message": "Your request to link connection `outbound:relay-to-b` ...",
+  "team_id": "abc123...",
+  "connection_name": "outbound:relay-to-b"
+}</code></pre>
+
                 <h4>Error Responses</h4>
                 <table>
                     <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
@@ -194,6 +207,7 @@
                         <tr><td><code>400</code></td><td>Invalid team_id, no connections configured, or connection not found (includes <code>connections</code> array of available names)</td></tr>
                         <tr><td><code>403</code></td><td>Insufficient permissions</td></tr>
                         <tr><td><code>404</code></td><td>Team not found</td></tr>
+                        <tr><td><code>409</code></td><td>A request is already pending for this connection (request mode only)</td></tr>
                         <tr><td><code>500</code></td><td>Internal error</td></tr>
                     </tbody>
                 </table>
@@ -207,7 +221,10 @@
                 <span class="permission-tag permission-teamadmin">Team Admin+</span>
             </div>
             <div class="endpoint-card-body">
-                <p>Unlink a connection from a team.</p>
+                <p>
+                    Unlink a connection from a team. If a pending connection link request exists for the
+                    same team and connection, it is automatically cancelled.
+                </p>
 
                 <h4>Path Parameters</h4>
                 <table class="field-table">
@@ -388,6 +405,7 @@
   "team_name": "test-a",
   "team_display_name": "Test A",
   "initialized": true,
+  "request_mode": false,
   "linked_connections": [
     {"direction": "outbound", "connection": "relay-to-b"}
   ],
@@ -397,6 +415,7 @@
       "direction": "outbound",
       "linked": true,
       "orphaned": false,
+      "request_pending": false,
       "file_transfer_enabled": true,
       "file_filter_mode": "allow",
       "file_filter_types": ".pdf,.docx",
@@ -410,6 +429,8 @@
                     <tbody>
                         <tr><td><code>orphaned</code></td><td><code>true</code> when the connection is linked to the team but no longer exists in the plugin configuration.</td></tr>
                         <tr><td><code>remote_team_name</code></td><td>Set when a team name rewrite is configured for this inbound connection.</td></tr>
+                        <tr><td><code>request_mode</code></td><td><code>true</code> when the calling user is a Team Admin and the plugin is in request mode (<code>RestrictToSystemAdmins</code> + <code>AllowTeamAdminRequests</code> both enabled). Omitted for System Admins.</td></tr>
+                        <tr><td><code>request_pending</code></td><td><code>true</code> when a link request is pending for this unlinked connection. Only populated when the plugin is in request mode.</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -629,6 +650,96 @@
 <pre><code>{"channel_id": "...", "conn_name": "..."}</code></pre>
 
                 <p>Sets channel prompt state to <code>blocked</code> and updates the post.</p>
+            </div>
+        </div>
+
+        <!-- Connection Requests -->
+        <h2>Connection Requests</h2>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Note</p>
+            <p>
+                These endpoints are called by interactive buttons in connection request DMs sent to
+                System Admins. They are not intended to be called directly. Requests are created when
+                a Team Admin runs <code>/crossguard init-team</code> (or the REST equivalent) while
+                the plugin is in request mode (<code>RestrictToSystemAdmins</code> +
+                <code>AllowTeamAdminRequests</code> both enabled).
+            </p>
+        </div>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/request/approve</span>
+                <span class="permission-tag permission-sysadmin">System Admin</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Approve a pending connection link request. Links the connection to the team, deletes the request, updates all admin DM posts, and notifies the requester.</p>
+
+                <h4>Request Body</h4>
+                <p><code>PostActionIntegrationRequest</code> with context:</p>
+<pre><code>{"team_id": "...", "conn_key": "..."}</code></pre>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Executes the team init (same as a direct System Admin link)</li>
+                    <li>Removes Approve/Deny buttons from all admin DM posts for this request</li>
+                    <li>Sends DM to requester confirming approval</li>
+                    <li>If the connection was removed from config while pending, cancels the request and notifies the requester</li>
+                </ul>
+
+                <p>Returns a <code>PostActionIntegrationResponse</code>.</p>
+            </div>
+        </div>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/request/deny</span>
+                <span class="permission-tag permission-sysadmin">System Admin</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Deny a pending connection link request. Opens an interactive dialog for the admin to provide an optional reason.</p>
+
+                <h4>Request Body</h4>
+                <p><code>PostActionIntegrationRequest</code> with context:</p>
+<pre><code>{"team_id": "...", "conn_key": "..."}</code></pre>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Opens a dialog with an optional "Reason for denial" text area</li>
+                    <li>Dialog submission is handled by <code>/api/v1/request/deny-submit</code></li>
+                </ul>
+
+                <p>Returns a <code>PostActionIntegrationResponse</code>.</p>
+            </div>
+        </div>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/request/deny-submit</span>
+                <span class="permission-tag permission-sysadmin">System Admin</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Dialog submission handler for deny with optional reason.</p>
+
+                <h4>Request Body</h4>
+                <p><code>SubmitDialogRequest</code> with:</p>
+                <ul>
+                    <li><code>state</code>: <code>team_id|conn_key</code></li>
+                    <li><code>submission.reason</code>: optional denial reason text</li>
+                </ul>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Deletes the pending request</li>
+                    <li>Removes Approve/Deny buttons from all admin DM posts for this request</li>
+                    <li>Sends DM to requester with denial and optional reason</li>
+                    <li>If the dialog was cancelled, does nothing</li>
+                </ul>
+
+                <p>Returns <code>200</code> on success.</p>
             </div>
         </div>
 

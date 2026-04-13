@@ -5,6 +5,16 @@ const (
 	PromptStateBlocked = "blocked"
 )
 
+// ConnectionRequest represents a pending team admin request for a system admin
+// to approve linking a connection to a team.
+type ConnectionRequest struct {
+	RequesterID string   `json:"requester_id"`
+	TeamID      string   `json:"team_id"`
+	ConnKey     string   `json:"conn_key"`
+	PostIDs     []string `json:"post_ids"`
+	CreatedAt   int64    `json:"created_at"`
+}
+
 // ConnectionPrompt represents a pending or blocked inbound connection prompt.
 type ConnectionPrompt struct {
 	State  string `json:"state"`
@@ -58,4 +68,7 @@ type KVStore interface {
 	GetTeamRewriteIndex(connName, remoteTeamName string) (string, error)
 	SetTeamRewriteIndex(connName, remoteTeamName, localTeamID string) error
 	DeleteTeamRewriteIndex(connName, remoteTeamName string) error
+	GetConnectionRequest(teamID, connKey string) (*ConnectionRequest, error)
+	CreateConnectionRequest(teamID, connKey string, req *ConnectionRequest) (bool, error)
+	DeleteConnectionRequest(teamID, connKey string) error
 }

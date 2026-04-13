@@ -379,6 +379,54 @@ func TestIsRestrictedToSystemAdmins(t *testing.T) {
 	})
 }
 
+func TestIsTeamAdminRequestsAllowed(t *testing.T) {
+	t.Run("nil defaults to false", func(t *testing.T) {
+		cfg := &configuration{}
+		assert.False(t, cfg.isTeamAdminRequestsAllowed())
+	})
+
+	t.Run("explicitly true", func(t *testing.T) {
+		cfg := &configuration{AllowTeamAdminRequests: new(true)}
+		assert.True(t, cfg.isTeamAdminRequestsAllowed())
+	})
+
+	t.Run("explicitly false", func(t *testing.T) {
+		cfg := &configuration{AllowTeamAdminRequests: new(false)}
+		assert.False(t, cfg.isTeamAdminRequestsAllowed())
+	})
+}
+
+func TestIsRequestMode(t *testing.T) {
+	t.Run("both enabled", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins: new(true),
+			AllowTeamAdminRequests: new(true),
+		}
+		assert.True(t, cfg.isRequestMode())
+	})
+
+	t.Run("restrict only", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins: new(true),
+			AllowTeamAdminRequests: new(false),
+		}
+		assert.False(t, cfg.isRequestMode())
+	})
+
+	t.Run("allow only", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins: new(false),
+			AllowTeamAdminRequests: new(true),
+		}
+		assert.False(t, cfg.isRequestMode())
+	})
+
+	t.Run("both nil", func(t *testing.T) {
+		cfg := &configuration{}
+		assert.False(t, cfg.isRequestMode())
+	})
+}
+
 func TestIsTestMessage(t *testing.T) {
 	t.Run("valid test message is detected via JSON", func(t *testing.T) {
 		env := &model.Envelope{

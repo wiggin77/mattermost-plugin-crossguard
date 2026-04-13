@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import PluginTestHarness from './components/PluginTestHarness';
+
+import {test, expect} from '../playwright/ct-coverage';
 
 test.describe('Plugin - uninitialize edge cases', () => {
     test('uninitialize before initialize does not throw', async ({mount, page}) => {

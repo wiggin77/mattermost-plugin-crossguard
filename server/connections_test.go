@@ -747,6 +747,23 @@ func TestCreateProvider_MissingAzureBlobConfig(t *testing.T) {
 	assert.ErrorIs(t, err, errMissingAzureBlobConfig)
 }
 
+func TestCreateProvider_NATSSuccess(t *testing.T) {
+	api := &plugintest.API{}
+	addLogMocks(api)
+	p, _ := setupTestPluginWithRouter(api)
+
+	addr := startEmbeddedNATS(t)
+	cfg := ConnectionConfig{
+		Name:     "test-conn",
+		Provider: "nats",
+		NATS:     &NATSProviderConfig{Address: addr, Subject: "crossguard.test"},
+	}
+	provider, err := p.createProvider(cfg, "Outbound")
+	require.NoError(t, err)
+	require.NotNil(t, provider)
+	_ = provider.Close()
+}
+
 func TestCreateProvider_DefaultToNATS(t *testing.T) {
 	api := &plugintest.API{}
 	addLogMocks(api)

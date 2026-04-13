@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import ConnectionSettingsStory from './ConnectionSettingsStory';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 async function getCalls(page: any): Promise<{onChange: Array<{id: string; value: string}>; saveNeeded: number}> {
     return page.evaluate(() => (window as any).__testCalls);

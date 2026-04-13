@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import CrossguardTeamModal from './CrossguardTeamModal';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 function teamStatusResponse(overrides?: any) {
     return {team_id: 'team1', team_name: 'test-team', team_display_name: 'Test Team', initialized: true, connections: [], ...overrides};

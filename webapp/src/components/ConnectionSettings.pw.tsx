@@ -1,8 +1,9 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import ConnectionSettings from './ConnectionSettings';
 import ConnectionSettingsStory from './ConnectionSettingsStory';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 // Shared connection fixtures
 const natsConnection = {

@@ -54,6 +54,13 @@
                         "type": "bool",
                         "default": false,
                         "help_text": "When enabled, only system admins can link or unlink connections to teams and channels. When disabled, team admins can manage team connections and channel admins can manage channel connections."
+                    },
+                    {
+                        "key": "AllowTeamAdminRequests",
+                        "display_name": "Allow Team Admins to Request Connections",
+                        "type": "bool",
+                        "default": false,
+                        "help_text": "When enabled (and 'Restrict Connection Management to System Admins' is also enabled), team admins can submit connection link requests for system admin approval via direct message and can unlink connections directly. When disabled, team admins are blocked entirely."
                     }
                 ]
             }
