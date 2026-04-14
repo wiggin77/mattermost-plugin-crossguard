@@ -21,26 +21,29 @@ Call `EnterPlanMode` to ensure no edits are made during analysis.
 
 ### Step 2: Measure Current Coverage
 
-Run `make coverage-frontend` and capture the output. This runs two separate coverage reports: unit test coverage and component test (CT) coverage.
+Run `make coverage-frontend` and capture the output. This runs three coverage reports: unit test coverage, component test (CT) coverage, and a merged report combining both.
 
 ```bash
 make coverage-frontend 2>&1
 ```
 
-This executes two commands:
+This executes three commands:
 - `npm run test:coverage` - unit tests (`.spec.ts`) with C8 line coverage, reports to `webapp/coverage/`
 - `npm run test:pw-ct-coverage` - component tests (`.pw.tsx`) with V8 browser coverage collected via a custom Playwright fixture, reported to `webapp/coverage-ct/`
+- `npm run test:coverage-merged` - combines V8 JSON from both runs into `webapp/coverage-merged/` for a single authoritative report
 
-Both produce real line-level coverage numbers. The CT coverage works by using the CDP Coverage API to capture V8 coverage from Chromium, fetching Vite source maps, and feeding both to c8 report for source-map resolution.
+Both individual reports produce real line-level coverage numbers. The CT coverage uses the CDP Coverage API to capture V8 coverage from Chromium, fetching Vite source maps, and feeding both to c8 report for source-map resolution. The merged report combines these into one number.
 
-**Two-gate exit check.** Only stop if BOTH gates pass:
+**CI environment warning.** Component test coverage collection is skipped when `CI=true` (see `webapp/playwright/ct-coverage.ts`). If you see the merged report showing very low coverage (similar to unit-only numbers), check whether CT coverage was actually collected by looking for files in `webapp/.v8-ct-coverage/`. If CT coverage was skipped, warn the user that the merged numbers only reflect unit test coverage.
 
-1. **Overall gate**: total coverage across both reports is ≥ 90%.
-2. **Per-file floor gate**: no individual source file (in either report) is below 80% coverage. When evaluating this gate, exclude test files and test utilities: any `*.pw.tsx`, any `*.spec.ts`, and anything under `test-utils/`.
+**Two-gate exit check using the MERGED report.** Only stop if BOTH gates pass:
 
-If both gates pass, report the overall coverage number plus confirmation that every non-test source file is at or above the 80% floor, congratulate the user, and exit plan mode. No additional tests are needed.
+1. **Overall gate**: total line coverage in the **merged** report (the last c8 text table in the output, under "=== Merged Coverage ===") is >= 90%.
+2. **Per-file floor gate**: no individual source file in the **merged** report is below 80% line coverage. When evaluating this gate, exclude test files and test utilities: any `*.pw.tsx`, any `*.spec.ts`, and anything under `test-utils/`.
 
-If either gate fails (overall < 90%, OR any non-test source file < 80%), parse the C8 text output to build a prioritized list:
+If both gates pass, report the merged coverage number plus confirmation that every non-test source file is at or above the 80% floor, congratulate the user, and exit plan mode. No additional tests are needed.
+
+If either gate fails (overall < 90%, OR any non-test source file < 80%), parse the **merged** C8 text output to build a prioritized list:
 - **Tier 1**: Files/functions at 0% coverage (completely untested)
 - **Tier 2**: Files/functions below 60% coverage (significant gaps)
 - **Tier 3**: Files/functions below 80% coverage (moderate gaps)
@@ -366,7 +369,7 @@ make check-style
 make coverage-frontend 2>&1
 ```
 
-Compare coverage numbers against the baseline from Step 2. If a file you targeted still shows low coverage, your tests aren't exercising the right code paths. Re-read the source and fix before marking the task complete.
+Compare the **merged** coverage numbers (under "=== Merged Coverage ===") against the baseline from Step 2. If a file you targeted still shows low coverage in the merged report, your tests aren't exercising the right code paths. Re-read the source and fix before marking the task complete.
 
 Only after all four commands succeed, call `TaskUpdate` with `status: "completed"` for that task. Then return to Step 6 and pick up the next `pending` task.
 

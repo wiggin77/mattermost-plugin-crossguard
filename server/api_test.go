@@ -1401,6 +1401,29 @@ func TestHandleTestNATSOutbound(t *testing.T) {
 
 		require.Equal(t, http.StatusBadGateway, w.Code)
 	})
+
+	t.Run("unsupported format returns build error", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		p, _ := setupTestPluginWithRouter(api)
+
+		addr := startEmbeddedNATS(t)
+		nc, err := nats.Connect(addr)
+		require.NoError(t, err)
+		defer nc.Close()
+
+		conn := ConnectionConfig{
+			NATS:          &NATSProviderConfig{Subject: "crossguard.test", Address: addr},
+			MessageFormat: "bogus-format",
+		}
+
+		w := httptest.NewRecorder()
+		p.handleTestNATSOutbound(w, nc, conn)
+
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		resp := decodeJSONResponse(t, w)
+		assert.Contains(t, resp["error"], "failed to build test message")
+	})
 }
 
 // TestHandleTestNATSConnection_EndToEnd drives handleTestNATSConnection via the
@@ -2054,6 +2077,145 @@ func TestHandleInitChannel_Additional(t *testing.T) {
 		p.ServeHTTP(nil, w, r)
 
 		require.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("channel admin request mode success", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		chanID := mmModel.NewId()
+		teamID := mmModel.NewId()
+		channelAdminUser := &mmModel.User{Id: "chanadmin-id", Roles: ""}
+		api.On("GetUser", "chanadmin-id").Return(channelAdminUser, nil)
+		api.On("GetChannel", chanID).Return(&mmModel.Channel{Id: chanID, Name: "test-chan", TeamId: teamID}, nil)
+		// isChannelAdminOrHigher: restricted mode so delegates to isTeamAdminOrSystemAdmin which returns false
+		api.On("GetTeamMember", teamID, "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		// isChannelAdminInRequestMode: checks channel membership
+		api.On("GetChannelMember", chanID, "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		// createChannelConnectionRequest internals
+		api.On("GetTeam", teamID).Return(&mmModel.Team{Id: teamID, Name: "test-team"}, nil)
+		api.On("GetChannelByName", teamID, "town-square", false).Return(&mmModel.Channel{Id: "ts-id"}, nil)
+		teamAdmin := &mmModel.User{Id: "ta-id", Username: "teamadmin"}
+		api.On("GetTeamMembers", teamID, mock.Anything, mock.Anything).Return(
+			[]*mmModel.TeamMember{{UserId: "ta-id", SchemeAdmin: true}}, nil).Once()
+		api.On("GetTeamMembers", teamID, mock.Anything, mock.Anything).Return(
+			[]*mmModel.TeamMember{}, nil).Once()
+		api.On("GetUser", "ta-id").Return(teamAdmin, nil)
+		api.On("GetDirectChannel", mock.Anything, mock.Anything).Return(&mmModel.Channel{Id: "dm-id"}, nil)
+		api.On("CreatePost", mock.Anything).Return(&mmModel.Post{Id: "post-id"}, nil)
+
+		boolTrue := true
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+		kvs.getTeamConnectionsFn = func(id string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/channels/"+chanID+"/init", nil, "chanadmin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		resp := decodeJSONResponse(t, w)
+		assert.Equal(t, "request_submitted", resp["status"])
+		assert.Equal(t, chanID, resp["channel_id"])
+	})
+
+	t.Run("channel admin request mode get team conns error returns 500", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		chanID := mmModel.NewId()
+		teamID := mmModel.NewId()
+		channelAdminUser := &mmModel.User{Id: "chanadmin-id", Roles: ""}
+		api.On("GetUser", "chanadmin-id").Return(channelAdminUser, nil)
+		api.On("GetChannel", chanID).Return(&mmModel.Channel{Id: chanID, TeamId: teamID}, nil)
+		api.On("GetTeamMember", teamID, "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", chanID, "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		boolTrue := true
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+		}
+		kvs.getTeamConnectionsFn = func(id string) ([]store.TeamConnection, error) {
+			return nil, errors.New("store error")
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/channels/"+chanID+"/init", nil, "chanadmin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+	})
+
+	t.Run("channel admin request mode resolve error returns 400", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		chanID := mmModel.NewId()
+		teamID := mmModel.NewId()
+		channelAdminUser := &mmModel.User{Id: "chanadmin-id", Roles: ""}
+		api.On("GetUser", "chanadmin-id").Return(channelAdminUser, nil)
+		api.On("GetChannel", chanID).Return(&mmModel.Channel{Id: chanID, TeamId: teamID}, nil)
+		api.On("GetTeamMember", teamID, "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", chanID, "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		boolTrue := true
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+		}
+		kvs.getTeamConnectionsFn = func(id string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{
+				{Direction: "outbound", Connection: "high"},
+				{Direction: "inbound", Connection: "high"},
+			}, nil
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/channels/"+chanID+"/init", nil, "chanadmin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		resp := decodeJSONResponse(t, w)
+		assert.NotNil(t, resp["connections"])
+	})
+
+	t.Run("channel admin request mode create request error returns 409", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		chanID := mmModel.NewId()
+		teamID := mmModel.NewId()
+		channelAdminUser := &mmModel.User{Id: "chanadmin-id", Roles: ""}
+		api.On("GetUser", "chanadmin-id").Return(channelAdminUser, nil)
+		api.On("GetChannel", chanID).Return(&mmModel.Channel{Id: chanID, TeamId: teamID}, nil)
+		api.On("GetTeamMember", teamID, "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", chanID, "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		boolTrue := true
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+		}
+		kvs.getTeamConnectionsFn = func(id string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+		// Make the request creation fail (duplicate)
+		kvs.getChannelConnectionRequestFn = func(channelID, connKey string) (*store.ConnectionRequest, error) {
+			return &store.ConnectionRequest{RequesterID: "other-user"}, nil
+		}
+
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/channels/"+chanID+"/init", nil, "chanadmin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+
+		require.Equal(t, http.StatusConflict, w.Code)
 	})
 }
 

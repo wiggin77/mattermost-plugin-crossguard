@@ -61,32 +61,36 @@ func connectToEmbeddedNATS(t *testing.T, addr, subject string) *natsProvider {
 // When a function pointer is nil, it delegates to the embedded testKVStore.
 type flexibleKVStore struct {
 	*testKVStore
-	getTeamConnectionsFn            func(string) ([]store.TeamConnection, error)
-	addTeamConnectionFn             func(string, store.TeamConnection) error
-	removeTeamConnectionFn          func(string, store.TeamConnection) error
-	getInitializedTeamIDsFn         func() ([]string, error)
-	addInitializedTeamIDFn          func(string) error
-	removeInitializedTeamIDFn       func(string) error
-	getChannelConnectionsFn         func(string) ([]store.TeamConnection, error)
-	addChannelConnectionFn          func(string, store.TeamConnection) error
-	removeChannelConnectionFn       func(string, store.TeamConnection) error
-	deleteChannelConnectionsFn      func(string) error
-	setTeamConnectionsFn            func(string, []store.TeamConnection) error
-	getConnectionPromptFn           func(string, string) (*store.ConnectionPrompt, error)
-	setConnectionPromptFn           func(string, string, *store.ConnectionPrompt) error
-	deleteConnectionPromptFn        func(string, string) error
-	createConnectionPromptFn        func(string, string, *store.ConnectionPrompt) (bool, error)
-	getChannelConnectionPromptFn    func(string, string) (*store.ConnectionPrompt, error)
-	setChannelConnectionPromptFn    func(string, string, *store.ConnectionPrompt) error
-	deleteChannelConnectionPromptFn func(string, string) error
-	createChannelConnectionPromptFn func(string, string, *store.ConnectionPrompt) (bool, error)
-	getTeamRewriteIndexFn           func(string, string) (string, error)
-	setTeamRewriteIndexFn           func(string, string, string) error
-	deleteTeamRewriteIndexFn        func(string, string) error
-	isDeletingFlagSetFn             func(string) (bool, error)
-	getConnectionRequestFn          func(string, string) (*store.ConnectionRequest, error)
-	createConnectionRequestFn       func(string, string, *store.ConnectionRequest) (bool, error)
-	deleteConnectionRequestFn       func(string, string) error
+	getTeamConnectionsFn             func(string) ([]store.TeamConnection, error)
+	addTeamConnectionFn              func(string, store.TeamConnection) error
+	removeTeamConnectionFn           func(string, store.TeamConnection) error
+	getInitializedTeamIDsFn          func() ([]string, error)
+	addInitializedTeamIDFn           func(string) error
+	removeInitializedTeamIDFn        func(string) error
+	getChannelConnectionsFn          func(string) ([]store.TeamConnection, error)
+	addChannelConnectionFn           func(string, store.TeamConnection) error
+	removeChannelConnectionFn        func(string, store.TeamConnection) error
+	deleteChannelConnectionsFn       func(string) error
+	setTeamConnectionsFn             func(string, []store.TeamConnection) error
+	getConnectionPromptFn            func(string, string) (*store.ConnectionPrompt, error)
+	setConnectionPromptFn            func(string, string, *store.ConnectionPrompt) error
+	deleteConnectionPromptFn         func(string, string) error
+	createConnectionPromptFn         func(string, string, *store.ConnectionPrompt) (bool, error)
+	getChannelConnectionPromptFn     func(string, string) (*store.ConnectionPrompt, error)
+	setChannelConnectionPromptFn     func(string, string, *store.ConnectionPrompt) error
+	deleteChannelConnectionPromptFn  func(string, string) error
+	createChannelConnectionPromptFn  func(string, string, *store.ConnectionPrompt) (bool, error)
+	getTeamRewriteIndexFn            func(string, string) (string, error)
+	setTeamRewriteIndexFn            func(string, string, string) error
+	deleteTeamRewriteIndexFn         func(string, string) error
+	isDeletingFlagSetFn              func(string) (bool, error)
+	getConnectionRequestFn           func(string, string) (*store.ConnectionRequest, error)
+	createConnectionRequestFn        func(string, string, *store.ConnectionRequest) (bool, error)
+	deleteConnectionRequestFn        func(string, string) error
+	getChannelConnectionRequestFn    func(string, string) (*store.ConnectionRequest, error)
+	createChannelConnectionRequestFn func(string, string, *store.ConnectionRequest) (bool, error)
+	updateChannelConnectionRequestFn func(string, string, *store.ConnectionRequest) error
+	deleteChannelConnectionRequestFn func(string, string) error
 }
 
 func (s *flexibleKVStore) GetTeamConnections(teamID string) ([]store.TeamConnection, error) {
@@ -267,6 +271,34 @@ func (s *flexibleKVStore) CreateConnectionRequest(teamID, connKey string, req *s
 func (s *flexibleKVStore) DeleteConnectionRequest(teamID, connKey string) error {
 	if s.deleteConnectionRequestFn != nil {
 		return s.deleteConnectionRequestFn(teamID, connKey)
+	}
+	return nil
+}
+
+func (s *flexibleKVStore) GetChannelConnectionRequest(channelID, connKey string) (*store.ConnectionRequest, error) {
+	if s.getChannelConnectionRequestFn != nil {
+		return s.getChannelConnectionRequestFn(channelID, connKey)
+	}
+	return nil, nil
+}
+
+func (s *flexibleKVStore) CreateChannelConnectionRequest(channelID, connKey string, req *store.ConnectionRequest) (bool, error) {
+	if s.createChannelConnectionRequestFn != nil {
+		return s.createChannelConnectionRequestFn(channelID, connKey, req)
+	}
+	return true, nil
+}
+
+func (s *flexibleKVStore) UpdateChannelConnectionRequest(channelID, connKey string, req *store.ConnectionRequest) error {
+	if s.updateChannelConnectionRequestFn != nil {
+		return s.updateChannelConnectionRequestFn(channelID, connKey, req)
+	}
+	return nil
+}
+
+func (s *flexibleKVStore) DeleteChannelConnectionRequest(channelID, connKey string) error {
+	if s.deleteChannelConnectionRequestFn != nil {
+		return s.deleteChannelConnectionRequestFn(channelID, connKey)
 	}
 	return nil
 }

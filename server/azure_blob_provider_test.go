@@ -729,6 +729,70 @@ func TestAzureBlobProvider_ProcessBlob(t *testing.T) {
 		a.processBlob(t.Context(), "messages/high/a.jsonl")
 		assert.NotEmpty(t, kv.deletes)
 	})
+
+	t.Run("already processed blob delete succeeds", func(t *testing.T) {
+		a, _, kv, ops := newTestBlobProviderWithOps(t)
+		blobName := "messages/high/a.jsonl"
+		store := map[string][]byte{}
+		// Seed the processed marker so isBlobProcessed returns true.
+		store[blobProcessedKey(blobName)] = []byte{1}
+		kv.getFn = func(key string, o any) error {
+			if p, ok := o.(*[]byte); ok {
+				*p = append((*p)[:0], store[key]...)
+			}
+			return nil
+		}
+		kv.setFn = func(key string, value any, options ...pluginapi.KVSetOption) (bool, error) {
+			if b, err2 := json.Marshal(value); err2 == nil {
+				store[key] = b
+			}
+			return true, nil
+		}
+		kv.delFn = func(key string) error {
+			delete(store, key)
+			return nil
+		}
+		a.handler = func(data []byte) error { return nil }
+
+		a.processBlob(t.Context(), blobName)
+
+		// Blob should be deleted without download.
+		assert.Empty(t, ops.downloads, "should skip download for already-processed blob")
+		assert.Equal(t, []string{blobName}, ops.deletes, "should delete the blob")
+	})
+
+	t.Run("already processed blob delete fails", func(t *testing.T) {
+		a, _, kv, ops := newTestBlobProviderWithOps(t)
+		blobName := "messages/high/a.jsonl"
+		store := map[string][]byte{}
+		store[blobProcessedKey(blobName)] = []byte{1}
+		kv.getFn = func(key string, o any) error {
+			if p, ok := o.(*[]byte); ok {
+				*p = append((*p)[:0], store[key]...)
+			}
+			return nil
+		}
+		kv.setFn = func(key string, value any, options ...pluginapi.KVSetOption) (bool, error) {
+			if b, err2 := json.Marshal(value); err2 == nil {
+				store[key] = b
+			}
+			return true, nil
+		}
+		kv.delFn = func(key string) error {
+			delete(store, key)
+			return nil
+		}
+		ops.deleteFn = func(ctx context.Context, name string) error { return errors.New("unavailable") }
+		a.handler = func(data []byte) error { return nil }
+
+		a.processBlob(t.Context(), blobName)
+
+		// Download still skipped, delete attempted but failed.
+		assert.Empty(t, ops.downloads)
+		assert.NotEmpty(t, ops.deletes, "delete was attempted")
+		// Processed marker should NOT have been cleared since delete failed.
+		assert.Contains(t, store, blobProcessedKey(blobName), "marker kept on delete failure")
+	})
 }
 
 func TestAzureBlobProvider_PollBlobs(t *testing.T) {
@@ -811,6 +875,27 @@ func TestAzureBlobProvider_WatchFiles(t *testing.T) {
 			return true, nil
 		}
 	}
+
+	t.Run("double call returns error", func(t *testing.T) {
+		a, _, _, ops := newTestBlobProviderWithOps(t)
+		// listFn blocks so the first WatchFiles stays alive long enough for
+		// the second call to observe the watching flag.
+		ops.listFn = func(ctx context.Context, prefix string, includeMetadata bool) ([]blobListing, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- a.WatchFiles(ctx, func(string, []byte, map[string]string) error { return nil }) }()
+		// Give the goroutine time to set the watching flag.
+		time.Sleep(20 * time.Millisecond)
+		err := a.WatchFiles(ctx, func(string, []byte, map[string]string) error { return nil })
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "WatchFiles called twice")
+		cancel()
+		<-done
+	})
 
 	t.Run("ctx cancel before tick returns nil", func(t *testing.T) {
 		a, _, _, _ := newTestBlobProviderWithOps(t)
@@ -984,6 +1069,52 @@ func TestAzureBlobProvider_RecoverDirectory(t *testing.T) {
 		assert.NotPanics(t, func() {
 			a.recoverDirectory(t.Context(), filepath.Join(t.TempDir(), "missing"), true)
 		})
+	})
+
+	t.Run("unrecognized jsonl filename is skipped", func(t *testing.T) {
+		a, _, _, ops := newTestBlobProviderWithOps(t)
+		dir := t.TempDir()
+		// File ends in .jsonl but does not match walFileNameRe pattern.
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "bad name!.jsonl"), []byte("x"), 0o600))
+
+		a.recoverDirectory(t.Context(), dir, false)
+		assert.Empty(t, ops.uploads, "unrecognized .jsonl should not be uploaded")
+	})
+
+	t.Run("current directory skips WAL with recent timestamp", func(t *testing.T) {
+		a, _, _, ops := newTestBlobProviderWithOps(t)
+		// Set recoveryStartMs so that WAL with timestamp 500 is before it but 2000 is at/after.
+		a.recoveryStartMs = 1000
+		dir := t.TempDir()
+		// Old WAL (timestamp 500, before recovery start) should be uploaded.
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "conn-500-0.jsonl"), []byte("old"), 0o600))
+		// Recent WAL (timestamp 2000, at/after recovery start) should be skipped.
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "conn-2000-0.jsonl"), []byte("new"), 0o600))
+
+		a.recoverDirectory(t.Context(), dir, true)
+		require.Len(t, ops.uploads, 1, "only the old WAL should be uploaded")
+		assert.Contains(t, ops.uploads[0].name, "conn-500-0.jsonl")
+	})
+
+	t.Run("context cancellation stops iteration", func(t *testing.T) {
+		a, _, _, ops := newTestBlobProviderWithOps(t)
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "conn-1-0.jsonl"), []byte("x"), 0o600))
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // cancel immediately
+		a.recoverDirectory(ctx, dir, false)
+		assert.Empty(t, ops.uploads, "cancelled context should prevent uploads")
+	})
+
+	t.Run("non-current directory is removed after recovery", func(t *testing.T) {
+		a, _, _, _ := newTestBlobProviderWithOps(t)
+		dir := filepath.Join(t.TempDir(), "old-node")
+		require.NoError(t, os.MkdirAll(dir, 0o750))
+		// Empty directory (no WAL files); should be removed.
+		a.recoverDirectory(t.Context(), dir, false)
+		_, err := os.Stat(dir)
+		assert.True(t, os.IsNotExist(err), "empty old-node directory should be removed")
 	})
 }
 
@@ -1582,4 +1713,158 @@ func TestNextListBackoff(t *testing.T) {
 			assert.Equal(t, tt.want, nextListBackoff(tt.current, base))
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// persistShutdownResidue
+// ---------------------------------------------------------------------------
+
+func TestPersistShutdownResidue_EmptyRefs(t *testing.T) {
+	a, _, _ := newTestBlobProvider(t)
+	// pendingFiles is nil by default; should return immediately with no file written.
+	a.persistShutdownResidue()
+
+	entries, err := os.ReadDir(a.walDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no file should be written when pendingFiles is empty")
+}
+
+func TestPersistShutdownResidue_Success(t *testing.T) {
+	a, _, _ := newTestBlobProvider(t)
+	a.pendingFiles = []pendingFileRef{
+		{PostID: "p1", FileID: "f1", Filename: "file.txt"},
+		{PostID: "p2", FileID: "f2", Filename: "image.png"},
+	}
+
+	a.persistShutdownResidue()
+
+	// pendingFiles should be cleared.
+	assert.Nil(t, a.pendingFiles)
+
+	// A companion file should have been written under walDir.
+	entries, err := os.ReadDir(a.walDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.True(t, strings.HasSuffix(entries[0].Name(), walFilesExt))
+
+	data, err := os.ReadFile(filepath.Join(a.walDir, entries[0].Name()))
+	require.NoError(t, err)
+
+	var recovered []pendingFileRef
+	require.NoError(t, json.Unmarshal(data, &recovered))
+	assert.Len(t, recovered, 2)
+	assert.Equal(t, "p1", recovered[0].PostID)
+	assert.Equal(t, "f2", recovered[1].FileID)
+}
+
+func TestPersistShutdownResidue_WriteFileError(t *testing.T) {
+	a, api, _ := newTestBlobProvider(t)
+	a.pendingFiles = []pendingFileRef{
+		{PostID: "p1", FileID: "f1", Filename: "file.txt"},
+	}
+	// Point walDir to a path that does not exist so os.WriteFile fails.
+	a.walDir = filepath.Join(t.TempDir(), "nonexistent", "deep", "path")
+
+	a.persistShutdownResidue()
+
+	// pendingFiles was drained even though write failed.
+	assert.Nil(t, a.pendingFiles)
+	api.AssertExpectations(t)
+}
+
+func TestEnsureContainerWithRetry(t *testing.T) {
+	t.Run("success on first attempt", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		ops := &fakeBlobOps{}
+		err := ensureContainerWithRetry(context.Background(), ops, api, "test-container")
+		require.NoError(t, err)
+		ops.mu.Lock()
+		assert.Equal(t, 1, ops.createCount)
+		ops.mu.Unlock()
+	})
+
+	t.Run("container already exists", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		ops := &fakeBlobOps{
+			createFn: func(ctx context.Context) error {
+				return errors.New(azureErrContainerAlreadyExists)
+			},
+		}
+		err := ensureContainerWithRetry(context.Background(), ops, api, "test-container")
+		require.NoError(t, err)
+		ops.mu.Lock()
+		assert.Equal(t, 1, ops.createCount)
+		ops.mu.Unlock()
+	})
+
+	t.Run("transient error then success", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		var attempt atomic.Int32
+		ops := &fakeBlobOps{
+			createFn: func(ctx context.Context) error {
+				if attempt.Add(1) == 1 {
+					return errors.New("connection refused")
+				}
+				return nil
+			},
+		}
+		err := ensureContainerWithRetry(context.Background(), ops, api, "test-container")
+		require.NoError(t, err)
+		ops.mu.Lock()
+		assert.Equal(t, 2, ops.createCount)
+		ops.mu.Unlock()
+	})
+
+	t.Run("non-transient error fails immediately", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		ops := &fakeBlobOps{
+			createFn: func(ctx context.Context) error {
+				return errors.New("permanent failure")
+			},
+		}
+		err := ensureContainerWithRetry(context.Background(), ops, api, "test-container")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create/access Azure Blob container")
+		assert.Contains(t, err.Error(), "permanent failure")
+		ops.mu.Lock()
+		assert.Equal(t, 1, ops.createCount)
+		ops.mu.Unlock()
+	})
+
+	t.Run("max attempts exhausted", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		ops := &fakeBlobOps{
+			createFn: func(ctx context.Context) error {
+				return errors.New("connection refused")
+			},
+		}
+		err := ensureContainerWithRetry(context.Background(), ops, api, "test-container")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "after 5 attempts")
+		ops.mu.Lock()
+		assert.Equal(t, containerCreateMaxAttempts, ops.createCount)
+		ops.mu.Unlock()
+	})
+
+	t.Run("context cancelled during retry wait", func(t *testing.T) {
+		api := &plugintest.API{}
+		stubLogs(api)
+		ctx, cancel := context.WithCancel(context.Background())
+		ops := &fakeBlobOps{
+			createFn: func(ctx context.Context) error {
+				// Cancel context after the first transient error so the
+				// retry backoff select picks ctx.Done.
+				cancel()
+				return errors.New("connection refused")
+			},
+		}
+		err := ensureContainerWithRetry(ctx, ops, api, "test-container")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), context.Canceled.Error())
+	})
 }

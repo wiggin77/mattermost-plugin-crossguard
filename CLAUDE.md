@@ -127,7 +127,7 @@ make deploy         # Build, deploy, and run quick NATS smoke test
 
 After setup:
 
-- **Server A (Low)**: http://low.test:8075 (admin/password, usera/password, Team: Test A)
+- **Server A (Low)**: http://low.test:8075 (admin/password, usera/password, useraa/password, Team: Test A)
 - **Server B (High)**: http://high.test:8076 (admin/password, userb/password, Team: Test B)
 - **NATS**: nats://localhost:4222 (monitor: http://localhost:8222)
 - **NATS (from plugins)**: nats://nats:4222

@@ -171,7 +171,7 @@
 
         <table class="field-table">
             <tbody>
-                <tr><td>Permission</td><td>Channel Admin, Team Admin, or System Admin (blocked by <code>RestrictToSystemAdmins</code>)</td></tr>
+                <tr><td>Permission</td><td>Channel Admin, Team Admin, or System Admin (blocked by <code>RestrictToSystemAdmins</code>; see Channel Request Mode below)</td></tr>
                 <tr><td>Arguments</td><td><code>connection-name</code> (optional, same auto-select/dialog behavior as init-team)</td></tr>
             </tbody>
         </table>
@@ -184,6 +184,17 @@
             <li>Publishes WebSocket event <code>channel_connections_updated</code> to update UI indicators</li>
             <li>Posts announcement in the channel</li>
         </ul>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Channel Request Mode</p>
+            <p>
+                When both <code>RestrictToSystemAdmins</code> and <code>AllowChannelAdminRequests</code>
+                are enabled, Channel Admins can run this command to submit a channel connection link
+                request. The request is sent as a DM to all Team Admins with <strong>Approve</strong>
+                and <strong>Deny</strong> buttons. The channel is not linked until a Team Admin
+                approves the request. Team Admins and System Admins still link channels directly.
+            </p>
+        </div>
 
         <h4>Examples</h4>
 <pre><code>/crossguard init-channel
@@ -238,7 +249,7 @@
 
         <table class="field-table">
             <tbody>
-                <tr><td>Permission</td><td>Channel Admin, Team Admin, or System Admin (blocked by <code>RestrictToSystemAdmins</code>)</td></tr>
+                <tr><td>Permission</td><td>Channel Admin, Team Admin, or System Admin (blocked by <code>RestrictToSystemAdmins</code>; Channel Admins allowed in channel request mode)</td></tr>
                 <tr><td>Arguments</td><td><code>connection-name</code> (optional, same auto-select/dialog behavior)</td></tr>
             </tbody>
         </table>
@@ -249,7 +260,18 @@
             <li>If this was the last connection on the channel, removes link emoji prefix from channel header</li>
             <li>Publishes WebSocket event to update UI indicators</li>
             <li>Posts announcement: "All relays for this channel are now inactive."</li>
+            <li>If a pending channel connection request exists for the same channel and connection, the request is automatically cancelled and the requester is notified</li>
         </ul>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Channel Request Mode</p>
+            <p>
+                When both <code>RestrictToSystemAdmins</code> and <code>AllowChannelAdminRequests</code>
+                are enabled, Channel Admins can run this command to unlink channel connections directly
+                (no approval needed for unlinking). This is the only channel connection management
+                action Channel Admins can perform without Team Admin approval in channel request mode.
+            </p>
+        </div>
 
         <!-- reset-prompt -->
         <h2 id="reset-prompt">/crossguard reset-prompt &lt;connection-name&gt;</h2>

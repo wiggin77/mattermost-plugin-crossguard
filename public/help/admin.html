@@ -448,6 +448,45 @@
             </p>
         </div>
 
+        <h3>Allow Channel Admin Requests</h3>
+
+        <table class="field-table">
+            <tbody>
+                <tr><td>Setting</td><td><code>AllowChannelAdminRequests</code></td></tr>
+                <tr><td>Type</td><td>Boolean</td></tr>
+                <tr><td>Default</td><td><code>false</code></td></tr>
+                <tr><td>Requires</td><td><code>RestrictToSystemAdmins</code> must also be enabled</td></tr>
+            </tbody>
+        </table>
+
+        <p>
+            <strong>When enabled</strong> (and <code>RestrictToSystemAdmins</code> is also enabled):
+            Channel Admins can submit channel connection link requests via
+            <code>/crossguard init-channel</code> or the REST API. The request is sent as a direct
+            message to every Team Admin with interactive <strong>Approve</strong> and
+            <strong>Deny</strong> buttons. Channel Admins can also unlink channel connections
+            directly with <code>/crossguard teardown-channel</code> (no approval needed for
+            unlinking).
+        </p>
+        <p>
+            <strong>When disabled:</strong> Channel Admins are fully blocked from channel connection
+            management when <code>RestrictToSystemAdmins</code> is enabled. This has no effect when
+            <code>RestrictToSystemAdmins</code> is disabled, because Channel Admins already have
+            direct access.
+        </p>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Request workflow</p>
+            <p>
+                When a Channel Admin submits a channel link request, all Team Admins for that team
+                receive a DM from the Cross Guard bot with the requester's name, team, channel, and
+                connection. The DM contains <strong>Approve</strong> and <strong>Deny</strong>
+                buttons. Approving executes the channel link immediately. Denying opens an optional
+                reason dialog. The requester is notified of the outcome via DM. If the connection is
+                unlinked while a request is pending, the request is automatically cancelled.
+            </p>
+        </div>
+
         <!-- File Transfer Settings -->
         <h2>File Transfer Settings</h2>
         <p>

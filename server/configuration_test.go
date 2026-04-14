@@ -427,6 +427,54 @@ func TestIsRequestMode(t *testing.T) {
 	})
 }
 
+func TestIsChannelAdminRequestsAllowed(t *testing.T) {
+	t.Run("nil defaults to false", func(t *testing.T) {
+		cfg := &configuration{}
+		assert.False(t, cfg.isChannelAdminRequestsAllowed())
+	})
+
+	t.Run("explicitly true", func(t *testing.T) {
+		cfg := &configuration{AllowChannelAdminRequests: new(true)}
+		assert.True(t, cfg.isChannelAdminRequestsAllowed())
+	})
+
+	t.Run("explicitly false", func(t *testing.T) {
+		cfg := &configuration{AllowChannelAdminRequests: new(false)}
+		assert.False(t, cfg.isChannelAdminRequestsAllowed())
+	})
+}
+
+func TestIsChannelRequestMode(t *testing.T) {
+	t.Run("both enabled", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins:    new(true),
+			AllowChannelAdminRequests: new(true),
+		}
+		assert.True(t, cfg.isChannelRequestMode())
+	})
+
+	t.Run("restrict only", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins:    new(true),
+			AllowChannelAdminRequests: new(false),
+		}
+		assert.False(t, cfg.isChannelRequestMode())
+	})
+
+	t.Run("channel allow only", func(t *testing.T) {
+		cfg := &configuration{
+			RestrictToSystemAdmins:    new(false),
+			AllowChannelAdminRequests: new(true),
+		}
+		assert.False(t, cfg.isChannelRequestMode())
+	})
+
+	t.Run("both nil", func(t *testing.T) {
+		cfg := &configuration{}
+		assert.False(t, cfg.isChannelRequestMode())
+	})
+}
+
 func TestIsTestMessage(t *testing.T) {
 	t.Run("valid test message is detected via JSON", func(t *testing.T) {
 		env := &model.Envelope{
@@ -852,6 +900,52 @@ func TestAzureBlobConfigValidation(t *testing.T) {
 		err := (&configuration{OutboundConnections: string(data)}).validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "azure_blob config block is required")
+	})
+
+	t.Run("azure-blob invalid service_url fails", func(t *testing.T) {
+		ab := validAzureBlob()
+		ab.ServiceURL = "://bad\x7f"
+		conns := []ConnectionConfig{{Name: "blob-test", Provider: "azure-blob", AzureBlob: ab}}
+		data, _ := json.Marshal(conns)
+		err := (&configuration{OutboundConnections: string(data)}).validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "service_url is not a valid URL")
+	})
+
+	t.Run("azure-blob blob_lock_max_age_seconds below 30 fails", func(t *testing.T) {
+		ab := validAzureBlob()
+		ab.BlobLockMaxAgeSeconds = 10
+		conns := []ConnectionConfig{{Name: "blob-test", Provider: "azure-blob", AzureBlob: ab}}
+		data, _ := json.Marshal(conns)
+		err := (&configuration{OutboundConnections: string(data)}).validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "blob_lock_max_age_seconds must be at least 30")
+	})
+
+	t.Run("azure-blob blob_lock_max_age_seconds above cap fails", func(t *testing.T) {
+		ab := validAzureBlob()
+		ab.BlobLockMaxAgeSeconds = 100000 // above 86400
+		conns := []ConnectionConfig{{Name: "blob-test", Provider: "azure-blob", AzureBlob: ab}}
+		data, _ := json.Marshal(conns)
+		err := (&configuration{OutboundConnections: string(data)}).validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "blob_lock_max_age_seconds must be at most")
+	})
+
+	t.Run("azure-blob blob_lock_max_age_seconds zero passes", func(t *testing.T) {
+		ab := validAzureBlob()
+		ab.BlobLockMaxAgeSeconds = 0
+		conns := []ConnectionConfig{{Name: "blob-test", Provider: "azure-blob", AzureBlob: ab}}
+		data, _ := json.Marshal(conns)
+		assert.NoError(t, (&configuration{OutboundConnections: string(data)}).validate())
+	})
+
+	t.Run("azure-blob blob_lock_max_age_seconds valid passes", func(t *testing.T) {
+		ab := validAzureBlob()
+		ab.BlobLockMaxAgeSeconds = 300
+		conns := []ConnectionConfig{{Name: "blob-test", Provider: "azure-blob", AzureBlob: ab}}
+		data, _ := json.Marshal(conns)
+		assert.NoError(t, (&configuration{OutboundConnections: string(data)}).validate())
 	})
 
 	t.Run("mixed providers including azure-blob pass", func(t *testing.T) {

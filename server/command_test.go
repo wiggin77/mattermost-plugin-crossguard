@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -560,6 +561,285 @@ func TestExecuteInitChannel(t *testing.T) {
 		}
 		resp := p.executeInitChannel(args)
 		assert.Contains(t, resp.Text, "No connections configured")
+	})
+}
+
+func TestExecuteInitChannelRequest(t *testing.T) {
+	t.Run("channel admin in request mode submits request", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		// Channel admin user (not team admin, not sysadmin).
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{
+			TeamId: "team-id", UserId: "chanadmin-id", SchemeAdmin: false,
+		}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{
+			ChannelId: "chan-id", UserId: "chanadmin-id", SchemeAdmin: true,
+		}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+		kvs.getChannelConnectionRequestFn = func(channelID, connKey string) (*store.ConnectionRequest, error) {
+			return nil, nil
+		}
+		kvs.createChannelConnectionRequestFn = func(channelID, connKey string, req *store.ConnectionRequest) (bool, error) {
+			return true, nil
+		}
+
+		api.On("GetChannel", "chan-id").Return(&mmModel.Channel{
+			Id: "chan-id", Name: "test-channel", DisplayName: "Test Channel", TeamId: "team-id",
+		}, nil)
+		api.On("GetTeam", "team-id").Return(&mmModel.Team{
+			Id: "team-id", Name: "test", DisplayName: "Test Team",
+		}, nil)
+
+		// getTeamAdmins mocks
+		api.On("GetTeamMembers", "team-id", 0, 200).Return([]*mmModel.TeamMember{
+			{TeamId: "team-id", UserId: "teamadmin-id", SchemeAdmin: true},
+		}, nil)
+		api.On("GetTeamMembers", "team-id", 1, 200).Return([]*mmModel.TeamMember{}, nil)
+		api.On("GetUser", "teamadmin-id").Return(&mmModel.User{Id: "teamadmin-id", Username: "teamadmin"}, nil)
+
+		api.On("GetDirectChannel", "bot-user-id", mock.Anything).Return(&mmModel.Channel{Id: "dm-id"}, nil)
+		api.On("CreatePost", mock.AnythingOfType("*model.Post")).Return(&mmModel.Post{Id: "post-id"}, nil)
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel outbound:high",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "submitted for team admin approval")
+	})
+
+	t.Run("team not initialized returns error", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{
+			TeamId: "team-id", UserId: "chanadmin-id", SchemeAdmin: false,
+		}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{
+			ChannelId: "chan-id", UserId: "chanadmin-id", SchemeAdmin: true,
+		}, nil)
+
+		// No team connections (team not initialized).
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return nil, nil
+		}
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "must be initialized first")
+	})
+
+	t.Run("multiple connections opens dialog", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.out"}}]`,
+			InboundConnections:        `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.in"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{
+			TeamId: "team-id", UserId: "chanadmin-id", SchemeAdmin: false,
+		}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{
+			ChannelId: "chan-id", UserId: "chanadmin-id", SchemeAdmin: true,
+		}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{
+				{Direction: "outbound", Connection: "high"},
+				{Direction: "inbound", Connection: "high"},
+			}, nil
+		}
+
+		api.On("OpenInteractiveDialog", mock.Anything).Return(nil)
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+			TriggerId: "trigger-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Empty(t, resp.Text)
+		api.AssertCalled(t, "OpenInteractiveDialog", mock.Anything)
+	})
+
+	t.Run("GetUser error returns failure", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		// Permission check calls (isTeamAdminOrSystemAdmin, isTeamAdminInRequestMode,
+		// isChannelAdminInRequestMode) each call GetUser. The 4th call is inside
+		// executeInitChannelRequest, which we want to fail.
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil).Times(3)
+		api.On("GetUser", "chanadmin-id").Return(nil, &mmModel.AppError{Message: "not found"}).Once()
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "Failed to look up user")
+	})
+
+	t.Run("GetTeamConnections error returns failure", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return nil, errors.New("store error")
+		}
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "Failed to check team connections")
+	})
+
+	t.Run("bad connection name returns available connections", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel outbound:nonexistent",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "Available connections")
+	})
+
+	t.Run("create request error returns error message", func(t *testing.T) {
+		api := &plugintest.API{}
+		addCmdLogMocks(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.setConfiguration(&configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		})
+
+		chanadmin := &mmModel.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(chanadmin, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		api.On("GetChannelMember", "chan-id", "chanadmin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+
+		kvs.getTeamConnectionsFn = func(teamID string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+		// Already pending request
+		kvs.getChannelConnectionRequestFn = func(channelID, connKey string) (*store.ConnectionRequest, error) {
+			return &store.ConnectionRequest{RequesterID: "other-user"}, nil
+		}
+
+		args := &mmModel.CommandArgs{
+			Command:   "/crossguard init-channel outbound:high",
+			UserId:    "chanadmin-id",
+			TeamId:    "team-id",
+			ChannelId: "chan-id",
+		}
+		resp := p.executeInitChannel(args)
+		assert.Contains(t, resp.Text, "already pending")
 	})
 }
 

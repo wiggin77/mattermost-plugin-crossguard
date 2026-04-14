@@ -252,6 +252,22 @@ func (m *mockKVStore) DeleteConnectionRequest(_, _ string) error {
 	return nil
 }
 
+func (m *mockKVStore) GetChannelConnectionRequest(_, _ string) (*ConnectionRequest, error) {
+	return nil, nil
+}
+
+func (m *mockKVStore) CreateChannelConnectionRequest(_, _ string, _ *ConnectionRequest) (bool, error) {
+	return true, nil
+}
+
+func (m *mockKVStore) UpdateChannelConnectionRequest(_, _ string, _ *ConnectionRequest) error {
+	return nil
+}
+
+func (m *mockKVStore) DeleteChannelConnectionRequest(_, _ string) error {
+	return nil
+}
+
 func newTestCaching(inner *mockKVStore) (*CachingKVStore, *plugintest.API) {
 	api := &plugintest.API{}
 	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil)

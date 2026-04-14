@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
@@ -123,6 +124,22 @@ func (s *testKVStore) SetTeamRewriteIndex(string, string, string) error {
 }
 
 func (s *testKVStore) DeleteTeamRewriteIndex(string, string) error {
+	return nil
+}
+
+func (s *testKVStore) GetChannelConnectionRequest(string, string) (*store.ConnectionRequest, error) {
+	return nil, nil
+}
+
+func (s *testKVStore) CreateChannelConnectionRequest(string, string, *store.ConnectionRequest) (bool, error) {
+	return true, nil
+}
+
+func (s *testKVStore) UpdateChannelConnectionRequest(string, string, *store.ConnectionRequest) error {
+	return nil
+}
+
+func (s *testKVStore) DeleteChannelConnectionRequest(string, string) error {
 	return nil
 }
 
@@ -1800,6 +1817,111 @@ func TestHandleInboundMessage_TestMessageWithoutID(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Missing coverage: unmarshal error path
 // ---------------------------------------------------------------------------
+
+func TestHandleInboundMessage_MissingMappingQueuesRetry(t *testing.T) {
+	api := &plugintest.API{}
+	p, _ := setupTestPlugin(api)
+	p.retryQueue = newRetryQueue(0)
+
+	// Update with a PostID that has no mapping triggers missing=true.
+	api.On("LogError", "Inbound update: failed to look up post mapping",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything).Maybe()
+	api.On("LogWarn", "Missing message: queuing for retry",
+		"error_code", mock.Anything,
+		"conn", "high",
+		"type", model.MessageTypeUpdate,
+		"remote_post_id", "unknown-post",
+		"queue_size", mock.Anything).Return()
+
+	env := &model.Envelope{
+		Type: model.MessageTypeUpdate,
+		PostMessage: &model.PostMessage{
+			PostID:      "unknown-post",
+			MessageText: "updated text",
+		},
+	}
+	data, err := model.Marshal(env, model.FormatJSON)
+	require.NoError(t, err)
+
+	handler := p.handleInboundMessage("high")
+	err = handler(data)
+	require.NoError(t, err)
+
+	p.wg.Wait()
+	assert.Equal(t, 1, p.retryQueue.Len(), "message should be enqueued for retry")
+	api.AssertExpectations(t)
+}
+
+func TestHandleInboundMessage_MissingMappingNilQueue(t *testing.T) {
+	api := &plugintest.API{}
+	p, _ := setupTestPlugin(api)
+	// retryQueue is nil (default); missing=true should not panic.
+
+	env := &model.Envelope{
+		Type: model.MessageTypeUpdate,
+		PostMessage: &model.PostMessage{
+			PostID:      "unknown-post",
+			MessageText: "updated text",
+		},
+	}
+	data, err := model.Marshal(env, model.FormatJSON)
+	require.NoError(t, err)
+
+	handler := p.handleInboundMessage("high")
+	err = handler(data)
+	require.NoError(t, err)
+
+	p.wg.Wait()
+	// No panic, no queue operation, no retry log.
+}
+
+func TestHandleInboundMessage_RetryQueueFull(t *testing.T) {
+	api := &plugintest.API{}
+	p, _ := setupTestPlugin(api)
+	p.retryQueue = newRetryQueue(0)
+
+	// Fill the retry queue to capacity.
+	dummyEnv := &model.Envelope{
+		Type: model.MessageTypeUpdate,
+		PostMessage: &model.PostMessage{
+			PostID:      "filler",
+			MessageText: "x",
+		},
+	}
+	dummyData, err := model.Marshal(dummyEnv, model.FormatJSON)
+	require.NoError(t, err)
+	for i := range retryQueueMaxSize {
+		ok := p.retryQueue.Enqueue("high", dummyData, fmt.Sprintf("filler-%d", i), model.MessageTypeUpdate)
+		require.True(t, ok)
+	}
+	assert.Equal(t, retryQueueMaxSize, p.retryQueue.Len())
+
+	api.On("LogError", "Missing message: queue full, dropping message",
+		"error_code", mock.Anything,
+		"conn", "high",
+		"type", model.MessageTypeUpdate,
+		"remote_post_id", "unknown-post",
+		"queue_size", retryQueueMaxSize).Return()
+
+	env := &model.Envelope{
+		Type: model.MessageTypeUpdate,
+		PostMessage: &model.PostMessage{
+			PostID:      "unknown-post",
+			MessageText: "updated text",
+		},
+	}
+	data, err := model.Marshal(env, model.FormatJSON)
+	require.NoError(t, err)
+
+	handler := p.handleInboundMessage("high")
+	err = handler(data)
+	require.NoError(t, err)
+
+	p.wg.Wait()
+	assert.Equal(t, retryQueueMaxSize, p.retryQueue.Len(), "queue size unchanged, message was dropped")
+	api.AssertExpectations(t)
+}
 
 func TestHandleInboundMessage_UnmarshalError(t *testing.T) {
 	api := &plugintest.API{}

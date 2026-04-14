@@ -39,6 +39,9 @@ func (p *Plugin) initAPI() {
 	router.HandleFunc("/api/v1/request/approve", p.handleRequestApprove).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/request/deny", p.handleRequestDeny).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/request/deny-submit", p.handleRequestDenySubmit).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/channel-request/approve", p.handleChannelRequestApprove).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/channel-request/deny", p.handleChannelRequestDeny).Methods(http.MethodPost)
+	router.HandleFunc("/api/v1/channel-request/deny-submit", p.handleChannelRequestDenySubmit).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/status", p.handleGlobalStatus).Methods(http.MethodGet)
 	router.HandleFunc("/api/v1/teams/{team_id}/status", p.handleTeamStatus).Methods(http.MethodGet)
 	router.HandleFunc("/api/v1/channels/{channel_id}/status", p.handleChannelStatus).Methods(http.MethodGet)
@@ -438,8 +441,43 @@ func (p *Plugin) handleInitChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !p.isChannelAdminOrHigher(user.Id, channelID, channel.TeamId) {
-		writeJSONError(w, "insufficient permissions", http.StatusForbidden)
-		return
+		switch {
+		case p.canDirectlyManageChannelConns(user.Id, channel.TeamId):
+			// Team admins get direct channel access when channel request mode
+			// is on (they are the approvers). Fall through to normal flow.
+		case p.isChannelAdminInRequestMode(user.Id, channelID, channel.TeamId):
+			teamConns, err := p.kvstore.GetTeamConnections(channel.TeamId)
+			if err != nil {
+				p.API.LogError("Failed to get team connections",
+					"error_code", errcode.APIInitChannelGetTeamConns,
+					"team_id", channel.TeamId, "error", err.Error())
+				writeJSONError(w, "failed to check team connections", http.StatusInternalServerError)
+				return
+			}
+			conn, _, resolveErr := p.resolveConnectionName(r.URL.Query().Get("connection_name"), teamConns)
+			if resolveErr != "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error":       resolveErr,
+					"connections": connectionDisplayNames(teamConns),
+				})
+				return
+			}
+			msg, crErr := p.createChannelConnectionRequest(user, channelID, channel.TeamId, conn)
+			if crErr != nil {
+				writeJSONError(w, crErr.Error(), http.StatusConflict)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":          "request_submitted",
+				"message":         msg,
+				"channel_id":      channelID,
+				"connection_name": connKey(conn),
+			})
+			return
+		default:
+			writeJSONError(w, "insufficient permissions", http.StatusForbidden)
+			return
+		}
 	}
 
 	teamConns, err := p.kvstore.GetTeamConnections(channel.TeamId)
@@ -493,8 +531,11 @@ func (p *Plugin) handleTeardownChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !p.isChannelAdminOrHigher(user.Id, channelID, channel.TeamId) {
-		writeJSONError(w, "insufficient permissions", http.StatusForbidden)
-		return
+		if !p.canDirectlyManageChannelConns(user.Id, channel.TeamId) &&
+			!p.isChannelAdminInRequestMode(user.Id, channelID, channel.TeamId) {
+			writeJSONError(w, "insufficient permissions", http.StatusForbidden)
+			return
+		}
 	}
 
 	chanConns, err := p.kvstore.GetChannelConnections(channelID)
@@ -520,6 +561,8 @@ func (p *Plugin) handleTeardownChannel(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, svcErr.Message, svcErr.Status)
 		return
 	}
+
+	p.cancelPendingChannelConnectionRequest(channelID, connKey(connName))
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":          "ok",
@@ -696,9 +739,22 @@ func (p *Plugin) handleDialogSelectConnection(w http.ResponseWriter, r *http.Req
 			writeJSONError(w, "channel not found", http.StatusBadRequest)
 			return
 		}
-		if !p.isChannelAdminOrHigher(userID, targetID, channel.TeamId) {
-			writeJSONError(w, "insufficient permissions", http.StatusForbidden)
-			return
+		if !p.isChannelAdminOrHigher(userID, targetID, channel.TeamId) && !p.canDirectlyManageChannelConns(userID, channel.TeamId) {
+			if action == actionInitChannel && p.isChannelAdminInRequestMode(userID, targetID, channel.TeamId) {
+				msg, crErr := p.createChannelConnectionRequest(user, targetID, channel.TeamId, connName)
+				if crErr != nil {
+					responseText = crErr.Error()
+				} else {
+					responseText = msg
+				}
+				break
+			}
+			if action == actionTeardownChannel && p.isChannelAdminInRequestMode(userID, targetID, channel.TeamId) {
+				// Channel admins in request mode can unlink directly; fall through.
+			} else {
+				writeJSONError(w, "insufficient permissions", http.StatusForbidden)
+				return
+			}
 		}
 		if action == actionInitChannel {
 			ch, alreadyLinked, svcErr := p.initChannelForCrossGuard(user, targetID, connName)
@@ -715,6 +771,7 @@ func (p *Plugin) handleDialogSelectConnection(w http.ResponseWriter, r *http.Req
 			if svcErr != nil {
 				responseText = svcErr.Message
 			} else {
+				p.cancelPendingChannelConnectionRequest(targetID, connKey(connName))
 				responseText = fmt.Sprintf("Connection `%s` unlinked from this channel successfully.", displayName)
 			}
 		}
@@ -778,7 +835,7 @@ func (p *Plugin) handleChannelStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, svcErr := p.getChannelStatus(channelID)
+	resp, svcErr := p.getChannelStatus(channelID, user)
 	if svcErr != nil {
 		writeJSONError(w, svcErr.Message, svcErr.Status)
 		return

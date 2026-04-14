@@ -492,6 +492,16 @@ func TestClient_IsChannelInitialized(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, ok)
 	})
+
+	t.Run("error", func(t *testing.T) {
+		api := &plugintest.API{}
+		api.On("KVGet", "test-plugin-channelinit-ch1").
+			Return(nil, &model.AppError{Message: "kv failure"})
+		kv := newTestClient(api)
+		ok, err := kv.IsChannelInitialized("ch1")
+		require.Error(t, err)
+		assert.False(t, ok)
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1159,4 +1169,172 @@ func TestClient_DeleteConnectionRequest_KVError(t *testing.T) {
 	err := kv.DeleteConnectionRequest("team1", "conn1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to delete connection request")
+}
+
+// ---------------------------------------------------------------------------
+// ChannelConnectionRequest CRUD
+// ---------------------------------------------------------------------------
+
+func TestClient_GetChannelConnectionRequest_Success(t *testing.T) {
+	api := &plugintest.API{}
+	req := ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+		PostIDs:     []string{"post1", "post2"},
+		CreatedAt:   1234567890,
+	}
+	api.On("KVGet", "test-plugin-chanconnreq-chan1-conn1").
+		Return(marshalJSON(t, req), nil)
+	kv := newTestClient(api)
+
+	got, err := kv.GetChannelConnectionRequest("chan1", "conn1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "user1", got.RequesterID)
+	assert.Equal(t, "team1", got.TeamID)
+	assert.Equal(t, "conn1", got.ConnKey)
+	assert.Equal(t, []string{"post1", "post2"}, got.PostIDs)
+	assert.Equal(t, int64(1234567890), got.CreatedAt)
+}
+
+func TestClient_GetChannelConnectionRequest_EmptyRequesterID(t *testing.T) {
+	api := &plugintest.API{}
+	req := ConnectionRequest{RequesterID: "", TeamID: "team1"}
+	api.On("KVGet", "test-plugin-chanconnreq-chan1-conn1").
+		Return(marshalJSON(t, req), nil)
+	kv := newTestClient(api)
+
+	got, err := kv.GetChannelConnectionRequest("chan1", "conn1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestClient_GetChannelConnectionRequest_NotFound(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("KVGet", "test-plugin-chanconnreq-chan1-conn1").
+		Return(nil, nil)
+	kv := newTestClient(api)
+
+	got, err := kv.GetChannelConnectionRequest("chan1", "conn1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestClient_GetChannelConnectionRequest_KVError(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("KVGet", "test-plugin-chanconnreq-chan1-conn1").
+		Return(nil, &model.AppError{Message: "kv failure"})
+	kv := newTestClient(api)
+
+	got, err := kv.GetChannelConnectionRequest("chan1", "conn1")
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "failed to get channel connection request")
+}
+
+func TestClient_CreateChannelConnectionRequest_Success(t *testing.T) {
+	api := &plugintest.API{}
+	req := &ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+		PostIDs:     []string{"post1"},
+		CreatedAt:   1234567890,
+	}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		marshalJSON(t, req), kvCASNilOpts()).Return(true, nil)
+	kv := newTestClient(api)
+
+	saved, err := kv.CreateChannelConnectionRequest("chan1", "conn1", req)
+	require.NoError(t, err)
+	assert.True(t, saved)
+}
+
+func TestClient_CreateChannelConnectionRequest_AlreadyExists(t *testing.T) {
+	api := &plugintest.API{}
+	req := &ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+	}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		marshalJSON(t, req), kvCASNilOpts()).Return(false, nil)
+	kv := newTestClient(api)
+
+	saved, err := kv.CreateChannelConnectionRequest("chan1", "conn1", req)
+	require.NoError(t, err)
+	assert.False(t, saved)
+}
+
+func TestClient_CreateChannelConnectionRequest_KVError(t *testing.T) {
+	api := &plugintest.API{}
+	req := &ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+	}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		marshalJSON(t, req), kvCASNilOpts()).Return(false, &model.AppError{Message: "kv fail"})
+	kv := newTestClient(api)
+
+	saved, err := kv.CreateChannelConnectionRequest("chan1", "conn1", req)
+	require.Error(t, err)
+	assert.False(t, saved)
+	assert.Contains(t, err.Error(), "failed to create channel connection request")
+}
+
+func TestClient_UpdateChannelConnectionRequest_Success(t *testing.T) {
+	api := &plugintest.API{}
+	req := &ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+		PostIDs:     []string{"post1", "post2"},
+	}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		marshalJSON(t, req), kvSetOpts()).Return(true, nil)
+	kv := newTestClient(api)
+
+	err := kv.UpdateChannelConnectionRequest("chan1", "conn1", req)
+	require.NoError(t, err)
+	api.AssertExpectations(t)
+}
+
+func TestClient_UpdateChannelConnectionRequest_KVError(t *testing.T) {
+	api := &plugintest.API{}
+	req := &ConnectionRequest{
+		RequesterID: "user1",
+		TeamID:      "team1",
+		ConnKey:     "conn1",
+	}
+	api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).
+		Return(false, &model.AppError{Message: "write fail"})
+	kv := newTestClient(api)
+
+	err := kv.UpdateChannelConnectionRequest("chan1", "conn1", req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to update channel connection request")
+}
+
+func TestClient_DeleteChannelConnectionRequest_Success(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		[]byte(nil), kvSetOpts()).Return(true, nil)
+	kv := newTestClient(api)
+
+	err := kv.DeleteChannelConnectionRequest("chan1", "conn1")
+	require.NoError(t, err)
+	api.AssertExpectations(t)
+}
+
+func TestClient_DeleteChannelConnectionRequest_KVError(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("KVSetWithOptions", "test-plugin-chanconnreq-chan1-conn1",
+		[]byte(nil), kvSetOpts()).Return(false, &model.AppError{Message: "delete fail"})
+	kv := newTestClient(api)
+
+	err := kv.DeleteChannelConnectionRequest("chan1", "conn1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to delete channel connection request")
 }

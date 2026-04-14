@@ -281,6 +281,19 @@
   "connection_name": "outbound:relay-to-b"
 }</code></pre>
 
+                <h4>Channel Request Mode Response - 200</h4>
+                <p>
+                    When <code>RestrictToSystemAdmins</code> and <code>AllowChannelAdminRequests</code>
+                    are both enabled and the caller is a Channel Admin (not a Team Admin or System Admin),
+                    the endpoint submits a channel connection request instead of linking directly:
+                </p>
+<pre><code>{
+  "status": "request_submitted",
+  "message": "Your request to link connection ... has been submitted for team admin approval.",
+  "channel_id": "xyz789...",
+  "connection_name": "outbound:relay-to-b"
+}</code></pre>
+
                 <h4>Error Responses</h4>
                 <table>
                     <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
@@ -288,6 +301,7 @@
                         <tr><td><code>400</code></td><td>Invalid input or no connections</td></tr>
                         <tr><td><code>403</code></td><td>Insufficient permissions</td></tr>
                         <tr><td><code>404</code></td><td>Channel not found</td></tr>
+                        <tr><td><code>409</code></td><td>A channel request is already pending for this connection</td></tr>
                         <tr><td><code>500</code></td><td>Internal error</td></tr>
                     </tbody>
                 </table>
@@ -301,7 +315,7 @@
                 <span class="permission-tag permission-channeladmin">Channel Admin+</span>
             </div>
             <div class="endpoint-card-body">
-                <p>Unlink a connection from a channel.</p>
+                <p>Unlink a connection from a channel. If a pending channel connection request exists for the same connection, it is automatically cancelled.</p>
 
                 <h4>Path Parameters</h4>
                 <table class="field-table">
@@ -451,12 +465,14 @@
   "channel_name": "town-square",
   "channel_display_name": "Town Square",
   "team_name": "Test A",
+  "channel_request_mode": true,
   "team_connections": [
     {
       "name": "relay-to-b",
       "direction": "outbound",
       "linked": true,
       "orphaned": false,
+      "request_pending": false,
       "file_transfer_enabled": true,
       "file_filter_mode": "allow",
       "file_filter_types": ".pdf,.docx",
@@ -464,6 +480,17 @@
     }
   ]
 }</code></pre>
+
+                <div class="alert alert-info">
+                    <p class="alert-title">Channel request mode fields</p>
+                    <p>
+                        <code>channel_request_mode</code> (top-level) is <code>true</code> when the
+                        caller is a Channel Admin operating in channel request mode (not a Team Admin
+                        or System Admin). <code>request_pending</code> (per connection) is
+                        <code>true</code> when an unresolved channel link request exists for that
+                        connection. Both fields are omitted when not applicable.
+                    </p>
+                </div>
 
                 <div class="alert alert-warning">
                     <p class="alert-title">Note</p>
@@ -735,6 +762,94 @@
                 <ul>
                     <li>Deletes the pending request</li>
                     <li>Removes Approve/Deny buttons from all admin DM posts for this request</li>
+                    <li>Sends DM to requester with denial and optional reason</li>
+                    <li>If the dialog was cancelled, does nothing</li>
+                </ul>
+
+                <p>Returns <code>200</code> on success.</p>
+            </div>
+        </div>
+
+        <!-- Channel Connection Requests -->
+        <h2>Channel Connection Requests</h2>
+
+        <p>
+            When both <code>RestrictToSystemAdmins</code> and <code>AllowChannelAdminRequests</code>
+            are enabled, Channel Admins can submit channel-level connection link requests. These
+            endpoints handle the Team Admin approval workflow. They mirror the team-level request
+            endpoints but operate on channel connections with Team Admins as the approvers.
+        </p>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/channel-request/approve</span>
+                <span class="permission-tag permission-teamadmin">Team Admin+</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Approve a pending channel connection link request. Links the connection to the channel, deletes the request, updates all Team Admin DM posts, and notifies the requester.</p>
+
+                <h4>Request Body</h4>
+                <p><code>PostActionIntegrationRequest</code> with context:</p>
+<pre><code>{"channel_id": "...", "team_id": "...", "conn_key": "..."}</code></pre>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Validates the connection still exists in config and the team still has it linked</li>
+                    <li>Validates the target channel still exists</li>
+                    <li>Executes the channel init (same as a direct Channel Admin link)</li>
+                    <li>Removes Approve/Deny buttons from all Team Admin DM posts for this request</li>
+                    <li>Sends DM to requester confirming approval</li>
+                    <li>If the connection was removed from config or unlinked from the team while pending, cancels the request and notifies the requester</li>
+                </ul>
+
+                <p>Returns a <code>PostActionIntegrationResponse</code>.</p>
+            </div>
+        </div>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/channel-request/deny</span>
+                <span class="permission-tag permission-teamadmin">Team Admin+</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Deny a pending channel connection link request. Opens an interactive dialog for the Team Admin to provide an optional reason.</p>
+
+                <h4>Request Body</h4>
+                <p><code>PostActionIntegrationRequest</code> with context:</p>
+<pre><code>{"channel_id": "...", "team_id": "...", "conn_key": "..."}</code></pre>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Opens a dialog with an optional "Reason for denial" text area</li>
+                    <li>Dialog submission is handled by <code>/api/v1/channel-request/deny-submit</code></li>
+                </ul>
+
+                <p>Returns a <code>PostActionIntegrationResponse</code>.</p>
+            </div>
+        </div>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-post">POST</span>
+                <span class="path">/api/v1/channel-request/deny-submit</span>
+                <span class="permission-tag permission-teamadmin">Team Admin+</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>Dialog submission handler for channel request deny with optional reason.</p>
+
+                <h4>Request Body</h4>
+                <p><code>SubmitDialogRequest</code> with:</p>
+                <ul>
+                    <li><code>state</code>: <code>channel_id|team_id|conn_key</code></li>
+                    <li><code>submission.reason</code>: optional denial reason text</li>
+                </ul>
+
+                <h4>Behavior</h4>
+                <ul>
+                    <li>Deletes the pending channel connection request</li>
+                    <li>Removes Approve/Deny buttons from all Team Admin DM posts for this request</li>
                     <li>Sends DM to requester with denial and optional reason</li>
                     <li>If the dialog was cancelled, does nothing</li>
                 </ul>

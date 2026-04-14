@@ -282,6 +282,9 @@ coverage-frontend: apply webapp/node_modules
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test:coverage
 	cd webapp && $(NPM) run test:pw-ct-coverage
+	@echo ""
+	@echo "=== Merged Coverage (unit + component) ==="
+	cd webapp && $(NPM) run test:coverage-merged
 endif
 
 ## Prints code coverage summary for both backend and frontend.
@@ -417,11 +420,16 @@ docker-setup: docker-start
 		--email usera@example.com \
 		--username usera \
 		--password 'password' 2>/dev/null || echo "User usera already exists on Server A"
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local user create \
+		--email useraa@example.com \
+		--username useraa \
+		--password 'password' 2>/dev/null || echo "User useraa already exists on Server A"
 	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team create \
 		--name test \
 		--display-name "Test A" 2>/dev/null || echo "Team 'Test A' already exists on Server A"
 	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add test admin 2>/dev/null || echo "Admin already in Test A team"
 	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add test usera 2>/dev/null || echo "usera already in Test A team"
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add test useraa 2>/dev/null || echo "useraa already in Test A team"
 	@echo ""
 	@echo "--- Setting up Server B ---"
 	@$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local user create \
@@ -458,7 +466,7 @@ docker-setup: docker-start
 	@echo "=========================================="
 	@echo "Server A (Low): http://low.test:$(MM_PORT_A)"
 	@echo "  Admin login: admin / password"
-	@echo "  User login:  usera / password"
+	@echo "  User login:  usera / password, useraa / password"
 	@echo "  Team:        Test A"
 	@echo ""
 	@echo "Server B (High): http://high.test:$(MM_PORT_B)"

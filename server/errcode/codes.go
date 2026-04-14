@@ -301,6 +301,28 @@ const (
 	RequestNoAdminsNotified      = 24017
 )
 
+// channel_request.go (25000-25999)
+const (
+	ChanRequestGetFailed             = 25000
+	ChanRequestGetDMChannelFailed    = 25002
+	ChanRequestCreateDMPostFailed    = 25003
+	ChanRequestSaveFailed            = 25004
+	ChanRequestApproveGetFailed      = 25005
+	ChanRequestApproveExecFailed     = 25006
+	ChanRequestApproveDeleteFailed   = 25007
+	ChanRequestApproveNotifyFailed   = 25008
+	ChanRequestDenyDialogFailed      = 25009
+	ChanRequestDenyGetFailed         = 25010
+	ChanRequestDenyDeleteFailed      = 25011
+	ChanRequestDenyNotifyFailed      = 25012
+	ChanRequestUpdatePostFailed      = 25013
+	ChanRequestNoTeamAdmins          = 25014
+	ChanRequestConnRemovedFromConfig = 25015
+	ChanRequestConfirmDMFailed       = 25016
+	ChanRequestNoAdminsNotified      = 25017
+	ChanRequestGetTeamAdminsFailed   = 25018
+)
+
 // AllCodes lists every code declared in this package. Used by
 // TestCodesUnique to assert that no two call sites share a value.
 // Keep in sync when adding new constants.
@@ -552,4 +574,23 @@ var AllCodes = []int{
 	RequestConnRemovedFromConfig,
 	RequestConfirmDMFailed,
 	RequestNoAdminsNotified,
+
+	ChanRequestGetFailed,
+	ChanRequestGetDMChannelFailed,
+	ChanRequestCreateDMPostFailed,
+	ChanRequestSaveFailed,
+	ChanRequestApproveGetFailed,
+	ChanRequestApproveExecFailed,
+	ChanRequestApproveDeleteFailed,
+	ChanRequestApproveNotifyFailed,
+	ChanRequestDenyDialogFailed,
+	ChanRequestDenyGetFailed,
+	ChanRequestDenyDeleteFailed,
+	ChanRequestDenyNotifyFailed,
+	ChanRequestUpdatePostFailed,
+	ChanRequestNoTeamAdmins,
+	ChanRequestConnRemovedFromConfig,
+	ChanRequestConfirmDMFailed,
+	ChanRequestNoAdminsNotified,
+	ChanRequestGetTeamAdminsFailed,
 }

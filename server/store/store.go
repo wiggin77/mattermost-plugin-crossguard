@@ -10,6 +10,7 @@ const (
 type ConnectionRequest struct {
 	RequesterID string   `json:"requester_id"`
 	TeamID      string   `json:"team_id"`
+	ChannelID   string   `json:"channel_id,omitempty"`
 	ConnKey     string   `json:"conn_key"`
 	PostIDs     []string `json:"post_ids"`
 	CreatedAt   int64    `json:"created_at"`
@@ -71,4 +72,8 @@ type KVStore interface {
 	GetConnectionRequest(teamID, connKey string) (*ConnectionRequest, error)
 	CreateConnectionRequest(teamID, connKey string, req *ConnectionRequest) (bool, error)
 	DeleteConnectionRequest(teamID, connKey string) error
+	GetChannelConnectionRequest(channelID, connKey string) (*ConnectionRequest, error)
+	CreateChannelConnectionRequest(channelID, connKey string, req *ConnectionRequest) (bool, error)
+	UpdateChannelConnectionRequest(channelID, connKey string, req *ConnectionRequest) error
+	DeleteChannelConnectionRequest(channelID, connKey string) error
 }

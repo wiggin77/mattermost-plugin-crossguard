@@ -146,7 +146,7 @@ func TestBuildRequestDMMessage(t *testing.T) {
 				FileFilterTypes:     ".pdf,.docx",
 			},
 		}
-		out := buildRequestDMMessage("@alice (Alice Smith)", "[**My Team**](/my-team/channels/town-square)", "outbound:high", m)
+		out := buildRequestDMMessage("@alice (Alice Smith)", "[**My Team**](/my-team/channels/town-square)", "outbound:high", m, "")
 		assert.Contains(t, out, "#### :link: Connection Link Request")
 		assert.Contains(t, out, "| **Requested by** | @alice (Alice Smith) |")
 		assert.Contains(t, out, "| **Team** | [**My Team**](/my-team/channels/town-square) |")
@@ -161,7 +161,7 @@ func TestBuildRequestDMMessage(t *testing.T) {
 		m := map[string]ConnectionConfig{
 			"inbound:low": {Name: "low"},
 		}
-		out := buildRequestDMMessage("@bob", "[**T**](/t/channels/town-square)", "inbound:low", m)
+		out := buildRequestDMMessage("@bob", "[**T**](/t/channels/town-square)", "inbound:low", m, "")
 		assert.Contains(t, out, "| **Direction** | inbound |")
 		assert.Contains(t, out, "| **Provider** | nats |")
 		assert.Contains(t, out, "| **Message format** | json |")
@@ -172,16 +172,36 @@ func TestBuildRequestDMMessage(t *testing.T) {
 		m := map[string]ConnectionConfig{
 			"outbound:x": {Name: "x", FileTransferEnabled: true},
 		}
-		out := buildRequestDMMessage("@u", "team", "outbound:x", m)
+		out := buildRequestDMMessage("@u", "team", "outbound:x", m, "")
 		assert.Contains(t, out, "| **File transfer** | Enabled |")
 	})
 
 	t.Run("connection not in map still renders table rows", func(t *testing.T) {
-		out := buildRequestDMMessage("@u", "team", "outbound:missing", nil)
+		out := buildRequestDMMessage("@u", "team", "outbound:missing", nil, "")
 		assert.Contains(t, out, "| **Connection** | `outbound:missing` |")
 		assert.Contains(t, out, "| **Direction** | outbound |")
 		assert.Contains(t, out, "| **Provider** | nats |")
 		assert.NotContains(t, out, "**File transfer**")
+	})
+
+	t.Run("channel link included in message", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {Name: "high", Provider: "nats"},
+		}
+		out := buildRequestDMMessage("@alice", "team", "outbound:high", m, "[**#general**](/test/channels/general)")
+		assert.Contains(t, out, "#### :link: Channel Connection Link Request")
+		assert.Contains(t, out, "| **Channel** | [**#general**](/test/channels/general) |")
+		assert.Contains(t, out, "| **Requested by** | @alice |")
+	})
+
+	t.Run("empty channel link uses team-level header", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {Name: "high", Provider: "nats"},
+		}
+		out := buildRequestDMMessage("@alice", "team", "outbound:high", m, "")
+		assert.Contains(t, out, "#### :link: Connection Link Request")
+		assert.NotContains(t, out, "Channel Connection")
+		assert.NotContains(t, out, "**Channel**")
 	})
 }
 
@@ -193,7 +213,7 @@ func TestBuildRequestConfirmationMessage(t *testing.T) {
 				Provider: "nats",
 			},
 		}
-		out := buildRequestConfirmationMessage("[**T**](/t/channels/town-square)", "outbound:high", m)
+		out := buildRequestConfirmationMessage("[**T**](/t/channels/town-square)", "outbound:high", m, "", "system admins")
 		assert.Contains(t, out, "#### :link: Connection Link Request Submitted")
 		assert.Contains(t, out, "Your request has been sent to system admins for approval.")
 		assert.Contains(t, out, "| **Team** | [**T**](/t/channels/town-square) |")
@@ -213,7 +233,7 @@ func TestBuildRequestConfirmationMessage(t *testing.T) {
 				FileFilterTypes:     ".pdf",
 			},
 		}
-		out := buildRequestConfirmationMessage("team", "outbound:high", m)
+		out := buildRequestConfirmationMessage("team", "outbound:high", m, "", "system admins")
 		assert.Contains(t, out, "| **File transfer** | Enabled (allow: .pdf) |")
 	})
 
@@ -221,8 +241,17 @@ func TestBuildRequestConfirmationMessage(t *testing.T) {
 		m := map[string]ConnectionConfig{
 			"outbound:low": {Name: "low"},
 		}
-		out := buildRequestConfirmationMessage("team", "outbound:low", m)
+		out := buildRequestConfirmationMessage("team", "outbound:low", m, "", "system admins")
 		assert.Contains(t, out, "| **File transfer** | Disabled |")
+	})
+
+	t.Run("channel link and custom approver label", func(t *testing.T) {
+		m := map[string]ConnectionConfig{
+			"outbound:high": {Name: "high", Provider: "nats"},
+		}
+		out := buildRequestConfirmationMessage("team", "outbound:high", m, "[**#general**](/test/channels/general)", "team admins")
+		assert.Contains(t, out, "Your request has been sent to team admins for approval.")
+		assert.Contains(t, out, "| **Channel** | [**#general**](/test/channels/general) |")
 	})
 }
 
@@ -1407,7 +1436,7 @@ func TestGetChannelStatus(t *testing.T) {
 
 		api.On("GetChannel", "chan-id").Return(nil, &model.AppError{Message: "not found"})
 
-		resp, svcErr := p.getChannelStatus("chan-id")
+		resp, svcErr := p.getChannelStatus("chan-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 404, svcErr.Status)
@@ -1422,7 +1451,7 @@ func TestGetChannelStatus(t *testing.T) {
 		dmChannel := &model.Channel{Id: "dm-id", Type: model.ChannelTypeDirect}
 		api.On("GetChannel", "dm-id").Return(dmChannel, nil)
 
-		resp, svcErr := p.getChannelStatus("dm-id")
+		resp, svcErr := p.getChannelStatus("dm-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 400, svcErr.Status)
@@ -1438,7 +1467,7 @@ func TestGetChannelStatus(t *testing.T) {
 		groupChannel := &model.Channel{Id: "group-id", Type: model.ChannelTypeGroup}
 		api.On("GetChannel", "group-id").Return(groupChannel, nil)
 
-		resp, svcErr := p.getChannelStatus("group-id")
+		resp, svcErr := p.getChannelStatus("group-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 400, svcErr.Status)
@@ -1465,7 +1494,7 @@ func TestGetChannelStatus(t *testing.T) {
 			}, nil
 		}
 
-		resp, svcErr := p.getChannelStatus("chan-id")
+		resp, svcErr := p.getChannelStatus("chan-id", nil)
 		require.Nil(t, svcErr)
 		require.NotNil(t, resp)
 		assert.Equal(t, "chan-id", resp.ChannelID)
@@ -1500,7 +1529,7 @@ func TestGetChannelStatus(t *testing.T) {
 			return nil, errors.New("db error")
 		}
 
-		resp, svcErr := p.getChannelStatus("chan-id")
+		resp, svcErr := p.getChannelStatus("chan-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 500, svcErr.Status)
@@ -1523,7 +1552,7 @@ func TestGetChannelStatus(t *testing.T) {
 			return nil, errors.New("db error")
 		}
 
-		resp, svcErr := p.getChannelStatus("chan-id")
+		resp, svcErr := p.getChannelStatus("chan-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 500, svcErr.Status)
@@ -1539,10 +1568,130 @@ func TestGetChannelStatus(t *testing.T) {
 		api.On("GetChannel", "chan-id").Return(channel, nil)
 		api.On("GetTeam", "team-id").Return(nil, &model.AppError{Message: "not found"})
 
-		resp, svcErr := p.getChannelStatus("chan-id")
+		resp, svcErr := p.getChannelStatus("chan-id", nil)
 		assert.Nil(t, resp)
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 404, svcErr.Status)
+	})
+
+	t.Run("channel request mode sets ChannelRequestMode for non-team-admin", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		channel := testChannel()
+		team := testTeam()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("GetTeam", "team-id").Return(team, nil)
+
+		// Non-team-admin user.
+		callingUser := &model.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(callingUser, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&model.TeamMember{
+			TeamId: "team-id", UserId: "chanadmin-id", SchemeAdmin: false,
+		}, nil)
+
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{}, nil
+		}
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+		kvs.getChannelConnectionRequestFn = func(channelID, connKey string) (*store.ConnectionRequest, error) {
+			return nil, nil
+		}
+
+		resp, svcErr := p.getChannelStatus("chan-id", callingUser)
+		require.Nil(t, svcErr)
+		require.NotNil(t, resp)
+		assert.True(t, resp.ChannelRequestMode)
+	})
+
+	t.Run("team admin does not get ChannelRequestMode", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		channel := testChannel()
+		team := testTeam()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("GetTeam", "team-id").Return(team, nil)
+
+		// Team admin user.
+		teamAdmin := &model.User{Id: "teamadmin-id", Username: "teamadmin"}
+		api.On("GetUser", "teamadmin-id").Return(teamAdmin, nil)
+		api.On("GetTeamMember", "team-id", "teamadmin-id").Return(&model.TeamMember{
+			TeamId: "team-id", UserId: "teamadmin-id", SchemeAdmin: true,
+		}, nil)
+
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{}, nil
+		}
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+
+		resp, svcErr := p.getChannelStatus("chan-id", teamAdmin)
+		require.Nil(t, svcErr)
+		require.NotNil(t, resp)
+		assert.False(t, resp.ChannelRequestMode)
+	})
+
+	t.Run("RequestPending set when channel request exists", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+
+		boolTrue := true
+		p.configuration = &configuration{
+			RestrictToSystemAdmins:    &boolTrue,
+			AllowTeamAdminRequests:    &boolTrue,
+			AllowChannelAdminRequests: &boolTrue,
+			OutboundConnections:       `[{"name":"high","provider":"nats","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		channel := testChannel()
+		team := testTeam()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("GetTeam", "team-id").Return(team, nil)
+
+		callingUser := &model.User{Id: "chanadmin-id", Username: "chanadmin"}
+		api.On("GetUser", "chanadmin-id").Return(callingUser, nil)
+		api.On("GetTeamMember", "team-id", "chanadmin-id").Return(&model.TeamMember{
+			TeamId: "team-id", UserId: "chanadmin-id", SchemeAdmin: false,
+		}, nil)
+
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{}, nil
+		}
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+		kvs.getChannelConnectionRequestFn = func(channelID, connKey string) (*store.ConnectionRequest, error) {
+			return &store.ConnectionRequest{RequesterID: "chanadmin-id"}, nil
+		}
+
+		resp, svcErr := p.getChannelStatus("chan-id", callingUser)
+		require.Nil(t, svcErr)
+		require.NotNil(t, resp)
+		require.Len(t, resp.TeamConnections, 1)
+		assert.True(t, resp.TeamConnections[0].RequestPending)
 	})
 }
 
@@ -1982,7 +2131,7 @@ func TestGetChannelStatus_DMChannel(t *testing.T) {
 	dmChannel := &model.Channel{Id: "dm-chan-id", Type: model.ChannelTypeDirect, TeamId: ""}
 	api.On("GetChannel", "dm-chan-id").Return(dmChannel, nil)
 
-	resp, svcErr := p.getChannelStatus("dm-chan-id")
+	resp, svcErr := p.getChannelStatus("dm-chan-id", nil)
 	assert.Nil(t, resp)
 	require.NotNil(t, svcErr)
 	assert.Equal(t, 400, svcErr.Status)

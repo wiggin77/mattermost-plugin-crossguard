@@ -76,7 +76,7 @@ func (p *Plugin) createConnectionRequest(user *model.User, teamID string, conn s
 	}
 
 	teamLink := teamTownSquareLink(team)
-	message := buildRequestDMMessage(userLabel, teamLink, ck, p.getConnectionMap())
+	message := buildRequestDMMessage(userLabel, teamLink, ck, p.getConnectionMap(), "")
 
 	var postIDs []string
 	for _, admin := range admins {
@@ -169,7 +169,7 @@ func (p *Plugin) createConnectionRequest(user *model.User, teamID string, conn s
 	}
 
 	// Send an informational DM to the requester with the full request details.
-	confirmMsg := buildRequestConfirmationMessage(teamLink, ck, p.getConnectionMap())
+	confirmMsg := buildRequestConfirmationMessage(teamLink, ck, p.getConnectionMap(), "", "system admins")
 	if dmChannel, appErr := p.API.GetDirectChannel(p.botUserID, user.Id); appErr != nil {
 		p.API.LogWarn("Failed to get DM channel for requester confirmation",
 			"error_code", errcode.RequestConfirmDMFailed,
@@ -380,10 +380,7 @@ func (p *Plugin) handleRequestDenySubmit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	reason := ""
-	if v, ok := req.Submission["reason"].(string); ok {
-		reason = strings.TrimSpace(v)
-	}
+	reason := parseDenyReason(req.Submission)
 
 	if err := p.kvstore.DeleteConnectionRequest(teamID, ck); err != nil {
 		p.API.LogError("Failed to delete denied connection request",
@@ -391,17 +388,7 @@ func (p *Plugin) handleRequestDenySubmit(w http.ResponseWriter, r *http.Request)
 			"team_id", teamID, "conn_key", ck, "error", err.Error())
 	}
 
-	postMsg := fmt.Sprintf(
-		"| **Status** | :no_entry_sign: Denied |\n"+
-			"| **Denied by** | @%s |", user.Username)
-	if reason != "" {
-		postMsg += fmt.Sprintf("\n| **Reason** | %s |", reason)
-	}
-
-	notifyMsg := fmt.Sprintf("Your request to link connection `%s` has been **denied** by @%s.", ck, user.Username)
-	if reason != "" {
-		notifyMsg += "\n\n>**Reason:** " + reason
-	}
+	postMsg, notifyMsg := buildDenyMessages(user.Username, ck, reason)
 
 	p.updateRequestPosts(connReq.PostIDs, postMsg)
 	p.notifyRequester(connReq.RequesterID, notifyMsg)
@@ -451,6 +438,37 @@ func (p *Plugin) getSystemAdmins() ([]*model.User, error) {
 		page++
 	}
 	return admins, nil
+}
+
+const maxDenyReasonLen = 1000
+
+// parseDenyReason extracts and truncates the deny reason from a dialog submission.
+func parseDenyReason(submission map[string]any) string {
+	reason := ""
+	if v, ok := submission["reason"].(string); ok {
+		reason = strings.TrimSpace(v)
+		if len(reason) > maxDenyReasonLen {
+			reason = reason[:maxDenyReasonLen]
+		}
+	}
+	return reason
+}
+
+// buildDenyMessages returns the post update message and requester notification
+// for a denied connection request.
+func buildDenyMessages(username, ck, reason string) (postMsg, notifyMsg string) {
+	postMsg = fmt.Sprintf(
+		"| **Status** | :no_entry_sign: Denied |\n"+
+			"| **Denied by** | @%s |", username)
+	if reason != "" {
+		postMsg += fmt.Sprintf("\n| **Reason** | %s |", reason)
+	}
+
+	notifyMsg = fmt.Sprintf("Your request to link connection `%s` has been **denied** by @%s.", ck, username)
+	if reason != "" {
+		notifyMsg += "\n\n>**Reason:** " + reason
+	}
+	return postMsg, notifyMsg
 }
 
 // updateRequestPosts removes buttons from all admin DM posts and appends

@@ -637,8 +637,9 @@ components:
     ConnectionStatusEntry:
       type: object
       description: >
-        Per-connection status within a TeamStatusResponse. Includes
-        config-derived fields and runtime state.
+        Per-connection status within a TeamStatusResponse or
+        ChannelStatusResponse. Includes config-derived fields and
+        runtime state.
       properties:
         name:
           type: string
@@ -653,9 +654,12 @@ components:
         request_pending:
           type: boolean
           description: >
-            True when a Team Admin link request is pending for this
-            unlinked connection. Only populated when the plugin is in
-            request mode.
+            True when a link request is pending for this unlinked
+            connection. For team status, indicates a Team Admin
+            request awaiting System Admin approval. For channel
+            status, indicates a Channel Admin request awaiting Team
+            Admin approval. Only populated when the plugin is in the
+            relevant request mode.
         file_transfer_enabled:
           type: boolean
         file_filter_mode:
@@ -666,6 +670,33 @@ components:
           type: string
         remote_team_name:
           type: string
+
+    ChannelStatusResponse:
+      type: object
+      description: >
+        Response from GET /api/v1/channels/{channel_id}/status.
+        Returns connection status for a specific channel, showing
+        team-linked connections and any orphaned channel connections.
+      properties:
+        channel_id:
+          type: string
+        channel_name:
+          type: string
+        channel_display_name:
+          type: string
+        team_name:
+          type: string
+        channel_request_mode:
+          type: boolean
+          description: >
+            True when the calling user is a Channel Admin operating
+            in channel request mode (RestrictToSystemAdmins +
+            AllowChannelAdminRequests both enabled, and the caller
+            is not a Team Admin or System Admin). Omitted otherwise.
+        team_connections:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectionStatusEntry"
 
     ConnectionRequest:
       type: object
@@ -690,6 +721,40 @@ components:
             type: string
           description: >
             IDs of the DM posts sent to System Admins. Used to update
+            or remove buttons after approval/denial.
+        created_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in milliseconds when the request was created.
+
+    ChannelConnectionRequest:
+      type: object
+      description: >
+        Internal model for a pending channel connection link request.
+        Created when a Channel Admin runs init-channel in channel
+        request mode. Stored in the KV store keyed by
+        channel_id + conn_key. Approved or denied by Team Admins.
+      properties:
+        requester_id:
+          type: string
+          description: User ID of the Channel Admin who submitted the request.
+        team_id:
+          type: string
+          description: ID of the team the channel belongs to.
+        channel_id:
+          type: string
+          description: ID of the channel to link.
+        conn_key:
+          type: string
+          description: >
+            Connection key in direction:name format (e.g.
+            outbound:relay-to-b).
+        post_ids:
+          type: array
+          items:
+            type: string
+          description: >
+            IDs of the DM posts sent to Team Admins. Used to update
             or remove buttons after approval/denial.
         created_at:
           type: integer

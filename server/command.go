@@ -526,7 +526,15 @@ func (p *Plugin) isTeamAdminOrSystemAdmin(userID, teamID string) bool {
 
 func (p *Plugin) executeInitChannel(args *model.CommandArgs) *model.CommandResponse {
 	if !p.isChannelAdminOrHigher(args.UserId, args.ChannelId, args.TeamId) {
-		return respondEphemeral("You must be a member of this channel and a channel admin, team admin, or system admin.")
+		switch {
+		case p.canDirectlyManageChannelConns(args.UserId, args.TeamId):
+			// Team admins get direct channel access when channel request mode
+			// is on (they are the approvers). Fall through to normal flow.
+		case p.isChannelAdminInRequestMode(args.UserId, args.ChannelId, args.TeamId):
+			return p.executeInitChannelRequest(args)
+		default:
+			return respondEphemeral("You must be a member of this channel and a channel admin, team admin, or system admin.")
+		}
 	}
 
 	user, appErr := p.API.GetUser(args.UserId)
@@ -586,7 +594,10 @@ func (p *Plugin) executeInitChannel(args *model.CommandArgs) *model.CommandRespo
 
 func (p *Plugin) executeTeardownChannel(args *model.CommandArgs) *model.CommandResponse {
 	if !p.isChannelAdminOrHigher(args.UserId, args.ChannelId, args.TeamId) {
-		return respondEphemeral("You must be a member of this channel and a channel admin, team admin, or system admin.")
+		if !p.canDirectlyManageChannelConns(args.UserId, args.TeamId) &&
+			!p.isChannelAdminInRequestMode(args.UserId, args.ChannelId, args.TeamId) {
+			return respondEphemeral("You must be a member of this channel and a channel admin, team admin, or system admin.")
+		}
 	}
 
 	user, appErr := p.API.GetUser(args.UserId)
@@ -621,7 +632,49 @@ func (p *Plugin) executeTeardownChannel(args *model.CommandArgs) *model.CommandR
 		return respondEphemeral("%s", svcErr.Message)
 	}
 
+	p.cancelPendingChannelConnectionRequest(args.ChannelId, connKey(connName))
+
 	return &model.CommandResponse{}
+}
+
+func (p *Plugin) executeInitChannelRequest(args *model.CommandArgs) *model.CommandResponse {
+	user, appErr := p.API.GetUser(args.UserId)
+	if appErr != nil {
+		return respondEphemeral("Failed to look up user.")
+	}
+
+	teamConns, err := p.kvstore.GetTeamConnections(args.TeamId)
+	if err != nil {
+		return respondEphemeral("Failed to check team connections.")
+	}
+	if len(teamConns) == 0 {
+		return respondEphemeral("Team must be initialized first. Run `/%s init-team` first.", commandTrigger)
+	}
+
+	parts := strings.Fields(args.Command)
+	inputName := ""
+	if len(parts) >= 3 {
+		inputName = parts[2]
+	}
+
+	conn, allConns, resolveErr := p.resolveConnectionName(inputName, teamConns)
+	if resolveErr != "" {
+		if len(allConns) == 0 {
+			return respondEphemeral("No connections available on this team.")
+		}
+		if inputName == "" && len(allConns) > 1 {
+			p.openConnectionDialog(args.TriggerId, args.ChannelId, allConns, actionInitChannel)
+			return &model.CommandResponse{}
+		}
+		return respondEphemeral("%s\n\nAvailable connections: %s", resolveErr, strings.Join(connectionDisplayNames(allConns), ", "))
+	}
+
+	msg, crErr := p.createChannelConnectionRequest(user, args.ChannelId, args.TeamId, conn)
+	if crErr != nil {
+		return respondEphemeral("%s", crErr.Error())
+	}
+
+	return respondEphemeral("%s", msg)
 }
 
 func (p *Plugin) executeTeardownTeam(args *model.CommandArgs) *model.CommandResponse {
@@ -664,6 +717,9 @@ func (p *Plugin) executeTeardownTeam(args *model.CommandArgs) *model.CommandResp
 	}
 
 	p.cancelPendingConnectionRequest(args.TeamId, connKey(connName))
+	// Pending channel requests for this connection are not cascaded here because
+	// we lack a channel index. The channel request approve handler validates the
+	// team still has the connection and auto-cancels if not.
 
 	return &model.CommandResponse{}
 }

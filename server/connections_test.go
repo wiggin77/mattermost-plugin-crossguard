@@ -12,6 +12,7 @@ import (
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
+	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -777,6 +778,65 @@ func TestCreateProvider_DefaultToNATS(t *testing.T) {
 	_, err := p.createProvider(cfg, "Outbound")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errMissingNATSConfig)
+}
+
+func TestCreateProvider_AzureQueueInvalidCredential(t *testing.T) {
+	api := &plugintest.API{}
+	addLogMocks(api)
+	p, _ := setupTestPluginWithRouter(api)
+
+	cfg := ConnectionConfig{
+		Name:     "test-conn",
+		Provider: ProviderAzureQueue,
+		AzureQueue: &AzureQueueProviderConfig{
+			AccountName: "acct",
+			AccountKey:  "not-valid-base64!!!",
+		},
+	}
+	_, err := p.createProvider(cfg, "Outbound")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Azure Queue")
+}
+
+func TestCreateProvider_AzureBlobInvalidCredential(t *testing.T) {
+	api := &plugintest.API{}
+	addLogMocks(api)
+	p, _ := setupTestPluginWithRouter(api)
+	p.client = pluginapi.NewClient(api, nil)
+
+	cfg := ConnectionConfig{
+		Name:     "test-conn",
+		Provider: ProviderAzureBlob,
+		AzureBlob: &AzureBlobProviderConfig{
+			AccountName:       "acct",
+			AccountKey:        "not-valid-base64!!!",
+			BlobContainerName: "c1",
+		},
+	}
+	_, err := p.createProvider(cfg, "Outbound")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Azure Blob")
+}
+
+func TestCreateProvider_AzureBlobInboundDirection(t *testing.T) {
+	api := &plugintest.API{}
+	addLogMocks(api)
+	p, _ := setupTestPluginWithRouter(api)
+	p.client = pluginapi.NewClient(api, nil)
+
+	cfg := ConnectionConfig{
+		Name:     "test-conn",
+		Provider: ProviderAzureBlob,
+		AzureBlob: &AzureBlobProviderConfig{
+			AccountName:       "acct",
+			AccountKey:        "not-valid-base64!!!",
+			BlobContainerName: "c1",
+		},
+	}
+	// Exercise the inbound direction path (isOutbound = false).
+	_, err := p.createProvider(cfg, "Inbound")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Azure Blob")
 }
 
 func TestUploadPostFiles_NoFileEnabledConns(t *testing.T) {

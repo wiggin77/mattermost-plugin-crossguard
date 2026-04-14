@@ -134,11 +134,12 @@ func parseFilterTypes(raw string) []string {
 }
 
 type configuration struct {
-	InboundConnections     string `json:"InboundConnections"`
-	OutboundConnections    string `json:"OutboundConnections"`
-	UsernameLookup         *bool  `json:"UsernameLookup"`
-	RestrictToSystemAdmins *bool  `json:"RestrictToSystemAdmins"`
-	AllowTeamAdminRequests *bool  `json:"AllowTeamAdminRequests"`
+	InboundConnections        string `json:"InboundConnections"`
+	OutboundConnections       string `json:"OutboundConnections"`
+	UsernameLookup            *bool  `json:"UsernameLookup"`
+	RestrictToSystemAdmins    *bool  `json:"RestrictToSystemAdmins"`
+	AllowTeamAdminRequests    *bool  `json:"AllowTeamAdminRequests"`
+	AllowChannelAdminRequests *bool  `json:"AllowChannelAdminRequests"`
 }
 
 func (c *configuration) isUsernameLookupEnabled() bool {
@@ -155,6 +156,14 @@ func (c *configuration) isTeamAdminRequestsAllowed() bool {
 
 func (c *configuration) isRequestMode() bool {
 	return c.isRestrictedToSystemAdmins() && c.isTeamAdminRequestsAllowed()
+}
+
+func (c *configuration) isChannelAdminRequestsAllowed() bool {
+	return c.AllowChannelAdminRequests != nil && *c.AllowChannelAdminRequests
+}
+
+func (c *configuration) isChannelRequestMode() bool {
+	return c.isRestrictedToSystemAdmins() && c.isChannelAdminRequestsAllowed()
 }
 
 func parseConnections(raw string) ([]ConnectionConfig, error) {

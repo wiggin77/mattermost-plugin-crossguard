@@ -13,6 +13,7 @@ interface ConnectionStatus {
     file_transfer_enabled: boolean;
     file_filter_mode?: string;
     file_filter_types?: string;
+    request_pending?: boolean;
 }
 
 interface ChannelStatusResponse {
@@ -21,6 +22,7 @@ interface ChannelStatusResponse {
     channel_display_name: string;
     team_name: string;
     team_connections: ConnectionStatus[];
+    channel_request_mode?: boolean;
 }
 
 interface Status {
@@ -48,6 +50,13 @@ const colors = {
 
 const STATUS_DISPLAY_MS = 5000;
 
+function renderLinkButtonLabel(isActioning: boolean, isRequestMode: boolean): string {
+    if (isActioning) {
+        return isRequestMode ? 'Requesting...' : 'Linking...';
+    }
+    return isRequestMode ? 'Request Link' : 'Link';
+}
+
 const CrossguardChannelModal: React.FC = () => {
     const [channelID, setChannelID] = React.useState<string | null>(null);
     const [teamName, setTeamName] = React.useState('');
@@ -56,6 +65,7 @@ const CrossguardChannelModal: React.FC = () => {
     const [fetching, setFetching] = React.useState(false);
     const [status, setStatus] = React.useState<Status>({loading: false});
     const [actionInProgress, setActionInProgress] = React.useState<string | null>(null);
+    const [requestMode, setRequestMode] = React.useState(false);
     const statusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     React.useEffect(() => {
@@ -76,6 +86,7 @@ const CrossguardChannelModal: React.FC = () => {
                 setTeamConnections([]);
                 setStatus({loading: false});
                 setActionInProgress(null);
+                setRequestMode(false);
             }
         };
         document.addEventListener('crossguard:open-modal', handler);
@@ -98,6 +109,7 @@ const CrossguardChannelModal: React.FC = () => {
             setTeamName(data.team_name);
             setChannelName(data.channel_display_name);
             setTeamConnections(data.team_connections || []);
+            setRequestMode(data.channel_request_mode || false);
         } catch {
             setStatus({loading: false, success: false, message: 'Network error loading channel status.'});
         } finally {
@@ -155,7 +167,11 @@ const CrossguardChannelModal: React.FC = () => {
             const url = `/plugins/${manifest.id}/api/v1/channels/${channelID}/${action}?connection_name=${encodeURIComponent(qualifiedName)}`;
             const {ok, data} = await callAPI(url);
             if (ok) {
-                setStatus({loading: false, success: true, message: `Connection "${conn.name}" ${verb}.`});
+                if (data.status === 'request_submitted') {
+                    setStatus({loading: false, success: true, message: (data.message as string) || 'Your request has been submitted for approval.'});
+                } else {
+                    setStatus({loading: false, success: true, message: `Connection "${conn.name}" ${verb}.`});
+                }
             } else {
                 setStatus({loading: false, success: false, message: (data.error as string) || `Failed to ${failVerb} connection.`});
             }
@@ -400,7 +416,7 @@ const CrossguardChannelModal: React.FC = () => {
                                     )}
                                 </div>
                             </div>
-                            {conn.linked ? (
+                            {conn.linked && (
                                 <button
                                     style={s.btnUnlink}
                                     onClick={() => handleToggle(conn)}
@@ -408,13 +424,23 @@ const CrossguardChannelModal: React.FC = () => {
                                 >
                                     {isActioning ? 'Unlinking...' : 'Unlink'}
                                 </button>
-                            ) : (
+                            )}
+                            {!conn.linked && conn.request_pending && (
+                                <button
+                                    style={{...s.btnLink, opacity: 0.5, cursor: 'default'}}
+                                    disabled={true}
+                                    title={'A connection request is awaiting team admin approval'}
+                                >
+                                    {'Request Pending'}
+                                </button>
+                            )}
+                            {!conn.linked && !conn.request_pending && (
                                 <button
                                     style={s.btnLink}
                                     onClick={() => handleToggle(conn)}
                                     disabled={actionInProgress !== null}
                                 >
-                                    {isActioning ? 'Linking...' : 'Link'}
+                                    {renderLinkButtonLabel(isActioning, requestMode)}
                                 </button>
                             )}
                         </div>

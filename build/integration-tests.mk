@@ -50,6 +50,8 @@ docker-smoke-test: docker-check
 	echo "Adding users to channels..." && \
 	USERA_ID=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/users/username/usera \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	USERAA_ID=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/users/username/useraa \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
 	USERB_ID=$$(curl -sf http://localhost:$(MM_PORT_B)/api/v4/users/username/userb \
 		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
 	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$LTH_A/members \
@@ -59,6 +61,13 @@ docker-smoke-test: docker-check
 		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
 		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
 	echo "  Server A: usera added to low-to-high, bi-directional" && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$LTH_A/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERAA_ID"'"}' >/dev/null 2>&1 || true && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$BD_A/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERAA_ID"'"}' >/dev/null 2>&1 || true && \
+	echo "  Server A: useraa added to low-to-high, bi-directional" && \
 	curl -sf -X POST http://localhost:$(MM_PORT_B)/api/v4/channels/$$LTH_B/members \
 		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
 		-d '{"user_id":"'"$$USERB_ID"'"}' >/dev/null 2>&1 || true && \
@@ -174,6 +183,8 @@ docker-integration-test: docker-check
 	echo "Adding users to channels..." && \
 	USERA_ID=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/users/username/usera \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	USERAA_ID=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/users/username/useraa \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
 	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$LOOP_CH/members \
 		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
 		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
@@ -181,6 +192,13 @@ docker-integration-test: docker-check
 		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
 		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
 	echo "  usera added to both local-loopback channels" && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$LOOP_CH/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERAA_ID"'"}' >/dev/null 2>&1 || true && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$LB_CH/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERAA_ID"'"}' >/dev/null 2>&1 || true && \
+	echo "  useraa added to both local-loopback channels" && \
 	echo "Initializing loopback teams..." && \
 	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
 		-H "Authorization: Bearer $$TOKEN_A" \
