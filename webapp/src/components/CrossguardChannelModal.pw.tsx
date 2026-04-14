@@ -1,8 +1,9 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import type {Page, Route} from '@playwright/test';
 import React from 'react';
 
 import CrossguardChannelModal from './CrossguardChannelModal';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 const mockChannelStatus = {
     channel_id: 'ch-123',

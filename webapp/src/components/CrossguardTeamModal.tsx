@@ -13,6 +13,7 @@ interface ConnectionStatus {
     file_transfer_enabled: boolean;
     file_filter_mode?: string;
     file_filter_types?: string;
+    request_pending?: boolean;
 }
 
 interface TeamStatusResponse {
@@ -21,6 +22,7 @@ interface TeamStatusResponse {
     team_display_name: string;
     initialized: boolean;
     connections: ConnectionStatus[];
+    request_mode?: boolean;
 }
 
 interface Status {
@@ -57,6 +59,7 @@ const CrossguardTeamModal: React.FC = () => {
     const [actionInProgress, setActionInProgress] = React.useState<string | null>(null);
     const [editingRewrite, setEditingRewrite] = React.useState<string | null>(null);
     const [rewriteInput, setRewriteInput] = React.useState('');
+    const [requestMode, setRequestMode] = React.useState(false);
     const statusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     React.useEffect(() => {
@@ -78,6 +81,7 @@ const CrossguardTeamModal: React.FC = () => {
                 setActionInProgress(null);
                 setEditingRewrite(null);
                 setRewriteInput('');
+                setRequestMode(false);
             }
         };
         document.addEventListener('crossguard:open-team-modal', handler);
@@ -99,6 +103,7 @@ const CrossguardTeamModal: React.FC = () => {
             const data: TeamStatusResponse = await response.json();
             setTeamName(data.team_display_name);
             setConnections(data.connections || []);
+            setRequestMode(data.request_mode || false);
         } catch {
             setStatus({loading: false, success: false, message: 'Network error loading team status.'});
         } finally {
@@ -157,7 +162,11 @@ const CrossguardTeamModal: React.FC = () => {
             const url = `/plugins/${manifest.id}/api/v1/teams/${teamID}/${action}?connection_name=${encodeURIComponent(connKey)}`;
             const {ok, data} = await callAPI(url);
             if (ok) {
-                setStatus({loading: false, success: true, message: `Connection "${conn.name}" ${verb}.`});
+                if (data.status === 'request_submitted') {
+                    setStatus({loading: false, success: true, message: (data.message as string) || 'Your request has been submitted for approval.'});
+                } else {
+                    setStatus({loading: false, success: true, message: `Connection "${conn.name}" ${verb}.`});
+                }
             } else {
                 setStatus({loading: false, success: false, message: (data.error as string) || `Failed to ${failVerb} connection.`});
             }
@@ -453,6 +462,46 @@ const CrossguardTeamModal: React.FC = () => {
         },
     };
 
+    const renderConnectionButton = (conn: ConnectionStatus, isActioning: boolean) => {
+        if (conn.linked) {
+            return (
+                <button
+                    style={s.btnUnlink}
+                    onClick={() => handleToggle(conn, true)}
+                    disabled={actionInProgress !== null}
+                >
+                    {isActioning ? 'Unlinking...' : 'Unlink'}
+                </button>
+            );
+        }
+        if (conn.request_pending) {
+            return (
+                <button
+                    style={{...s.btnLink, opacity: 0.5, cursor: 'default'}}
+                    disabled={true}
+                    title={'A connection request is awaiting system admin approval'}
+                >
+                    {'Request Pending'}
+                </button>
+            );
+        }
+        let linkLabel = 'Link';
+        let linkingLabel = 'Linking...';
+        if (requestMode) {
+            linkLabel = 'Request Link';
+            linkingLabel = 'Requesting...';
+        }
+        return (
+            <button
+                style={s.btnLink}
+                onClick={() => handleToggle(conn, false)}
+                disabled={actionInProgress !== null}
+            >
+                {isActioning ? linkingLabel : linkLabel}
+            </button>
+        );
+    };
+
     const renderBody = () => {
         if (fetching) {
             return <p style={{...s.emptyState, color: colors.textMuted}}>{'Loading...'}</p>;
@@ -591,23 +640,7 @@ const CrossguardTeamModal: React.FC = () => {
                                     )}
                                 </div>
                             </div>
-                            {conn.linked ? (
-                                <button
-                                    style={s.btnUnlink}
-                                    onClick={() => handleToggle(conn, true)}
-                                    disabled={actionInProgress !== null}
-                                >
-                                    {isActioning ? 'Unlinking...' : 'Unlink'}
-                                </button>
-                            ) : (
-                                <button
-                                    style={s.btnLink}
-                                    onClick={() => handleToggle(conn, false)}
-                                    disabled={actionInProgress !== null}
-                                >
-                                    {isActioning ? 'Linking...' : 'Link'}
-                                </button>
-                            )}
+                            {renderConnectionButton(conn, isActioning)}
                         </div>
                     );
                 })}

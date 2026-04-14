@@ -1,8 +1,9 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import CrossguardChannelIndicator from './CrossguardChannelIndicator';
 import CrossguardChannelIndicatorStory from './CrossguardChannelIndicatorStory';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 // Note: The icon span uses an icon font class (icon-circle-multiple-outline) which
 // isn't loaded in the test environment. The element exists in the DOM but has zero

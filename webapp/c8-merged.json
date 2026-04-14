@@ -1,0 +1,17 @@
+{
+    "all": false,
+    "exclude": [
+        "**/node_modules/**",
+        "**/*.spec.ts",
+        "**/*.pw.tsx",
+        "**/*Story.tsx",
+        "**/PluginTestHarness.tsx",
+        "**/TestPlaceholder.tsx",
+        "**/types/**",
+        "**/manifest.ts",
+        "**/manifest.spec.ts",
+        "playwright.config.ts",
+        "playwright-ct.config.ts"
+    ],
+    "reporter": ["text", "html"]
+}

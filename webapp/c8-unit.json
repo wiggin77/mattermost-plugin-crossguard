@@ -1,0 +1,14 @@
+{
+    "all": true,
+    "include": ["src/**/*.{ts,tsx}"],
+    "exclude": [
+        "src/**/*.spec.ts",
+        "src/**/*.pw.tsx",
+        "src/**/*Story.tsx",
+        "src/components/PluginTestHarness.tsx",
+        "src/components/TestPlaceholder.tsx",
+        "src/types/**",
+        "src/manifest.ts"
+    ],
+    "reporter": ["text", "html"]
+}

@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import PluginTestHarness from './components/PluginTestHarness';
+
+import {test, expect} from '../playwright/ct-coverage';
 
 // These tests mount PluginTestHarness to load the Plugin class and connection_state
 // into the browser's window object, then use page.evaluate() to exercise Plugin behavior.

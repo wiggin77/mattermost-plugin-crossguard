@@ -1,9 +1,10 @@
 
-import {test, expect} from '@playwright/experimental-ct-react';
 import type {Page} from '@playwright/test';
 import React from 'react';
 
 import CrossguardTeamModal from './CrossguardTeamModal';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 const mockTeamStatus = {
     team_id: 'team-456',

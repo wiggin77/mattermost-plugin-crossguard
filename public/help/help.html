@@ -190,12 +190,12 @@
                 <tr>
                     <td><span class="permission-tag permission-teamadmin">Team Admin</span></td>
                     <td><code>init-team</code>, <code>teardown-team</code>, <code>init-channel</code>, <code>teardown-channel</code>, <code>reset-prompt</code>, <code>reset-channel-prompt</code>, <code>rewrite-team</code>, <code>status</code> within their team.</td>
-                    <td>Access blocked when <code>RestrictToSystemAdmins</code> is enabled.</td>
+                    <td>Access blocked when <code>RestrictToSystemAdmins</code> is enabled, unless <code>AllowTeamAdminRequests</code> is also enabled (see Request Mode below).</td>
                 </tr>
                 <tr>
                     <td><span class="permission-tag permission-channeladmin">Channel Admin</span></td>
                     <td><code>init-channel</code>, <code>teardown-channel</code> within their channel (team must already be initialized).</td>
-                    <td>Access blocked when <code>RestrictToSystemAdmins</code> is enabled.</td>
+                    <td>Access blocked when <code>RestrictToSystemAdmins</code> is enabled, unless <code>AllowChannelAdminRequests</code> is also enabled (see Channel Request Mode below).</td>
                 </tr>
                 <tr>
                     <td><span class="permission-tag permission-member">Member</span></td>
@@ -211,6 +211,30 @@
                 When <code>RestrictToSystemAdmins</code> is enabled in plugin settings, Team Admins
                 and Channel Admins lose access to connection management commands. Only System Admins
                 can manage connections.
+            </p>
+        </div>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Request Mode (Team)</p>
+            <p>
+                When both <code>RestrictToSystemAdmins</code> and <code>AllowTeamAdminRequests</code>
+                are enabled, Team Admins regain limited access: <code>init-team</code> submits a link
+                request for System Admin approval (instead of linking directly), and
+                <code>teardown-team</code> allows direct unlinking without approval. System Admins
+                receive request DMs with interactive Approve/Deny buttons. See the
+                <a href="admin.html">Admin Configuration</a> page for details.
+            </p>
+        </div>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Channel Request Mode</p>
+            <p>
+                When both <code>RestrictToSystemAdmins</code> and <code>AllowChannelAdminRequests</code>
+                are enabled, Channel Admins regain limited access: <code>init-channel</code> submits a
+                channel link request for Team Admin approval (instead of linking directly), and
+                <code>teardown-channel</code> allows direct unlinking without approval. Team Admins
+                receive request DMs with interactive Approve/Deny buttons. See the
+                <a href="admin.html">Admin Configuration</a> page for details.
             </p>
         </div>
 

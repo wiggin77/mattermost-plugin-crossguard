@@ -448,8 +448,8 @@
                 <tr><td>Severity</td><td><span class="permission-tag permission-teamadmin">MEDIUM</span></td></tr>
                 <tr><td>Description</td><td>By default (<code>RestrictToSystemAdmins=false</code>), Team Admins can link/unlink connections to their teams, and Channel Admins can manage channel connections. A compromised or rogue Team Admin could enable relay on channels without broader organizational approval.</td></tr>
                 <tr><td>Code Path</td><td><code>command.go</code> (<code>isTeamAdminOrSystemAdmin</code>) checks <code>RestrictToSystemAdmins</code>.</td></tr>
-                <tr><td>Mitigation</td><td>Enable <code>RestrictToSystemAdmins</code> setting to lock all connection management to System Admins only. Inbound connections require explicit Accept via admin prompts before messages flow.</td></tr>
-                <tr><td>Residual Risk</td><td>With the setting disabled, the blast radius is limited to the Team Admin's own team.</td></tr>
+                <tr><td>Mitigation</td><td>Enable <code>RestrictToSystemAdmins</code> setting to lock all connection management to System Admins only. Alternatively, enable both <code>RestrictToSystemAdmins</code> and <code>AllowTeamAdminRequests</code> to allow Team Admins to submit link requests that require System Admin approval via interactive DM buttons, while still allowing direct unlinking. Inbound connections require explicit Accept via admin prompts before messages flow.</td></tr>
+                <tr><td>Residual Risk</td><td>With the setting disabled, the blast radius is limited to the Team Admin's own team. With request mode enabled, Team Admins can unlink connections directly without approval, but linking always requires System Admin approval.</td></tr>
             </tbody>
         </table>
 
@@ -618,7 +618,8 @@
         <ol class="steps">
             <li>
                 <strong>Enable <code>RestrictToSystemAdmins</code></strong>: Lock all connection
-                management to System Admins.
+                management to System Admins. Optionally enable <code>AllowTeamAdminRequests</code>
+                to let Team Admins submit link requests that require System Admin approval.
             </li>
             <li>
                 <strong>Disable <code>UsernameLookup</code></strong>: Force all inbound messages
@@ -779,7 +780,7 @@
                     <td>Privilege</td>
                     <td><span class="permission-tag permission-teamadmin">MEDIUM</span></td>
                     <td>Config option</td>
-                    <td>Enable <code>RestrictToSystemAdmins</code></td>
+                    <td>Enable <code>RestrictToSystemAdmins</code> (optionally with <code>AllowTeamAdminRequests</code>)</td>
                 </tr>
                 <tr>
                     <td><a href="#t-priv-2">T-PRIV-2</a></td>

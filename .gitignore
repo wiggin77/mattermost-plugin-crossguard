@@ -4,6 +4,10 @@ coverage.txt
 coverage.out
 webapp/coverage/
 webapp/coverage-ct/
+webapp/coverage-merged/
+webapp/.v8-ct-coverage/
+webapp/.v8-unit-coverage/
+webapp/.v8-merged-coverage/
 webapp/src/manifest.ts
 server/manifest.go
 

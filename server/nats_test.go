@@ -8,10 +8,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -632,6 +634,115 @@ func TestNATSWatchFiles_ReceivesUpload(t *testing.T) {
 		assert.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for watcher to exit")
+	}
+}
+
+func TestNATSWatchFiles_HandlerError(t *testing.T) {
+	addr := startEmbeddedNATS(t)
+
+	uploaderNC, err := nats.Connect(addr, nats.Timeout(natsConnectTimeout))
+	require.NoError(t, err)
+	defer uploaderNC.Close()
+
+	watcherNC, err := nats.Connect(addr, nats.Timeout(natsConnectTimeout))
+	require.NoError(t, err)
+	defer watcherNC.Close()
+
+	api := &plugintest.API{}
+	registerLogMocks(api, "LogError", "LogWarn")
+
+	watcher := &natsProvider{nc: watcherNC, subject: "test.watch.handler-err", api: api}
+	uploader := &natsProvider{nc: uploaderNC, subject: "test.watch.handler-err"}
+
+	var callCount atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchDone := make(chan error, 1)
+	go func() {
+		watchDone <- watcher.WatchFiles(ctx, func(key string, data []byte, headers map[string]string) error {
+			callCount.Add(1)
+			if key == "err-file" {
+				return errors.New("handler failure")
+			}
+			return nil
+		})
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Upload a file whose handler will fail.
+	require.NoError(t, uploader.UploadFile(context.Background(), "err-file", []byte("data1"), nil))
+	// Upload a second file to confirm the watcher continues after handler error.
+	time.Sleep(300 * time.Millisecond)
+	require.NoError(t, uploader.UploadFile(context.Background(), "ok-file", []byte("data2"), nil))
+
+	// Wait for both files to be processed.
+	require.Eventually(t, func() bool { return callCount.Load() >= 2 }, 10*time.Second, 100*time.Millisecond,
+		"watcher should continue processing after handler error")
+
+	cancel()
+	select {
+	case err := <-watchDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchFiles did not exit after context cancellation")
+	}
+}
+
+func TestNATSWatchFiles_DeletedObjectSkipped(t *testing.T) {
+	addr := startEmbeddedNATS(t)
+
+	nc1, err := nats.Connect(addr, nats.Timeout(natsConnectTimeout))
+	require.NoError(t, err)
+	defer nc1.Close()
+
+	nc2, err := nats.Connect(addr, nats.Timeout(natsConnectTimeout))
+	require.NoError(t, err)
+	defer nc2.Close()
+
+	api := &plugintest.API{}
+	registerLogMocks(api, "LogError", "LogWarn")
+
+	watcher := &natsProvider{nc: nc2, subject: "test.watch.del", api: api}
+	uploader := &natsProvider{nc: nc1, subject: "test.watch.del"}
+
+	var received atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchDone := make(chan error, 1)
+	go func() {
+		watchDone <- watcher.WatchFiles(ctx, func(key string, data []byte, headers map[string]string) error {
+			received.Add(1)
+			return nil
+		})
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+
+	// Upload then delete a file; the delete event should be skipped.
+	require.NoError(t, uploader.UploadFile(context.Background(), "del-file", []byte("data"), nil))
+	time.Sleep(300 * time.Millisecond)
+
+	// Delete the file from the object store.
+	os1, err := getOrCreateObjectStore(context.Background(), nc1, objectStoreBucket)
+	require.NoError(t, err)
+	require.NoError(t, os1.Delete(context.Background(), "del-file"))
+
+	// Upload another file to confirm processing continues.
+	time.Sleep(300 * time.Millisecond)
+	require.NoError(t, uploader.UploadFile(context.Background(), "ok-file", []byte("data2"), nil))
+
+	require.Eventually(t, func() bool { return received.Load() >= 2 }, 10*time.Second, 100*time.Millisecond,
+		"watcher should process both uploaded files and skip delete events")
+
+	cancel()
+	select {
+	case err := <-watchDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchFiles did not exit after context cancellation")
 	}
 }
 

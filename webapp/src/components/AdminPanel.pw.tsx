@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import AdminPanel from './AdminPanel';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 test.describe('AdminPanel', () => {
     test('renders plugin name from manifest', async ({mount}) => {

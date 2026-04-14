@@ -1,7 +1,8 @@
-import {test, expect} from '@playwright/experimental-ct-react';
 import React from 'react';
 
 import CrossguardUserPopover from './CrossguardUserPopover';
+
+import {test, expect} from '../../playwright/ct-coverage';
 
 test.describe('CrossguardUserPopover', () => {
     test('renders null when user has no props object', async ({mount}) => {
