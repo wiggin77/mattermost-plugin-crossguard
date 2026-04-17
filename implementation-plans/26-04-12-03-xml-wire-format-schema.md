@@ -43,6 +43,7 @@ The `TransportEnvelope` is the root element of every message on the wire.
 <?xml version="1.0" encoding="UTF-8"?>
 <CrossGuardEnvelope version="1" type="sync_msg">
   <ConnName>nats-low-to-high</ConnName>
+  <Timestamp>2026-04-14T18:30:00Z</Timestamp>
   <TeamName>test-a</TeamName>
   <ChannelName>town-square</ChannelName>
   <SyncMsg>
@@ -56,6 +57,7 @@ The `TransportEnvelope` is the root element of every message on the wire.
 | `version` (attr) | int | yes | Wire format version. Currently `1`. |
 | `type` (attr) | string | yes | Message type: `sync_msg`, `attachment`, `profile_image`, `test`. |
 | `ConnName` | string | yes | Connection name for routing. |
+| `Timestamp` | string | yes | RFC 3339 UTC timestamp of when the envelope was created. Used for message ordering, retry-queue age calculations, and audit trails. |
 | `TeamName` | string | yes | Source team name (used by receiver to look up local team). |
 | `ChannelName` | string | yes | Source channel name (used by receiver to look up local channel). |
 | `SyncMsg` | element | when type=`sync_msg` | Content payload. See below. |
@@ -201,7 +203,7 @@ Mirrors `model.Post`. Fields tagged `json:"-"` in the Go struct are excluded.
 **Note on Props**: `Post.Props` is `StringInterface` (`map[string]any`) in Go. For XML
 serialization, values are converted to their string representation. Complex nested
 values (rare in practice) are JSON-encoded as the value string. On deserialization,
-all values are restored as strings. `SendSharedChannelSyncMsg` accepts string values
+all values are restored as strings. `ReceiveSharedChannelSyncMsg` accepts string values
 in Props, so no type reconstruction is needed.
 
 ## User
@@ -440,6 +442,7 @@ A full `sync_msg` envelope containing one user and one post:
 <?xml version="1.0" encoding="UTF-8"?>
 <CrossGuardEnvelope version="1" type="sync_msg">
   <ConnName>nats-low-to-high</ConnName>
+  <Timestamp>2026-04-14T18:30:00Z</Timestamp>
   <TeamName>test-a</TeamName>
   <ChannelName>town-square</ChannelName>
   <SyncMsg>
@@ -504,6 +507,7 @@ A full `sync_msg` envelope containing one user and one post:
 <?xml version="1.0" encoding="UTF-8"?>
 <CrossGuardEnvelope version="1" type="test">
   <ConnName>nats-low-to-high</ConnName>
+  <Timestamp>2026-04-14T18:30:00Z</Timestamp>
   <TeamName></TeamName>
   <ChannelName></ChannelName>
   <TestID>test-5f8a3c2b-1d4e-4a6f-9b8c-7e2d1f3a5b4c</TestID>

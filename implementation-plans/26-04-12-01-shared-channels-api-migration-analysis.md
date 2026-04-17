@@ -29,11 +29,20 @@ retry queue (`retry_queue.go`, `retry_dispatch.go`) for out-of-order delivery.
 
 ### Limitations of the current approach
 
-- **Fire-and-forget**: If a message fails to publish (provider down, semaphore full), it is
-  lost. There is no cursor or replay mechanism.
+- **Fire-and-forget at every layer**: The outbound hooks publish to providers with no
+  confirmation that the message was received by anyone. Core NATS `Publish` succeeds as
+  soon as the message is buffered in the local client library, not when a subscriber has
+  received it. If the receiving plugin is disconnected, the message is silently lost with
+  no way to detect or recover. There is no cursor, replay, or acknowledgement mechanism
+  at either the plugin or transport layer. Moving to Shared Channels solves the
+  server-to-plugin leg (cursor-based tracking with replay on failure). The
+  plugin-to-remote-plugin leg (transport) remains fire-and-forget with core NATS, but
+  switching to NATS JetStream in a follow-up would close this gap with persisted streams
+  and ack-based durable consumers.
 - **Out-of-order delivery**: The retry queue (1000 entries, 3 retries, 2min max age) is a
   best-effort workaround. If a parent post arrives after the retry window expires, the reply
-  becomes a standalone post.
+  becomes a standalone post. Shared Channels eliminates this problem because the server
+  handles dependency ordering and `ReceiveSharedChannelSyncMsg` processes content atomically.
 - **No membership sync**: Channel membership changes are not relayed.
 - **No profile image sync**: User avatar changes are not relayed.
 - **No mention transforms**: Cross-server @mentions are not resolved.
@@ -122,19 +131,19 @@ The server sends data in dependency order:
 6. Reactions
 7. User profile images
 
-### Inbound: Plugin to Server (PR 35962, requires v11.7)
+### Inbound: Plugin to Server (PR 35962, merged, available since v11.7)
 
 Three new API methods allow the plugin to push content into Mattermost:
 
 ```go
 // Push posts, users, reactions, memberships, acknowledgements into MM.
-SendSharedChannelSyncMsg(msg *model.SyncMsg) (model.SyncResponse, error)
+ReceiveSharedChannelSyncMsg(msg *model.SyncMsg) (model.SyncResponse, error)
 
 // Push a file attachment into MM.
-SendSharedChannelAttachmentSyncMsg(channelID string, fi *model.FileInfo, data io.Reader) (*model.FileInfo, error)
+ReceiveSharedChannelAttachmentSyncMsg(channelID string, fi *model.FileInfo, data io.Reader) (*model.FileInfo, error)
 
 // Push a user profile image into MM.
-SendSharedChannelProfileImageSyncMsg(userID string, image []byte) error
+ReceiveSharedChannelProfileImageSyncMsg(userID string, image []byte) error
 ```
 
 The server handles:
@@ -208,12 +217,12 @@ which is the simplest approach for a universal relay plugin.
 | Current code | Replaced by | Notes |
 |---|---|---|
 | `hooks.go` (5 hook implementations, filtering, envelope building) | `OnSharedChannelsSyncMsg` delivers pre-packaged `SyncMsg` | Server handles filtering, batching, dependency ordering |
-| `inbound.go` (600+ lines: team/channel resolution, post create/update/delete, reaction handling) | `SendSharedChannelSyncMsg` | Server handles user upsert, post CRUD, reactions, memberships |
+| `inbound.go` (600+ lines: team/channel resolution, post create/update/delete, reaction handling) | `ReceiveSharedChannelSyncMsg` | Server handles user upsert, post CRUD, reactions, memberships |
 | `sync_user.go` (synthetic user creation and lookup) | Server manages remote users natively | Users have `RemoteId` linking them to the plugin's remote |
 | `retry_queue.go` + `retry_dispatch.go` (out-of-order handling) | Server's cursor-based sync and dependency ordering | No retry queue needed; server replays from cursor on reconnect |
 | `store/` post mappings (remote to local ID tracking) | Server tracks this internally | No more `post_mapping:` KV keys |
 | Delete flag logic in `inbound.go` (relay loop prevention) | Server handles idempotency | No more `deleting_flag:` KV keys |
-| File relay in `connections.go` (`uploadPostFiles`) and `inbound.go` (`handleInboundFile`) | `OnSharedChannelsAttachmentSyncMsg` / `SendSharedChannelAttachmentSyncMsg` | Server manages file storage paths and uploads |
+| File relay in `connections.go` (`uploadPostFiles`) and `inbound.go` (`handleInboundFile`) | `OnSharedChannelsAttachmentSyncMsg` / `ReceiveSharedChannelAttachmentSyncMsg` | Server manages file storage paths and uploads |
 | `model/message.go`, `model/post_message.go` (Envelope, PostMessage, DeleteMessage, ReactionMessage) | `model.SyncMsg` and `model.SyncResponse` from the server | Plugin serializes/deserializes the server's types instead of custom ones |
 
 ### Code that stays (with modifications)
@@ -248,9 +257,9 @@ which is the simplest approach for a universal relay plugin.
 - `OnSharedChannelsAttachmentSyncMsg` hook: serialize file info + data, publish via `UploadFile`
 - `OnSharedChannelsProfileImageSyncMsg` hook: serialize and publish profile image
 - `OnSharedChannelsPing` hook: return health status based on provider connectivity
-- Inbound handler: deserialize `SyncMsg` from provider, call `SendSharedChannelSyncMsg`
-- Inbound file handler: deserialize file data, call `SendSharedChannelAttachmentSyncMsg`
-- Inbound profile image handler: call `SendSharedChannelProfileImageSyncMsg`
+- Inbound handler: deserialize `SyncMsg` from provider, call `ReceiveSharedChannelSyncMsg`
+- Inbound file handler: deserialize file data, call `ReceiveSharedChannelAttachmentSyncMsg`
+- Inbound profile image handler: call `ReceiveSharedChannelProfileImageSyncMsg`
 - `OnActivate`: call `RegisterPluginForSharedChannels`
 - `OnDeactivate`: call `UnregisterPluginForSharedChannels`
 - Channel init: call `ShareChannel` + `InviteRemoteToChannel` instead of KV writes
@@ -259,7 +268,16 @@ which is the simplest approach for a universal relay plugin.
 
 Adopting the Shared Channels APIs provides features Cross Guard does not have today:
 
-1. **Reliable catch-up after downtime**: Cursor-based sync replays all missed changes
+1. **Reliable catch-up after downtime**: Cursor-based sync replays all missed changes.
+   The server does not advance the cursor until the plugin's hook returns success,
+   so nothing is lost between the server and the plugin. This is the first half of
+   reliable delivery. The second half (plugin to remote plugin via transport) remains
+   fire-and-forget with core NATS, but the refactored inbound handler is designed with
+   synchronous processing and error propagation so that switching to NATS JetStream
+   (persisted streams, durable consumers, explicit ack) requires only a provider-level
+   change, not an inbound architecture rework. Together, cursor-based outbound tracking
+   and JetStream-based transport would provide end-to-end reliable delivery with no
+   message loss between servers.
 2. **Channel membership sync**: Join/leave events are relayed
 3. **Profile image sync**: Avatar changes are relayed
 4. **Mention transforms**: Cross-server @mentions resolved correctly
@@ -270,9 +288,8 @@ Adopting the Shared Channels APIs provides features Cross Guard does not have to
 
 ## Dependencies
 
-- **Mattermost Server v11.7 or later**: Required for the inbound `Send*` APIs (PR 35962)
+- **Mattermost Server v11.7 or later**: Required for the inbound `Send*` APIs (PR 35962, now merged)
 - **Mattermost Server v9.5 or later**: Required for the outbound hooks and setup APIs
-- PR 35962 is currently open with "Dev Review" and "Security Review" labels
 
 ## Open questions
 
