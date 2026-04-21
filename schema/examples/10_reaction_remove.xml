@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CrossguardMessage xmlns="urn:mattermost-crossguard"><Type>crossguard_reaction_remove</Type><Timestamp>2026-04-15T18:10:00Z</Timestamp><ReactionMessage><PostID>t0zd36zgws5jfg0coyxx2zo708</PostID><ChannelID>we0g6r3a8rign3mcmex4xoi138</ChannelID><ChannelName>engineering-updates</ChannelName><TeamID>kvh7caoiznyam4v2k81bpu2v1s</TeamID><TeamName>cross-guard-team</TeamName><UserID>bchyi2bd71fz9io4dm558jwo77</UserID><Username>bob</Username><EmojiName>thumbsup</EmojiName></ReactionMessage></CrossguardMessage>
