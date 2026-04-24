@@ -39,17 +39,22 @@
         <!-- Section 1: Executive Summary -->
         <h2>1. Executive Summary</h2>
         <p>
-            Cross Guard is a Mattermost plugin that bridges isolated Mattermost instances across security
-            domain boundaries using NATS or Azure Queue Storage as the transport layer. It is designed
-            for environments where servers cannot share databases, APIs, or network access, including
-            air-gapped networks, multi-classification deployments, and multi-tenant architectures.
+            Cross Guard is a Mattermost plugin that bridges isolated Mattermost instances across
+            security domain boundaries using one of four transport providers as the relay layer:
+            NATS (pub/sub), Azure Queue Storage (polling), Azure Blob Storage (batched
+            write-ahead log), or Azure Service Bus (AMQP with PeekLock and dead-letter). It is
+            designed for environments where servers cannot share databases, APIs, or network
+            access, including air-gapped networks, multi-classification deployments, and
+            multi-tenant architectures.
         </p>
         <p>
             The plugin relays posts, edits, deletes, and reactions bidirectionally while keeping each
             Mattermost server fully independent. No database synchronization, no direct API calls between
             servers, and no shared authentication. Each server maintains its own users, teams, channels,
             and data store. Cross Guard operates purely at the message level, publishing serialized
-            envelopes to NATS subjects (or Azure queues) and consuming them on the other side.
+            envelopes (JSON or XML) onto the configured transport (a NATS subject, an Azure Storage
+            queue, a batched WAL blob in an Azure Blob container, or an Azure Service Bus queue) and
+            consuming them on the other side.
         </p>
         <p>
             Administrative controls enforce explicit opt-in at both the team and channel level. No
@@ -58,10 +63,13 @@
             admin prompts before any data crosses the boundary.
         </p>
         <p>
-            Transport security supports TLS 1.2+, mutual certificate authentication (mTLS), NATS
-            authentication (token or credentials), NATS ACLs for subject-level access control,
-            Azure Storage connection string authentication with TLS-always endpoints, and
-            configurable permission lockdown via the <code>RestrictToSystemAdmins</code> setting.
+            Transport security supports TLS 1.2+ across all providers and provider-specific
+            authentication: NATS supports mutual certificate authentication (mTLS), token or
+            credentials authentication, and ACLs for subject-level access control; Azure Queue and
+            Azure Blob use Azure Storage shared-key connection strings over TLS-always endpoints;
+            Azure Service Bus uses a SAS connection string (with SAS material sanitized out of error
+            logs) and supports scoped SAS rules over the namespace-wide root key. Permission
+            lockdown is configurable via the <code>RestrictToSystemAdmins</code> setting.
         </p>
         <p>
             This whitepaper provides a comprehensive technical analysis of Cross Guard's architecture,
@@ -140,7 +148,7 @@
         </p>
         <ul>
             <li><strong>Message-level relay, not database sync:</strong> Only individual post events (create, edit, delete, react) cross the boundary. No bulk data transfer, no schema coupling, no shared state.</li>
-            <li><strong>Asynchronous, decoupled architecture:</strong> The two Mattermost servers never communicate directly. A NATS message bus or Azure Storage account sits between them. Publishers and subscribers interact only with the transport layer, not with each other.</li>
+            <li><strong>Asynchronous, decoupled architecture:</strong> The two Mattermost servers never communicate directly. A transport intermediary (a NATS message bus, an Azure Storage account hosting a queue or a WAL blob container, or an Azure Service Bus namespace) sits between them. Publishers and subscribers interact only with the transport layer, not with each other.</li>
             <li><strong>Full server independence:</strong> Each server maintains its own users, teams, channels, database, authentication, and administration. Cross Guard adds relay capability without modifying any of these.</li>
             <li><strong>Opt-in at every level:</strong> Relay is not automatic. Administrators must explicitly link connections to teams, then to individual channels. Inbound connections require interactive acceptance before any messages flow.</li>
             <li><strong>Minimal data crossing the boundary:</strong> Only text content, routing metadata, and optionally file attachments transit the transport layer. File transfer is disabled by default and must be explicitly enabled per connection with configurable type filtering and size limits. User metadata, channel properties, post properties, and interactive message elements are intentionally excluded.</li>
@@ -149,11 +157,12 @@
         <!-- Section 3: Transport Layer Options -->
         <h2>3. Transport Layer Options</h2>
         <p>
-            Cross Guard supports two transport providers: NATS (pub/sub) and Azure Queue Storage
-            (polling-based). Administrators select a provider per connection in the System Console.
-            Both providers carry the same serialized envelope format (JSON or XML) and support the
-            same message types. The choice depends on infrastructure, latency requirements, and
-            operational preferences.
+            Cross Guard supports four transport providers: NATS (pub/sub), Azure Queue Storage
+            (polling-based), Azure Blob Storage (batched write-ahead log), and Azure Service Bus
+            (AMQP with PeekLock and dead-letter). Administrators select a provider per connection in
+            the System Console. All four providers carry the same serialized envelope format (JSON
+            or XML) and support the same message types. The choice depends on infrastructure,
+            latency requirements, durability needs, cost profile, and operational preferences.
         </p>
 
         <h3>NATS</h3>
@@ -328,9 +337,13 @@ Topology 3: Guard Network (Classified)
         <h5>4. Connection String Authentication</h5>
         <p>
             Authentication uses an Azure Storage connection string, which contains the account
-            name and key. The connection string is stored in the Mattermost plugin configuration
-            (encrypted at rest by Mattermost). No separate TLS certificate management is required
-            because all Azure Storage endpoints use TLS by default.
+            name and key. Mattermost does not encrypt plugin settings at rest, so the connection
+            string is stored as plaintext in <code>config.json</code> and the Mattermost
+            configuration database by default; for production, inject the connections JSON via
+            the Mattermost env-var pattern instead (see
+            <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>).
+            No separate TLS certificate management is required because all Azure Storage
+            endpoints use TLS by default.
         </p>
 
         <h5>5. Auto-Provisioning</h5>
@@ -351,19 +364,141 @@ Topology 3: Guard Network (Classified)
             deletes it after processing.
         </p>
 
+        <h3>Azure Blob Storage</h3>
+
+        <h4>What is Azure Blob Storage?</h4>
+        <p>
+            <a href="https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blobs-introduction">Azure Blob Storage</a>
+            is a fully managed object store. Cross Guard's Azure Blob transport does not use Azure
+            Queue Storage at all. Instead of enqueuing one message per relay event, the outbound
+            side appends events to an in-memory write-ahead log (WAL) and periodically seals and
+            uploads the WAL as a single batch blob. The inbound side polls the container, takes a
+            short-lived lease on each batch blob, processes its messages, and deletes the blob.
+        </p>
+
+        <h4>Why Azure Blob Storage Fits the CDS Model</h4>
+
+        <h5>1. Batched Writes Reduce API Cost</h5>
+        <p>
+            One batch blob carries many messages, so total Azure Storage API calls scale with the
+            number of flush intervals rather than with the number of relay events. In high-volume
+            channels this is significantly cheaper than per-message queue operations and easier to
+            reason about for cost forecasting in regulated tenants.
+        </p>
+
+        <h5>2. Lease-Based Mutual Exclusion</h5>
+        <p>
+            Each batch blob is protected by a short-lived blob lease while an inbound poller
+            processes it. If the poller crashes mid-flight, the lease expires after
+            <code>blob_lock_max_age_seconds</code> (default 300) and another inbound node may break
+            the lease and retry. This gives at-least-once delivery without an external coordinator.
+        </p>
+
+        <h5>3. Single-Container Footprint</h5>
+        <p>
+            Both batch WAL blobs and deferred file attachment blobs live in the same container.
+            Operators only need to provision one container, which simplifies access policies, audit,
+            and lifecycle rules in CDS environments.
+        </p>
+
+        <h5>4. Connection String Authentication</h5>
+        <p>
+            Authentication is the same Azure Storage connection string model as the Azure Queue
+            provider. Mattermost does not encrypt plugin settings at rest, so the connection
+            string is stored as plaintext in <code>config.json</code> and the Mattermost
+            configuration database by default; inject via env vars for production (see
+            <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>).
+            All Azure Blob traffic is over TLS.
+        </p>
+
+        <h4>How Cross Guard Uses Azure Blob Storage</h4>
+        <p>
+            Outbound buffers serialized envelopes in memory and every
+            <code>flush_interval_seconds</code> (default 60, minimum 5) seals the buffer and
+            uploads it as a time-ordered batch blob. Inbound lists the container on a poll cycle,
+            acquires a lease on each batch blob, dispatches its messages to the inbound handler,
+            then deletes the blob and releases the lease. File attachments are uploaded as deferred
+            file blobs into the same container and reaped after delivery. Expected end-to-end
+            latency is bounded by the configured flush interval.
+        </p>
+
+        <h3>Azure Service Bus</h3>
+
+        <h4>What is Azure Service Bus?</h4>
+        <p>
+            <a href="https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-messaging-overview">Azure Service Bus</a>
+            is a fully managed enterprise message broker speaking AMQP. It provides queue and
+            topic semantics with first-class features that Azure Queue Storage lacks: PeekLock
+            receive with explicit settle, server-side delivery counters, native dead-letter
+            sub-queues, and configurable lock duration on the broker side.
+        </p>
+
+        <h4>Why Azure Service Bus Fits the CDS Model</h4>
+
+        <h5>1. PeekLock with Explicit Settle</h5>
+        <p>
+            Cross Guard receives messages under PeekLock, then calls Complete on handler success or
+            Abandon on handler error. Service Bus increments <code>DeliveryCount</code> on every
+            Abandon and, after the queue's <code>MaxDeliveryCount</code> is exceeded, automatically
+            moves the message to the queue's dead-letter sub-queue. This gives operators
+            poison-message containment without bespoke retry tracking.
+        </p>
+
+        <h5>2. Pre-Created Queues with ARM-Controlled Tunables</h5>
+        <p>
+            The plugin does <em>not</em> auto-create Service Bus queues. Operators provision the
+            queue in the Azure portal, ARM, or Terraform with their chosen
+            <code>LockDuration</code> and <code>MaxDeliveryCount</code>. Lock duration is an entity
+            property and cannot be set from a client. This puts message-handling SLAs and DLQ
+            policy under the same change-control as other Azure infrastructure.
+        </p>
+
+        <h5>3. SAS Connection String Authentication</h5>
+        <p>
+            Authentication is via a Service Bus SAS connection string of the form
+            <code>Endpoint=sb://&lt;namespace&gt;.servicebus.windows.net/;SharedAccessKeyName=&lt;rule&gt;;SharedAccessKey=&lt;key&gt;</code>.
+            Mattermost does not encrypt plugin settings at rest, so the SAS connection string is
+            stored as plaintext in <code>config.json</code> and the Mattermost configuration
+            database by default; for production, inject via env vars (see
+            <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>).
+            Service Bus error messages that might leak SAS material are sanitized before logging.
+        </p>
+
+        <h5>4. Independent File Sidecar</h5>
+        <p>
+            File attachments are transferred via an Azure Blob Storage sidecar container with its
+            own credentials, independent of the Service Bus namespace. Service Bus queues
+            themselves remain message-only and never carry file bytes. This separation lets
+            operators scale and audit each store independently.
+        </p>
+
+        <h4>How Cross Guard Uses Azure Service Bus</h4>
+        <p>
+            Each outbound connection sends a serialized envelope (JSON or XML) into the configured
+            Service Bus queue via the Azure SDK. The inbound side calls
+            <code>ReceiveMessages</code> in batches of up to 32 with a 5-second per-call wait,
+            settles each message with Complete on success or Abandon on error, and logs a WARN
+            when <code>DeliveryCount &gt; 1</code> so operators can detect poison-message buildup
+            before DLQ moves happen. The default outbound payload ceiling is 192,000 bytes
+            (Service Bus Standard caps at 256 KiB per message; Premium supports up to 100 MiB).
+            Inbound polls the optional blob sidecar every 15 seconds (configurable) for file
+            attachments.
+        </p>
+
         <h3>Transport Comparison</h3>
         <table>
             <thead>
-                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th></tr>
+                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th><th>Azure Blob Storage</th><th>Azure Service Bus</th></tr>
             </thead>
             <tbody>
-                <tr><td>Latency</td><td>Sub-millisecond (pub/sub)</td><td>5-15 seconds (polling)</td></tr>
-                <tr><td>Delivery</td><td>At-most-once</td><td>At-least-once</td></tr>
-                <tr><td>Message Size</td><td>1 MB default (NATS server configurable)</td><td>48,000 bytes (before Base64)</td></tr>
-                <tr><td>Infrastructure</td><td>Self-hosted NATS cluster</td><td>Azure managed service</td></tr>
-                <tr><td>Encryption</td><td>TLS (opt-in)</td><td>TLS always (Azure endpoint)</td></tr>
-                <tr><td>File Transfer</td><td>JetStream Object Store (1h TTL)</td><td>Blob Storage (deleted after processing)</td></tr>
-                <tr><td>Best For</td><td>Low-latency, high-throughput environments</td><td>Azure-native environments, simplicity</td></tr>
+                <tr><td>Latency</td><td>Sub-millisecond (pub/sub)</td><td>5-15 seconds (polling)</td><td>Bounded by flush interval (default 60s)</td><td>Bounded by receive max wait (5s) plus broker latency</td></tr>
+                <tr><td>Delivery</td><td>At-most-once</td><td>At-least-once</td><td>At-least-once</td><td>At-least-once (PeekLock with server-side DeliveryCount)</td></tr>
+                <tr><td>Message Size</td><td>1 MB default (NATS server configurable)</td><td>48,000 bytes (before Base64)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
+                <tr><td>Infrastructure</td><td>Self-hosted NATS cluster</td><td>Azure managed service</td><td>Azure managed service</td><td>Azure managed service</td></tr>
+                <tr><td>Encryption</td><td>TLS (opt-in)</td><td>TLS always (Azure endpoint)</td><td>TLS always (Azure endpoint)</td><td>TLS always (AMQP over TLS)</td></tr>
+                <tr><td>File Transfer</td><td>JetStream Object Store (1h TTL)</td><td>Blob Storage (deleted after processing)</td><td>Same container as WAL (deferred file blobs)</td><td>Blob Storage sidecar (independent credentials)</td></tr>
+                <tr><td>Auto-Provisioning</td><td>No (NATS server must exist)</td><td>Queue and container auto-created</td><td>Container auto-created</td><td>No (queue must be pre-created with LockDuration and MaxDeliveryCount)</td></tr>
+                <tr><td>Best For</td><td>Low-latency, high-throughput environments</td><td>Azure-native environments, simplicity</td><td>High-volume channels where amortized API cost matters</td><td>Azure-native environments needing DLQ, redelivery counters, and ARM-controlled SLAs</td></tr>
             </tbody>
         </table>
 
@@ -394,7 +529,11 @@ Topology 3: Guard Network (Classified)
         <p>
             <em>Note:</em> The specific transport mechanism depends on the configured provider.
             For NATS, messages flow over a NATS subject (e.g., <code>crossguard.a-to-b</code>).
-            For Azure Queue Storage, messages flow through an Azure Storage queue.
+            For Azure Queue Storage, messages flow through an Azure Storage queue. For Azure Blob
+            Storage, messages are appended to an in-memory WAL and flushed periodically as batched
+            blobs into a shared container; the inbound side leases each blob, processes it, and
+            deletes it. For Azure Service Bus, messages flow through a pre-created Service Bus
+            queue using PeekLock receive with explicit Complete on success or Abandon on error.
         </p>
         </div>
 
@@ -407,19 +546,22 @@ Topology 3: Guard Network (Classified)
         <ul>
             <li>
                 <strong><code>Plugin</code> struct:</strong> The central struct that holds the bot
-                user ID, KV store reference, transport provider connections (NATS or Azure), relay
-                semaphore, wait group for goroutine lifecycle tracking, and a context for graceful shutdown.
+                user ID, KV store reference, transport provider connections (NATS, Azure Queue,
+                Azure Blob, or Azure Service Bus), relay semaphore, wait group for goroutine
+                lifecycle tracking, and a context for graceful shutdown.
             </li>
             <li>
                 <strong>Outbound pool:</strong> A slice of <code>outboundConn</code> structs, each
-                holding a <code>QueueProvider</code> (NATS connection or Azure client) and its
+                holding a <code>QueueProvider</code> (NATS connection, Azure Queue client, Azure
+                Blob client with in-memory WAL buffer, or Azure Service Bus sender) and its
                 configuration. Protected by a <code>sync.RWMutex</code> to allow concurrent reads
                 (publishing) with exclusive writes (reconnection on config change).
             </li>
             <li>
                 <strong>Inbound pool:</strong> A slice of <code>inboundConn</code> structs, each
-                holding a <code>QueueProvider</code> (NATS subscription or Azure queue poller).
-                Protected by a <code>sync.RWMutex</code> with the same read/write concurrency model.
+                holding a <code>QueueProvider</code> (NATS subscription, Azure queue poller, Azure
+                Blob lease-based reader, or Azure Service Bus PeekLock receiver). Protected by a
+                <code>sync.RWMutex</code> with the same read/write concurrency model.
             </li>
             <li>
                 <strong>Relay semaphore:</strong> A buffered channel of capacity 256, shared by
@@ -446,7 +588,7 @@ Topology 3: Guard Network (Classified)
             <tbody>
                 <tr>
                     <td><strong>OnActivate</strong></td>
-                    <td>Creates bot user, initializes KV store and caching layer, registers the <code>/crossguard</code> slash command, initializes HTTP router for REST API and interactive prompts, creates context for shutdown signaling, spawns relay semaphore, connects all configured outbound and inbound connections (NATS or Azure Queue Storage depending on provider setting).</td>
+                    <td>Creates bot user, initializes KV store and caching layer, registers the <code>/crossguard</code> slash command, initializes HTTP router for REST API and interactive prompts, creates context for shutdown signaling, spawns relay semaphore, connects all configured outbound and inbound connections (NATS, Azure Queue Storage, Azure Blob Storage, or Azure Service Bus depending on each connection's provider setting).</td>
                 </tr>
                 <tr>
                     <td><strong>OnConfigurationChange</strong></td>
@@ -463,7 +605,8 @@ Topology 3: Guard Network (Classified)
         <h2>5. Message Relay Lifecycle (Outbound)</h2>
         <p>
             This section traces the complete path of a message from the moment a user posts in a
-            channel on Server A to the moment it is published to the transport layer (NATS or Azure Queue Storage).
+            channel on Server A to the moment it is published to the transport layer (NATS, Azure
+            Queue Storage, Azure Blob Storage, or Azure Service Bus).
         </p>
 
         <h3>Step 1: Post Lifecycle Hook Fires</h3>
@@ -593,7 +736,7 @@ Topology 3: Guard Network (Classified)
         <ol>
             <li>Check connection health via application-level tracking (success/failure of recent publishes, rechecked every 30 seconds). If unhealthy, skip the connection silently.</li>
             <li>Call <code>provider.Publish(ctx, data)</code> with the serialized bytes (JSON or XML, per connection config)</li>
-            <li>Provider-specific behavior: NATS checks <code>IsConnected()</code>/<code>IsReconnecting()</code>, retries up to 3 times with exponential backoff (500ms, 1s, 2s), and flushes. Azure enqueues as Base64 without application-level retries.</li>
+            <li>Provider-specific behavior: <strong>NATS</strong> checks <code>IsConnected()</code>/<code>IsReconnecting()</code>, retries up to 3 times with exponential backoff (500ms, 1s, 2s), and flushes. <strong>Azure Queue Storage</strong> enqueues as Base64 without application-level retries (Azure SDK handles its own transport retries). <strong>Azure Blob Storage</strong> appends the serialized envelope to an in-memory write-ahead log buffer; the buffer is sealed and uploaded as a batch blob every <code>flush_interval_seconds</code> (default 60). <strong>Azure Service Bus</strong> sends the AMQP message via the Service Bus SDK and enforces a per-connection <code>max_message_size_bytes</code> (default 192,000) at the client boundary before sending; SAS-bearing error messages are sanitized before logging.</li>
             <li>On failure: log an error and drop the message (no queuing)</li>
             <li>Context cancellation is respected during backoff waits for graceful shutdown</li>
         </ol>
@@ -606,17 +749,21 @@ Topology 3: Guard Network (Classified)
         <h2>6. Message Relay Lifecycle (Inbound)</h2>
         <p>
             This section traces the complete path of a message from the moment it arrives via
-            the transport layer (NATS subject or Azure queue) to the moment it appears as a
-            local post on Server B.
+            the transport layer (a NATS subject, an Azure Storage queue, a leased Azure Blob batch
+            blob, or an Azure Service Bus queue) to the moment it appears as a local post on
+            Server B.
         </p>
 
         <h3>Step 1: Transport Delivers Message</h3>
         <p>
             The <code>handleInboundMessage()</code> closure receives raw bytes (<code>[]byte</code>)
-            from the transport provider (NATS subscription callback or Azure queue poller). Like
-            outbound, it performs a non-blocking semaphore acquisition from the same 256-slot pool.
-            If the semaphore is full, the message is dropped with a warning log. If a slot is
-            acquired, a goroutine is spawned.
+            from the transport provider: a NATS subscription callback, an Azure Queue Storage poller
+            (5-second cadence, batches of up to 32), an Azure Blob Storage lease-based reader (one
+            batch blob at a time, scoped by a short-lived blob lease), or an Azure Service Bus
+            PeekLock receiver (batches of up to 32 with a 5-second max wait, Complete on success
+            and Abandon on error). Like outbound, it performs a non-blocking semaphore acquisition
+            from the same 256-slot pool. If the semaphore is full, the message is dropped with a
+            warning log. If a slot is acquired, a goroutine is spawned.
         </p>
 
         <h3>Step 2: Envelope Deserialization</h3>
@@ -749,7 +896,8 @@ Topology 3: Guard Network (Classified)
             Understanding exactly what data crosses the domain boundary is critical for CDS
             evaluation. This section documents every field in the transport envelope, its source,
             whether it is user-controlled, and how it is used on the receiving side. The envelope
-            format is identical for NATS and Azure Queue Storage providers.
+            format is identical across all four transport providers (NATS, Azure Queue Storage,
+            Azure Blob Storage, and Azure Service Bus).
         </p>
 
         <h3>Data That Crosses the Boundary (Transport Envelope)</h3>
@@ -808,6 +956,33 @@ Topology 3: Guard Network (Classified)
                 </tr>
             </tbody>
         </table>
+
+        <h4>Wire Format Encoding (JSON or XML)</h4>
+        <p>
+            Each outbound connection chooses its on-the-wire encoding via the
+            <code>message_format</code> setting (<code>"json"</code> or <code>"xml"</code>). The
+            envelope structure above is identical in both encodings; only the surface syntax
+            differs. JSON uses snake_case field names (<code>post_message</code>); XML uses
+            PascalCase elements rooted at <code>&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;</code>
+            and validated against <code>schema/crossguard.xsd</code>. Inbound connections do not
+            require format configuration: the parser inspects the first non-whitespace byte
+            (<code>&lt;</code> means XML, otherwise JSON) and strips a leading UTF-8 BOM if a CDS
+            device prepended one.
+        </p>
+        <p>
+            The repository ships 12 schema-valid XML sample payloads under
+            <code>schema/examples/</code>, one per message-type variant the plugin emits. Each
+            file is byte-for-byte identical to <code>model.Marshal(env, FormatXML)</code> plus a
+            trailing newline. The byte-equality contract is enforced by
+            <code>TestExampleFiles_Symmetric</code> in
+            <code>server/model/examples_roundtrip_test.go</code>, which also verifies that
+            <code>Unmarshal</code> followed by <code>Marshal</code> is a fixed point and that
+            marshalling is deterministic. Operators evaluating the protocol for CDS approval can
+            point at these example files as the canonical wire shape and at the test as the
+            evidence that the plugin will not silently drift away from them. Detailed JSON and
+            XML field references live in
+            <a href="transport-interface.html">transport-interface.html</a>.
+        </p>
 
         <h4>PostMessage Payload Fields</h4>
         <table>
@@ -1008,24 +1183,24 @@ Topology 3: Guard Network (Classified)
         <ul>
             <li><strong>queue_service_url:</strong> Azure Queue Storage service URL (e.g., <code>https://&lt;account&gt;.queue.core.windows.net</code>)</li>
             <li><strong>blob_service_url:</strong> Azure Blob Storage service URL, required when <code>file_transfer_enabled</code> is true</li>
-            <li><strong>account_name / account_key:</strong> Shared-key credentials (treated as secrets, encrypted at rest by Mattermost)</li>
+            <li><strong>account_name / account_key:</strong> Shared-key credentials. Treated as secrets; see <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a> for the recommended env-var pattern that keeps these out of <code>config.json</code> and the Mattermost configuration database.</li>
             <li><strong>queue_name:</strong> Name of the Azure Storage queue (user-configurable, created automatically if it does not exist)</li>
             <li><strong>blob_container_name:</strong> Name of the Azure Blob container for file transfers (user-configurable, created automatically if it does not exist)</li>
         </ul>
         <h4>Azure Blob Provider Fields (nested under <code>"azure_blob"</code>)</h4>
         <ul>
             <li><strong>service_url:</strong> Azure Blob Storage service URL</li>
-            <li><strong>account_name / account_key:</strong> Shared-key credentials (treated as secrets, encrypted at rest by Mattermost)</li>
+            <li><strong>account_name / account_key:</strong> Shared-key credentials. Treated as secrets; see <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>.</li>
             <li><strong>blob_container_name:</strong> Container that holds both batch WAL blobs and deferred file blobs (auto-created if missing)</li>
             <li><strong>flush_interval_seconds:</strong> Interval at which the outbound WAL buffer is sealed and uploaded as a batch blob. Default 60 seconds, minimum 5.</li>
             <li><strong>blob_lock_max_age_seconds:</strong> Maximum lease age before a stall is broken by another inbound poller. Default 300 seconds, minimum 30.</li>
         </ul>
         <h4>Azure Service Bus Provider Fields (nested under <code>"azure_servicebus"</code>)</h4>
         <ul>
-            <li><strong>connection_string:</strong> SAS connection string for the Service Bus namespace (treated as a secret, encrypted at rest by Mattermost)</li>
+            <li><strong>connection_string:</strong> SAS connection string for the Service Bus namespace. Treated as a secret; see <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>.</li>
             <li><strong>queue_name:</strong> Pre-created Service Bus queue name or hierarchical path. Queues are NOT auto-created; operators must provision them in the Azure portal or via ARM/Terraform with the desired <code>LockDuration</code> and <code>MaxDeliveryCount</code>.</li>
             <li><strong>blob_service_url:</strong> Azure Blob Storage service URL for the file attachment sidecar, required when <code>file_transfer_enabled</code> is true</li>
-            <li><strong>blob_account_name / blob_account_key:</strong> Shared-key credentials for the blob sidecar storage account (independent of the Service Bus namespace; treated as secrets, encrypted at rest by Mattermost)</li>
+            <li><strong>blob_account_name / blob_account_key:</strong> Shared-key credentials for the blob sidecar storage account (independent of the Service Bus namespace). Treated as secrets; see <a href="#secret-storage">Section 11: Secret Storage and Env-Var Injection</a>.</li>
             <li><strong>blob_container_name:</strong> Blob sidecar container for file attachments (auto-created if missing), required when <code>file_transfer_enabled</code> is true</li>
             <li><strong>max_message_size_bytes:</strong> Maximum outbound payload size. Default 192000; maximum 104857600 (100 MiB, Service Bus Premium tier).</li>
             <li><strong>blob_poll_interval_seconds:</strong> Inbound poll cadence for the blob sidecar. Default 15, minimum 1.</li>
@@ -1286,21 +1461,57 @@ Topology 3: Guard Network (Classified)
             </tbody>
         </table>
 
-        <h3>Azure Transport Security</h3>
+        <h3 id="azure-transport-security">Azure Transport Security</h3>
         <ul>
-            <li><strong>Connection String:</strong> The connection string contains the account key and must be treated as a secret. It is stored in the Mattermost plugin configuration (encrypted at rest by Mattermost).</li>
-            <li><strong>Network Security:</strong> Azure Storage supports Virtual Network service endpoints and private endpoints to restrict access to specific networks.</li>
-            <li><strong>Encryption:</strong> All Azure Storage traffic uses TLS. Data at rest is encrypted by Azure Storage Service Encryption (SSE).</li>
-            <li><strong>Access Control:</strong> Use Azure RBAC or shared access signatures (SAS) for fine-grained access control in production. The plugin currently uses connection string (shared key) authentication.</li>
+            <li><strong>Storage Account Credentials (Azure Queue, Azure Blob):</strong> The Azure Storage connection string (or account name plus shared key) contains the storage account credentials and must be treated as a secret. See <a href="#secret-storage">Secret Storage and Env-Var Injection</a> below for how to keep it out of <code>config.json</code>.</li>
+            <li><strong>Service Bus SAS Connection String (Azure Service Bus):</strong> The Service Bus namespace is authenticated with a SAS connection string of the form <code>Endpoint=sb://&lt;namespace&gt;.servicebus.windows.net/;SharedAccessKeyName=&lt;rule&gt;;SharedAccessKey=&lt;key&gt;</code>. The plugin sanitizes <code>SharedAccessKey=</code>, <code>SharedAccessSignature=</code>, and <code>sig=</code> query parameters out of any error messages it logs (<code>sanitizeServiceBusError()</code>) so SAS material does not leak into operator-visible logs. See <a href="#secret-storage">Secret Storage and Env-Var Injection</a> below for how to keep it out of <code>config.json</code>.</li>
+            <li><strong>Independent Sidecar Credentials:</strong> When the Azure Service Bus provider has <code>file_transfer_enabled</code>, its blob sidecar takes its own storage account credentials separate from the Service Bus namespace credentials. The two stores can live in different Azure subscriptions and have independent access policies. Audit and rotate the two credentials independently.</li>
+            <li><strong>Network Security:</strong> Azure Storage and Azure Service Bus both support Virtual Network service endpoints and private endpoints to restrict access to specific networks.</li>
+            <li><strong>Encryption in Transit and at the Provider:</strong> All Azure Storage traffic uses TLS, and Azure Service Bus uses AMQP over TLS. Data at rest is encrypted by Azure Storage Service Encryption (SSE) and by Service Bus's managed encryption at rest. (See the next subsection for credential storage on the Mattermost side, which is a separate concern.)</li>
+            <li><strong>Access Control:</strong> Use Azure RBAC, shared access signatures (SAS), or scoped Service Bus SAS rules for fine-grained access control in production. Prefer scoped Service Bus SAS rules over the namespace-wide <code>RootManageSharedAccessKey</code> so an exposed credential grants only the minimum needed rights.</li>
         </ul>
+
+        <h3 id="secret-storage">Secret Storage and Env-Var Injection</h3>
+        <p>
+            <strong>Mattermost does not encrypt plugin settings at rest.</strong> By default, the
+            connections JSON (<code>OutboundConnections</code> / <code>InboundConnections</code>),
+            including any embedded NATS tokens or passwords, Azure Storage shared keys, or Service
+            Bus SAS connection strings, is stored as plaintext in <code>config.json</code> on disk
+            and in the Mattermost configuration database. Any operator with disk, backup, or DB
+            access can read these credentials.
+        </p>
+        <p>
+            For CDS and any production deployment, inject the connections JSON via Mattermost's
+            environment-variable substitution instead of saving it through the System Console.
+            Mattermost overrides plugin settings at config-load time from environment variables
+            of the form:
+        </p>
+<pre><code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS=&lt;json-array&gt;
+MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_INBOUNDCONNECTIONS=&lt;json-array&gt;</code></pre>
+        <p>
+            Source these environment variables from a secret store appropriate for your platform:
+            Kubernetes secrets, systemd <code>LoadCredential=</code>, HashiCorp Vault, AWS Secrets
+            Manager, Azure Key Vault, or equivalent. The credential then lives only in the
+            Mattermost process environment, not in <code>config.json</code> on disk and not in the
+            Mattermost configuration database. Disk and DB backups no longer carry the secret.
+        </p>
+        <p>
+            <strong>Residual exposure with env-var injection:</strong> the credential is still
+            readable by anyone with read access to the Mattermost process environment (root on the
+            host, container exec, <code>/proc/&lt;pid&gt;/environ</code>, container orchestrator
+            logs that capture the env). System Admins can also still see the in-memory plugin
+            settings through the System Console UI. Combine env-var injection with key rotation
+            and scoped SAS rules so a compromised credential can be rotated quickly and grants
+            only the minimum needed rights.
+        </p>
 
         <!-- Section 12: Deployment Topologies -->
         <h2>12. Deployment Topologies</h2>
         <p>
             Cross Guard supports multiple deployment topologies depending on the number of servers,
             the direction of message flow, the transport provider, and the network architecture
-            between domains. The NATS topologies below apply to NATS-based deployments. Azure
-            Queue Storage topology follows.
+            between domains. Topology diagrams for each transport follow: NATS topologies first,
+            then one diagram per Azure transport provider (Queue Storage, Blob Storage, Service Bus).
         </p>
 
         <h3>Topology 1: Unidirectional Relay (Low-to-High)</h3>
@@ -1421,6 +1632,51 @@ Server B acts as a relay point. Each hop is independent.</pre>
 |                  |    | Blob: (configured)         |    |                  |
 | Upload blob      |--->|                           |--->| Poll blobs (15s) |
 +------------------+    +---------------------------+    +------------------+</pre>
+        </div>
+
+        <h3 id="azure-blob-topology">Azure Blob Storage Topology</h3>
+        <p>
+            The Azure Blob transport replaces the per-message queue with a batched write-ahead log
+            in a single blob container. Outbound buffers events in memory and every
+            <code>flush_interval_seconds</code> seals the buffer and uploads it as a time-ordered
+            batch blob. Inbound takes a short-lived blob lease per batch, processes the messages,
+            then deletes the blob. File attachments live in the same container as deferred file
+            blobs. There is no Azure Queue Storage dependency.
+        </p>
+        <div class="diagram-box">
+<pre>Server A (Low Side)          Azure Storage Account       Server B (High Side)
++--------------------+    +-------------------------+    +----------------------+
+|                    |    | Container: shared       |    |                      |
+| Append to WAL      |    |   - batch blobs (WAL)   |    | List + lease batch   |
+| Flush every 60s    |--->|   - deferred file blobs |--->| blob, deliver, then  |
+| Upload file blob   |--->|                         |--->| delete blob          |
+| (deferred)         |    | (lease = mutual         |    | Stale lease (&gt;300s) |
+|                    |    |  exclusion per blob)    |    | may be broken        |
++--------------------+    +-------------------------+    +----------------------+</pre>
+        </div>
+
+        <h3 id="azure-servicebus-topology">Azure Service Bus Topology</h3>
+        <p>
+            The Azure Service Bus transport uses a pre-created Service Bus queue for messages and
+            an optional Azure Blob Storage sidecar container for file attachments. Authentication
+            is via a SAS connection string for the Service Bus namespace and independent storage
+            account credentials for the blob sidecar. Inbound uses PeekLock receive with explicit
+            settle, so failed handlers cause Service Bus to redeliver until <code>MaxDeliveryCount</code>
+            is hit and the message is moved to the queue's dead-letter sub-queue.
+        </p>
+        <div class="diagram-box">
+<pre>Server A (Low Side)        Azure Service Bus Namespace      Server B (High Side)
++------------------+    +-----------------------------+    +----------------------+
+|                  |    | Queue: (pre-created)        |    | ReceiveMessages       |
+| Send message     |--->|   PeekLock receive          |--->| (batch up to 32,      |
+| (AMQP over TLS)  |    |   DeliveryCount + DLQ       |    |  5s max wait)         |
+|                  |    |                             |    | Complete on success   |
+|                  |    |                             |    | Abandon on error      |
++------------------+    +-----------------------------+    +----------------------+
+                              (independent credentials)
++------------------+    +-----------------------------+    +----------------------+
+| Upload file blob |--->| Blob sidecar container      |--->| Poll blobs (15s)      |
++------------------+    +-----------------------------+    +----------------------+</pre>
         </div>
 
         <!-- Section 13: State Management and Persistence -->

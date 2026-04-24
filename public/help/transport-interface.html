@@ -53,17 +53,17 @@
         <h3>Transport Providers</h3>
         <table>
             <thead>
-                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th></tr>
+                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th><th>Azure Blob Storage</th><th>Azure Service Bus</th></tr>
             </thead>
             <tbody>
-                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, 5s interval)</td></tr>
-                <tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td></tr>
-                <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td></tr>
-                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td></tr>
-                <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td></tr>
-                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Connection string (shared key)</td></tr>
-                <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td></tr>
-                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes (queue and container auto-created)</td></tr>
+                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, 5s interval)</td><td>Batched WAL blob (60s flush, lease-based read)</td><td>PeekLock pull (32-msg batch, 5s max wait)</td></tr>
+                <tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td><td>At-least-once</td><td>At-least-once (PeekLock with server-side DeliveryCount)</td></tr>
+                <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
+                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td><td>Same container as WAL (deferred file blobs)</td><td>Azure Blob Storage sidecar (15s poll, independent credentials)</td></tr>
+                <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td><td>TLS always (Azure endpoint)</td><td>TLS always (AMQP over TLS)</td></tr>
+                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Connection string (shared key)</td><td>Connection string (shared key)</td><td>SAS connection string</td></tr>
+                <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td><td>Length-prefixed batch within the blob</td><td>AMQP message body (raw bytes)</td></tr>
+                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes (queue and container auto-created)</td><td>Yes (container auto-created)</td><td>No (queue must be pre-created with chosen LockDuration and MaxDeliveryCount)</td></tr>
             </tbody>
         </table>
 
@@ -1134,6 +1134,54 @@ Release semaphore</pre>
                 automatically before format detection. BOM-prefixed XML is handled correctly.
             </p>
         </div>
+
+        <h3 id="xml-examples">Schema-Valid Example Payloads</h3>
+        <p>
+            The repository ships 12 schema-valid sample payloads under
+            <code>schema/examples/</code>, one per message-type variant the plugin emits. They
+            collectively exercise: simple posts, markdown-rich posts, fenced code blocks with
+            literal <code>&lt;</code>, <code>&gt;</code>, and <code>&amp;</code> in the body, GFM
+            tables and reference links, threaded replies, long-form incident reports, post edits,
+            deletes, standard-emoji reactions, custom-emoji reactions, reaction removal, and the
+            connectivity test message. A full index lives in
+            <code>schema/examples/README.md</code>.
+        </p>
+        <p>
+            Each example file is <strong>byte-for-byte identical</strong> to the bytes the plugin
+            puts on the wire: the output of <code>model.Marshal(env, FormatXML)</code> plus a
+            trailing newline, nothing else. That means a single line per message after the
+            <code>&lt;?xml?&gt;</code> header (no inter-element indentation), entity-escaped
+            <code>MessageText</code> content (<code>&lt;</code> becomes <code>&amp;lt;</code>,
+            <code>&gt;</code> becomes <code>&amp;gt;</code>, <code>&amp;</code> becomes
+            <code>&amp;amp;</code>, embedded newlines become <code>&amp;#xA;</code>), and no CDATA
+            sections. The byte-equality contract is enforced by
+            <code>TestExampleFiles_Symmetric</code> in
+            <code>server/model/examples_roundtrip_test.go</code>, which also verifies that
+            <code>Unmarshal</code> followed by <code>Marshal</code> is a fixed point and that
+            marshalling is deterministic.
+        </p>
+        <p>
+            All sample IDs are 26 characters of <code>[a-z0-9]</code> (per the
+            <code>MattermostIDType</code> constraint in <code>schema/crossguard.xsd</code>).
+            Envelope <code>Timestamp</code> is ISO 8601 (RFC 3339), while
+            <code>PostMessage/CreateAt</code> is Unix epoch <strong>milliseconds</strong> and is
+            earlier than the envelope timestamp to reflect "post was created, then relayed".
+        </p>
+        <p>
+            To validate the examples locally:
+        </p>
+<pre><code>for f in schema/examples/*.xml; do
+  xmllint --noout --schema schema/crossguard.xsd "$f"
+done</code></pre>
+        <p>
+            The simplest example, a minimal top-level post, is reproduced below. Open the file in
+            an editor that soft-wraps, or pipe through <code>xmllint --format</code>, for a
+            human-readable view.
+        </p>
+        <h4>Example: <code>01_post_simple.xml</code></h4>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;&lt;Type&gt;crossguard_post&lt;/Type&gt;&lt;Timestamp&gt;2026-04-15T09:00:00Z&lt;/Timestamp&gt;&lt;PostMessage&gt;&lt;PostID&gt;4uuucd8ra1buzieqbg46xpeuyi&lt;/PostID&gt;&lt;ChannelID&gt;85ykawbwgw8ciijy10hg5c8uwq&lt;/ChannelID&gt;&lt;ChannelName&gt;general&lt;/ChannelName&gt;&lt;TeamID&gt;lttp1g6g5hohz5lc2y0jgvb37n&lt;/TeamID&gt;&lt;TeamName&gt;federal-comms&lt;/TeamName&gt;&lt;UserID&gt;gmnrkopt52jod8eip8t227e9ov&lt;/UserID&gt;&lt;Username&gt;alice&lt;/Username&gt;&lt;MessageText&gt;Morning team. Standup at 9:30 in the usual room, see you there.&lt;/MessageText&gt;&lt;CreateAt&gt;1776243550000&lt;/CreateAt&gt;&lt;/PostMessage&gt;&lt;/CrossguardMessage&gt;
+</code></pre>
 
         <!-- Azure Queue Storage Transport -->
         <h2>Azure Queue Storage Transport</h2>
