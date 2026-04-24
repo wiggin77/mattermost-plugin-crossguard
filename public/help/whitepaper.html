@@ -990,11 +990,12 @@ Topology 3: Guard Network (Classified)
             Transport connections are configured in the Mattermost System Console under
             <strong>Plugins &gt; Cross Guard</strong>. Inbound and outbound connections are
             configured as JSON arrays. Each connection specifies a provider type (NATS, Azure
-            Queue Storage, or Azure Blob Storage) along with provider-specific settings:
+            Queue Storage, Azure Blob Storage, or Azure Service Bus) along with provider-specific
+            settings:
         </p>
         <ul>
             <li><strong>name:</strong> Unique identifier, lowercase alphanumeric with hyphens (e.g., <code>relay-to-server-b</code>)</li>
-            <li><strong>provider:</strong> Transport provider type (<code>"nats"</code>, <code>"azure-queue"</code>, or <code>"azure-blob"</code>). Provider-specific fields are nested under the corresponding key.</li>
+            <li><strong>provider:</strong> Transport provider type (<code>"nats"</code>, <code>"azure-queue"</code>, <code>"azure-blob"</code>, or <code>"azure-servicebus"</code>). Provider-specific fields are nested under the corresponding key.</li>
         </ul>
         <h4>NATS Provider Fields (nested under <code>"nats"</code>)</h4>
         <ul>
@@ -1018,6 +1019,16 @@ Topology 3: Guard Network (Classified)
             <li><strong>blob_container_name:</strong> Container that holds both batch WAL blobs and deferred file blobs (auto-created if missing)</li>
             <li><strong>flush_interval_seconds:</strong> Interval at which the outbound WAL buffer is sealed and uploaded as a batch blob. Default 60 seconds, minimum 5.</li>
             <li><strong>blob_lock_max_age_seconds:</strong> Maximum lease age before a stall is broken by another inbound poller. Default 300 seconds, minimum 30.</li>
+        </ul>
+        <h4>Azure Service Bus Provider Fields (nested under <code>"azure_servicebus"</code>)</h4>
+        <ul>
+            <li><strong>connection_string:</strong> SAS connection string for the Service Bus namespace (treated as a secret, encrypted at rest by Mattermost)</li>
+            <li><strong>queue_name:</strong> Pre-created Service Bus queue name or hierarchical path. Queues are NOT auto-created; operators must provision them in the Azure portal or via ARM/Terraform with the desired <code>LockDuration</code> and <code>MaxDeliveryCount</code>.</li>
+            <li><strong>blob_service_url:</strong> Azure Blob Storage service URL for the file attachment sidecar, required when <code>file_transfer_enabled</code> is true</li>
+            <li><strong>blob_account_name / blob_account_key:</strong> Shared-key credentials for the blob sidecar storage account (independent of the Service Bus namespace; treated as secrets, encrypted at rest by Mattermost)</li>
+            <li><strong>blob_container_name:</strong> Blob sidecar container for file attachments (auto-created if missing), required when <code>file_transfer_enabled</code> is true</li>
+            <li><strong>max_message_size_bytes:</strong> Maximum outbound payload size. Default 192000; maximum 104857600 (100 MiB, Service Bus Premium tier).</li>
+            <li><strong>blob_poll_interval_seconds:</strong> Inbound poll cadence for the blob sidecar. Default 15, minimum 1.</li>
         </ul>
         <p>
             Configuration changes trigger live reconnection. The plugin closes existing transport

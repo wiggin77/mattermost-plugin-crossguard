@@ -20,6 +20,9 @@ server/manifest.go
 # VS Code
 .vscode
 
+# Claude Code harness runtime files
+.claude/*.lock
+
 # Go workspace (local development)
 go.work
 go.work.sum

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -370,6 +371,45 @@ func TestRedactConnections(t *testing.T) {
 		assert.Equal(t, "my-queue", result[0].QueueName)
 		assert.Empty(t, result[0].Address)
 		assert.Empty(t, result[0].Subject)
+	})
+
+	t.Run("strips sensitive Azure Service Bus fields", func(t *testing.T) {
+		// Secrets include ConnectionString (contains SAS key) and BlobAccountKey.
+		// Redacted view MUST expose only QueueName and (optional) BlobContainerName.
+		outbound := []ConnectionConfig{
+			{
+				Name:                "sb-conn",
+				Provider:            ProviderAzureServiceBus,
+				FileTransferEnabled: true,
+				MessageFormat:       "json",
+				AzureServiceBus: &AzureServiceBusProviderConfig{
+					ConnectionString:  "Endpoint=sb://foo.servicebus.windows.net/;SharedAccessKey=super-secret-abc123",
+					QueueName:         "sb-queue",
+					BlobServiceURL:    "https://myacct.blob.core.windows.net",
+					BlobAccountName:   "myacct",
+					BlobAccountKey:    "blob-secret-xyz",
+					BlobContainerName: "sb-files",
+				},
+			},
+		}
+
+		result := redactConnections(outbound, nil)
+		require.Len(t, result, 1)
+
+		assert.Equal(t, "sb-conn", result[0].Name)
+		assert.Equal(t, ProviderAzureServiceBus, result[0].Provider)
+		assert.Equal(t, "sb-queue", result[0].QueueName)
+		assert.Equal(t, "sb-files", result[0].BlobContainerName)
+
+		// Round-trip the redacted view as JSON and assert neither secret
+		// appears anywhere in the body. This catches any future drift that
+		// adds a field to RedactedConnection that leaks by accident.
+		buf, err := json.Marshal(result[0])
+		require.NoError(t, err)
+		body := string(buf)
+		assert.NotContains(t, body, "super-secret-abc123", "connection_string must not be exposed")
+		assert.NotContains(t, body, "SharedAccessKey", "SAS key prefix must not be exposed")
+		assert.NotContains(t, body, "blob-secret-xyz", "blob_account_key must not be exposed")
 	})
 
 	t.Run("empty inputs", func(t *testing.T) {

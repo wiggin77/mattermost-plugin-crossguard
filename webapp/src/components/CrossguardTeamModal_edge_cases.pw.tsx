@@ -9,7 +9,7 @@ function teamStatusResponse(overrides?: any) {
 }
 
 function connStatus(overrides?: any) {
-    return {name: 'my-conn', direction: 'inbound', linked: false, orphaned: false, file_transfer_enabled: false, ...overrides};
+    return {name: 'my-conn', direction: 'inbound', provider: 'nats', linked: false, orphaned: false, file_transfer_enabled: false, ...overrides};
 }
 
 async function openModal(page: any, teamID = 'team1') {

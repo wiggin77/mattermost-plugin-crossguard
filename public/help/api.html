@@ -58,12 +58,12 @@
                 <span class="permission-tag permission-sysadmin">System Admin</span>
             </div>
             <div class="endpoint-card-body">
-                <p>Test a connection configuration before saving. Supports NATS, Azure Queue, and Azure Blob providers.</p>
+                <p>Test a connection configuration before saving. Supports NATS, Azure Queue, Azure Blob, and Azure Service Bus providers.</p>
 
                 <h4>Query Parameters</h4>
                 <table class="field-table">
                     <tbody>
-                        <tr><td><code>direction</code></td><td>Optional. <code>inbound</code> or <code>outbound</code> (defaults to <code>outbound</code>). NATS-specific; ignored for Azure Queue and Azure Blob connections.</td></tr>
+                        <tr><td><code>direction</code></td><td>Optional. <code>inbound</code> or <code>outbound</code> (defaults to <code>outbound</code>). NATS-specific; ignored for Azure Queue, Azure Blob, and Azure Service Bus connections.</td></tr>
                     </tbody>
                 </table>
 
@@ -104,6 +104,16 @@
   }
 }</code></pre>
 
+                <h4>Request Body (Azure Service Bus)</h4>
+<pre><code>{
+  "name": "azure-servicebus-relay",
+  "provider": "azure-servicebus",
+  "azure_servicebus": {
+    "connection_string": "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=...",
+    "queue_name": "crossguard-relay"
+  }
+}</code></pre>
+
                 <h4>Validation</h4>
                 <h5>NATS</h5>
                 <ul>
@@ -127,6 +137,14 @@
                     <li><code>azure_blob.account_key</code> required</li>
                     <li><code>azure_blob.blob_container_name</code> required</li>
                 </ul>
+                <h5>Azure Service Bus</h5>
+                <ul>
+                    <li><code>azure_servicebus.connection_string</code> required</li>
+                    <li><code>azure_servicebus.queue_name</code> required; at most 260 characters; allowed characters: letters, digits, periods, hyphens, underscores, and forward slashes</li>
+                    <li><code>azure_servicebus.blob_service_url</code>, <code>blob_account_name</code>, <code>blob_account_key</code>, and <code>blob_container_name</code> required when <code>file_transfer_enabled</code> is true; <code>blob_service_url</code> must be a valid URL</li>
+                    <li><code>azure_servicebus.max_message_size_bytes</code> (optional) must be between 1024 and 104857600 when set</li>
+                    <li><code>azure_servicebus.blob_poll_interval_seconds</code> (optional) must be at least 1 when set</li>
+                </ul>
 
                 <h4>Success Response (outbound) - 200</h4>
 <pre><code>{"status": "ok", "message": "Test message sent with ID: abc123", "id": "abc123"}</code></pre>
@@ -139,6 +157,9 @@
 
                 <h4>Success Response (Azure Blob) - 200</h4>
 <pre><code>{"status": "ok", "message": "Azure Blob Storage connection test successful"}</code></pre>
+
+                <h4>Success Response (Azure Service Bus) - 200</h4>
+<pre><code>{"status": "ok", "message": "Azure Service Bus connection test successful"}</code></pre>
 
                 <h4>Error Responses</h4>
                 <table>
@@ -391,6 +412,14 @@
       "direction": "outbound",
       "provider": "azure-blob",
       "blob_container_name": "crossguard-wal",
+      "file_transfer_enabled": false,
+      "message_format": "json"
+    },
+    {
+      "name": "azure-servicebus-relay",
+      "direction": "outbound",
+      "provider": "azure-servicebus",
+      "queue_name": "crossguard-relay",
       "file_transfer_enabled": false,
       "message_format": "json"
     }
@@ -901,8 +930,9 @@
         <h2>Message Transport Interface</h2>
 
         <p>
-            Cross Guard supports NATS and Azure Queue Storage as transport layers for relaying
-            messages between Mattermost instances. For the complete wire protocol reference,
+            Cross Guard supports NATS, Azure Queue Storage, Azure Blob Storage, and Azure Service
+            Bus as transport layers for relaying messages between Mattermost instances. For the
+            complete wire protocol reference,
             including all message envelope schemas, payload definitions, connection configuration,
             data flow diagrams, and full wire format examples, see the dedicated
             <a href="transport-interface.html">Transport Interface Reference</a>.

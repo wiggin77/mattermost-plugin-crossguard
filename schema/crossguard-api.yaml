@@ -324,8 +324,8 @@ components:
         Configuration for a single connection (inbound or outbound).
         Stored in plugin settings as a JSON array. The `provider` field
         determines which nested configuration block is used. Exactly one
-        of `nats`, `azure_queue`, or `azure_blob` should be present,
-        matching the provider.
+        of `nats`, `azure_queue`, `azure_blob`, or `azure_servicebus`
+        should be present, matching the provider.
       required:
         - name
         - provider
@@ -344,6 +344,7 @@ components:
             - nats
             - azure-queue
             - azure-blob
+            - azure-servicebus
           description: >
             Transport provider for this connection. Determines which
             nested configuration block is used and how messages are
@@ -358,7 +359,11 @@ components:
             container referenced by `azure_queue.blob_container_name`.
             For Azure Blob, files are stored as deferred file blobs in
             the same container referenced by
-            `azure_blob.blob_container_name`.
+            `azure_blob.blob_container_name`. For Azure Service Bus,
+            files flow through a separate Azure Blob Storage container
+            configured with its own credentials on the
+            `azure_servicebus` block (Service Bus queues are
+            message-only).
           default: false
         file_filter_mode:
           type: string
@@ -406,6 +411,11 @@ components:
           description: >
             Azure Blob Storage provider configuration. Required when
             provider is `azure-blob`.
+        azure_servicebus:
+          $ref: "#/components/schemas/AzureServiceBusProviderConfig"
+          description: >
+            Azure Service Bus provider configuration. Required when
+            provider is `azure-servicebus`.
 
     # ------------------------------------------------------------------
     # NATS provider configuration
@@ -594,6 +604,90 @@ components:
             least 30 when set.
           minimum: 30
           default: 300
+
+    # ------------------------------------------------------------------
+    # Azure Service Bus provider configuration
+    # ------------------------------------------------------------------
+    AzureServiceBusProviderConfig:
+      type: object
+      description: >
+        Configuration fields specific to the Azure Service Bus transport
+        provider. Service Bus queues carry messages; file attachments
+        (when `file_transfer_enabled` is true) flow through a separate
+        Azure Blob Storage container configured below with its own
+        credentials. Auth is via SAS connection string. The plugin does
+        NOT auto-create queues; operators must pre-create the queue in
+        Azure with the desired `LockDuration` and `MaxDeliveryCount`
+        (typical Phase 1 deployment uses the Azure portal or ARM/
+        Terraform).
+      required:
+        - connection_string
+        - queue_name
+      properties:
+        connection_string:
+          type: string
+          description: >
+            Service Bus SAS connection string, e.g.
+            `Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<rule>;SharedAccessKey=<key>`.
+            Treat as a secret. Never logged or exposed in admin status
+            responses.
+        queue_name:
+          type: string
+          description: >
+            Name (or hierarchical path) of the pre-created Service Bus
+            queue. Allowed characters: letters, digits, periods,
+            hyphens, underscores, and forward slashes. Maximum 260
+            characters.
+          pattern: "^[A-Za-z0-9._/\\-]+$"
+          maxLength: 260
+          examples:
+            - "crossguard-relay"
+        blob_service_url:
+          type: string
+          description: >
+            Azure Blob Storage service URL for the file attachment
+            sidecar. Required when `file_transfer_enabled` is true.
+          examples:
+            - "https://myaccount.blob.core.windows.net"
+        blob_account_name:
+          type: string
+          description: >
+            Storage account name for the blob sidecar. Required when
+            `file_transfer_enabled` is true. May differ from the Service
+            Bus namespace — Service Bus and Storage are independent
+            Azure resources.
+        blob_account_key:
+          type: string
+          description: >
+            Shared access key for the blob sidecar storage account.
+            Required when `file_transfer_enabled` is true. Treat as a
+            secret. Never logged or exposed in admin status responses.
+        blob_container_name:
+          type: string
+          description: >
+            Azure Blob container for file transfers. Required when
+            `file_transfer_enabled` is true. Auto-created if it does not
+            exist.
+          examples:
+            - "crossguard-files"
+        max_message_size_bytes:
+          type: integer
+          description: >
+            Maximum outbound message payload size. Larger messages are
+            rejected at the client boundary. Default 192000 (below the
+            Service Bus Standard tier 256 KiB ceiling). Operators on
+            Premium tier may raise this up to 100 MiB.
+          minimum: 1024
+          maximum: 104857600
+          default: 192000
+        blob_poll_interval_seconds:
+          type: integer
+          description: >
+            How often the inbound side polls the blob sidecar container
+            for new file attachments. Only applies when
+            `file_transfer_enabled` is true.
+          minimum: 1
+          default: 15
 
     # ------------------------------------------------------------------
     # REST API response schemas (reference)

@@ -321,6 +321,16 @@ const (
 	ChanRequestConfirmDMFailed       = 25016
 	ChanRequestNoAdminsNotified      = 25017
 	ChanRequestGetTeamAdminsFailed   = 25018
+
+	// Azure Service Bus provider: 26000-26999.
+	// Initial allocation; additional codes appended on demand as provider code needs them.
+	ServiceBusSendFailed         = 26000
+	ServiceBusReceiveFailed      = 26001
+	ServiceBusCompleteFailed     = 26002
+	ServiceBusAbandonFailed      = 26003
+	ServiceBusRedelivery         = 26004
+	ServiceBusMalformedBody      = 26005
+	APIAzureServiceBusTestFailed = 26006
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -593,4 +603,12 @@ var AllCodes = []int{
 	ChanRequestConfirmDMFailed,
 	ChanRequestNoAdminsNotified,
 	ChanRequestGetTeamAdminsFailed,
+
+	ServiceBusSendFailed,
+	ServiceBusReceiveFailed,
+	ServiceBusCompleteFailed,
+	ServiceBusAbandonFailed,
+	ServiceBusRedelivery,
+	ServiceBusMalformedBody,
+	APIAzureServiceBusTestFailed,
 }

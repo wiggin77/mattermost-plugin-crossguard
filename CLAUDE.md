@@ -133,6 +133,7 @@ After setup:
 - **NATS (from plugins)**: nats://nats:4222
 - **Azurite Queue**: http://localhost:10001
 - **Azurite Blob**: http://localhost:10000
+- **Service Bus Emulator (AMQP)**: sb://localhost:5672 (from plugins: `sb://servicebus-emulator:5672`). Default SAS connection string: `Endpoint=sb://servicebus-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true`
 
 ### Common Commands
 
@@ -162,6 +163,7 @@ After setup:
 | `make docker-integration-test` | Full integration suite (loopback, files, XML, Azure) |
 | `make docker-azure-smoke-test` | Run Azure Queue/Blob relay smoke test via Azurite |
 | `make docker-azure-blob-smoke-test` | Run Azure Blob batched (WAL + deferred file) smoke test via Azurite |
+| `make docker-servicebus-smoke-test` | Run Azure Service Bus relay smoke test via the Service Bus emulator (+ SQL Server Linux sidecar). Readiness gated by `servicebus-probe`. |
 | `make docker-disable` | Disable plugin on both servers |
 | `make docker-enable` | Enable plugin on both servers |
 | `make docker-plugin-list` | List installed plugins on both servers |

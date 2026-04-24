@@ -341,6 +341,76 @@
             </tbody>
         </table>
 
+        <h3>Azure Service Bus Provider Fields</h3>
+        <p>These fields appear when the provider is set to <strong>Azure Service Bus</strong>. In JSON, they are nested under the <code>"azure_servicebus"</code> key. Service Bus uses an AMQP-based queue for message relay with PeekLock semantics: the plugin completes messages on successful handler invocation and abandons them on handler error (Service Bus then increments delivery count and routes to the dead-letter queue after the queue-configured <code>MaxDeliveryCount</code>).</p>
+        <p><strong>Important:</strong> The plugin does <em>not</em> auto-create the queue. Pre-create it in the Azure Portal or via ARM/Terraform with your chosen <code>LockDuration</code> (default 60 s, maximum 5 min) and <code>MaxDeliveryCount</code> before saving the connection. Lock duration is an entity property; the plugin cannot configure it.</p>
+        <p><strong>Why the blob fields are named differently from the Azure Queue provider:</strong> Service Bus and Azure Storage are separate Azure resources with independent credentials. The Azure Queue provider shares one storage account for both queues and blobs; the Service Bus provider needs a distinct credential pair for its Blob sidecar (which is why you see <code>blob_account_name</code> / <code>blob_account_key</code> here instead of the unqualified <code>account_name</code> / <code>account_key</code>).</p>
+        <table>
+            <thead>
+                <tr><th>Field</th><th>JSON Key</th><th>Required</th><th>Validation</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Connection String</strong></td>
+                    <td><code>connection_string</code></td>
+                    <td>Yes</td>
+                    <td>Non-empty string</td>
+                    <td>SAS connection string, e.g. <code>Endpoint=sb://&lt;namespace&gt;.servicebus.windows.net/;SharedAccessKeyName=&lt;rule&gt;;SharedAccessKey=&lt;key&gt;</code>. Treat as a secret; never exposed in status responses or logs.</td>
+                </tr>
+                <tr>
+                    <td><strong>Queue Name</strong></td>
+                    <td><code>queue_name</code></td>
+                    <td>Yes</td>
+                    <td>Up to 260 characters; letters, digits, periods, hyphens, underscores, and forward slashes.</td>
+                    <td>Name of the pre-created Service Bus queue. Hierarchical paths such as <code>team1/crossguard-relay</code> are allowed.</td>
+                </tr>
+                <tr>
+                    <td><strong>Blob Service URL</strong></td>
+                    <td><code>blob_service_url</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Valid URL</td>
+                    <td>Azure Blob Storage endpoint for the file sidecar container.</td>
+                </tr>
+                <tr>
+                    <td><strong>Blob Account Name</strong></td>
+                    <td><code>blob_account_name</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Non-empty string</td>
+                    <td>Storage account name for the blob sidecar. Independent of the Service Bus namespace.</td>
+                </tr>
+                <tr>
+                    <td><strong>Blob Account Key</strong></td>
+                    <td><code>blob_account_key</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Non-empty string</td>
+                    <td>Shared access key for the blob sidecar storage account. Treat as a secret.</td>
+                </tr>
+                <tr>
+                    <td><strong>Blob Container Name</strong></td>
+                    <td><code>blob_container_name</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Non-empty string</td>
+                    <td>Blob container used for file attachment relay. Auto-created on startup if it does not exist.</td>
+                </tr>
+                <tr>
+                    <td><strong>Max Message Size</strong></td>
+                    <td><code>max_message_size_bytes</code></td>
+                    <td>No</td>
+                    <td>Integer, 1024 to 104857600. Default <code>192000</code>.</td>
+                    <td>Maximum outbound message payload. Oversized messages are rejected at the client boundary. Raise this to 100 MiB only on the Premium tier.</td>
+                </tr>
+                <tr>
+                    <td><strong>Blob Poll Interval</strong></td>
+                    <td><code>blob_poll_interval_seconds</code></td>
+                    <td>No</td>
+                    <td>Integer, &ge; 1. Default <code>15</code>.</td>
+                    <td>Inbound poll cadence for the blob sidecar when file transfer is enabled.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><strong>Dead-Letter Queue (DLQ) behaviour:</strong> If handler errors cause redelivery count to exceed the queue's <code>MaxDeliveryCount</code>, Azure Service Bus auto-moves the message to the queue's dead-letter sub-queue. The plugin does NOT inspect or process DLQ messages; they stop appearing in receive polls. Use the Azure Portal, <code>az servicebus queue message</code> CLI, or Azure monitoring alerts to inspect the DLQ. The plugin logs a WARN with error code <code>26004</code> (<code>ServiceBusRedelivery</code>) on every redelivery so operators can detect poison-message buildup before DLQ moves happen.</p>
+
         <!-- Validation Rules -->
         <h3>Validation Rules Summary</h3>
         <ol>
@@ -354,6 +424,9 @@
             <li>Azure Queue connections require <code>blob_service_url</code> and <code>blob_container_name</code> when file transfer is enabled</li>
             <li>Azure Blob connections require <code>service_url</code>, <code>account_name</code>, <code>account_key</code>, and <code>blob_container_name</code></li>
             <li>Azure Blob <code>flush_interval_seconds</code> must be at least 5 when set; <code>blob_lock_max_age_seconds</code> must be at least 30 when set</li>
+            <li>Azure Service Bus connections require <code>connection_string</code> and <code>queue_name</code></li>
+            <li>Azure Service Bus <code>queue_name</code> is capped at 260 characters and allows only <code>A-Z a-z 0-9 . _ - /</code></li>
+            <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code>, <code>blob_account_name</code>, <code>blob_account_key</code>, and <code>blob_container_name</code></li>
         </ol>
 
         <!-- Relay Settings -->

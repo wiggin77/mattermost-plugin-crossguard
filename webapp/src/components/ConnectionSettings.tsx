@@ -1,7 +1,7 @@
 import manifest from 'manifest';
 import React from 'react';
 
-type ProviderType = 'nats' | 'azure-queue' | 'azure-blob';
+type ProviderType = 'nats' | 'azure-queue' | 'azure-blob' | 'azure-servicebus';
 
 interface NATSProviderConfig {
     address: string;
@@ -33,6 +33,17 @@ interface AzureBlobProviderConfig {
     flush_interval_seconds?: number;
 }
 
+interface AzureServiceBusProviderConfig {
+    connection_string: string;
+    queue_name: string;
+    blob_service_url: string;
+    blob_account_name: string;
+    blob_account_key: string;
+    blob_container_name: string;
+    max_message_size_bytes?: number;
+    blob_poll_interval_seconds?: number;
+}
+
 interface Connection {
     name: string;
     provider: ProviderType;
@@ -43,6 +54,7 @@ interface Connection {
     nats?: NATSProviderConfig;
     azure_queue?: AzureQueueProviderConfig;
     azure_blob?: AzureBlobProviderConfig;
+    azure_servicebus?: AzureServiceBusProviderConfig;
 }
 
 interface CustomSettingProps {
@@ -100,6 +112,15 @@ const emptyAzureBlobConfig: AzureBlobProviderConfig = {
     account_key: '',
     blob_container_name: '',
     flush_interval_seconds: 60,
+};
+
+const emptyAzureServiceBusConfig: AzureServiceBusProviderConfig = {
+    connection_string: '',
+    queue_name: '',
+    blob_service_url: '',
+    blob_account_name: '',
+    blob_account_key: '',
+    blob_container_name: '',
 };
 
 const emptyConnection: Connection = {
@@ -604,6 +625,44 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 azure_queue: {...azureQueue},
                 nats: undefined,
                 azure_blob: undefined,
+                azure_servicebus: undefined,
+            };
+        } else if (editForm.provider === 'azure-servicebus') {
+            const sb = editForm.azure_servicebus || emptyAzureServiceBusConfig;
+            if (!sb.connection_string.trim()) {
+                setFormError('Connection String is required.');
+                return;
+            }
+            if (!sb.queue_name.trim()) {
+                setFormError('Queue Name is required.');
+                return;
+            }
+            if (editForm.file_transfer_enabled) {
+                if (!sb.blob_service_url.trim()) {
+                    setFormError('Blob Service URL is required when file transfer is enabled.');
+                    return;
+                }
+                if (!sb.blob_account_name.trim()) {
+                    setFormError('Blob Account Name is required when file transfer is enabled.');
+                    return;
+                }
+                if (!sb.blob_account_key.trim()) {
+                    setFormError('Blob Account Key is required when file transfer is enabled.');
+                    return;
+                }
+                if (!sb.blob_container_name.trim()) {
+                    setFormError('Blob Container Name is required when file transfer is enabled.');
+                    return;
+                }
+            }
+
+            cleanedForm = {
+                ...editForm,
+                name: trimmedName,
+                azure_servicebus: {...sb},
+                nats: undefined,
+                azure_queue: undefined,
+                azure_blob: undefined,
             };
         } else {
             const azureBlob = editForm.azure_blob || emptyAzureBlobConfig;
@@ -635,6 +694,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 azure_blob: {...azureBlob},
                 nats: undefined,
                 azure_queue: undefined,
+                azure_servicebus: undefined,
             };
         }
 
@@ -688,6 +748,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                     }
                     updated.azure_queue = undefined;
                     updated.azure_blob = undefined;
+                    updated.azure_servicebus = undefined;
                 }
                 if (fieldValue === 'azure-queue') {
                     if (!prev.azure_queue) {
@@ -695,6 +756,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                     }
                     updated.nats = undefined;
                     updated.azure_blob = undefined;
+                    updated.azure_servicebus = undefined;
                 }
                 if (fieldValue === 'azure-blob') {
                     if (!prev.azure_blob) {
@@ -702,6 +764,15 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                     }
                     updated.nats = undefined;
                     updated.azure_queue = undefined;
+                    updated.azure_servicebus = undefined;
+                }
+                if (fieldValue === 'azure-servicebus') {
+                    if (!prev.azure_servicebus) {
+                        updated.azure_servicebus = {...emptyAzureServiceBusConfig};
+                    }
+                    updated.nats = undefined;
+                    updated.azure_queue = undefined;
+                    updated.azure_blob = undefined;
                 }
                 return updated;
             });
@@ -728,6 +799,13 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
         setEditForm((prev) => ({
             ...prev,
             azure_blob: {...(prev.azure_blob || emptyAzureBlobConfig), [field]: fieldValue},
+        }));
+    };
+
+    const handleAzureServiceBusChange = (field: keyof AzureServiceBusProviderConfig, fieldValue: string) => {
+        setEditForm((prev) => ({
+            ...prev,
+            azure_servicebus: {...(prev.azure_servicebus || emptyAzureServiceBusConfig), [field]: fieldValue},
         }));
     };
 
@@ -844,6 +922,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                 <option value='nats'>{'NATS'}</option>
                                 <option value='azure-queue'>{'Azure Queue Storage'}</option>
                                 <option value='azure-blob'>{'Azure Blob Storage (Batched)'}</option>
+                                <option value='azure-servicebus'>{'Azure Service Bus'}</option>
                             </select>
                         </div>
                     </div>
@@ -946,6 +1025,96 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                     placeholder='crossguard-messages'
                                 />
                             </div>
+                        </>
+                    )}
+
+                    {editForm.provider === 'azure-servicebus' && (
+                        <>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Connection String'}</label>
+                                <input
+                                    aria-label='Azure Service Bus Connection String'
+                                    style={styles.input}
+                                    type='password'
+                                    value={editForm.azure_servicebus?.connection_string || ''}
+                                    onChange={(e) => handleAzureServiceBusChange('connection_string', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=…;SharedAccessKey=…'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Azure Service Bus SAS connection string. Treat as a secret.'}
+                                </div>
+                            </div>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Queue Name'}</label>
+                                <input
+                                    aria-label='Azure Service Bus Queue Name'
+                                    style={styles.input}
+                                    type='text'
+                                    value={editForm.azure_servicebus?.queue_name || ''}
+                                    onChange={(e) => handleAzureServiceBusChange('queue_name', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='crossguard-relay'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Pre-created Service Bus queue. The plugin does not auto-create queues — use the Azure portal or ARM to create it with your desired LockDuration and MaxDeliveryCount.'}
+                                </div>
+                            </div>
+                            {editForm.file_transfer_enabled && (
+                                <>
+                                    <div style={styles.helpText}>
+                                        {'Service Bus is message-only. File attachments flow through a separate Azure Blob Storage container. The Blob credentials below are distinct from the Service Bus connection string above.'}
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Blob Service URL'}</label>
+                                        <input
+                                            aria-label='Azure Service Bus Blob Service URL'
+                                            style={styles.input}
+                                            type='text'
+                                            value={editForm.azure_servicebus?.blob_service_url || ''}
+                                            onChange={(e) => handleAzureServiceBusChange('blob_service_url', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder='https://myaccount.blob.core.windows.net'
+                                        />
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Blob Account Name'}</label>
+                                        <input
+                                            aria-label='Azure Service Bus Blob Account Name'
+                                            style={styles.input}
+                                            type='text'
+                                            value={editForm.azure_servicebus?.blob_account_name || ''}
+                                            onChange={(e) => handleAzureServiceBusChange('blob_account_name', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder='myaccount'
+                                        />
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Blob Account Key'}</label>
+                                        <input
+                                            aria-label='Azure Service Bus Blob Account Key'
+                                            style={styles.input}
+                                            type='password'
+                                            value={editForm.azure_servicebus?.blob_account_key || ''}
+                                            onChange={(e) => handleAzureServiceBusChange('blob_account_key', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder='Paste key from Azure portal'
+                                        />
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Blob Container Name'}</label>
+                                        <input
+                                            aria-label='Azure Service Bus Blob Container Name'
+                                            style={styles.input}
+                                            type='text'
+                                            value={editForm.azure_servicebus?.blob_container_name || ''}
+                                            onChange={(e) => handleAzureServiceBusChange('blob_container_name', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder='crossguard-files'
+                                        />
+                                    </div>
+                                </>
+                            )}
                         </>
                     )}
 
@@ -1190,6 +1359,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                             {editForm.provider === 'nats' && 'Relay file attachments on posts across this connection. Requires JetStream on the NATS server.'}
                             {editForm.provider === 'azure-queue' && 'Relay file attachments on posts across this connection. Files are stored in Azure Blob Storage.'}
                             {editForm.provider === 'azure-blob' && 'Relay file attachments on posts across this connection. Files are deferred and uploaded after each message batch flush.'}
+                            {editForm.provider === 'azure-servicebus' && 'Relay file attachments on posts across this connection. Service Bus is message-only, so files flow through a separate Azure Blob Storage container (configured with its own credentials below).'}
                         </div>
                     </div>
                     {editForm.file_transfer_enabled && editForm.provider === 'azure-queue' && (
@@ -1272,11 +1442,23 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
         }
 
         const status = testStatus[index];
-        let providerLabel = 'NATS';
-        if (conn.provider === 'azure-queue') {
+        let providerLabel;
+        switch (conn.provider) {
+        case 'nats':
+            providerLabel = 'NATS';
+            break;
+        case 'azure-queue':
             providerLabel = 'Azure Queue';
-        } else if (conn.provider === 'azure-blob') {
+            break;
+        case 'azure-blob':
             providerLabel = 'Azure Blob';
+            break;
+        case 'azure-servicebus':
+            providerLabel = 'Azure Service Bus';
+            break;
+        default:
+            providerLabel = 'Unknown';
+            break;
         }
 
         return (
@@ -1329,6 +1511,12 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                         <div style={styles.cardMetaItem}>
                             <span style={styles.cardMetaLabel}>{'Queue'}</span>
                             {conn.azure_queue?.queue_name}
+                        </div>
+                    )}
+                    {conn.provider === 'azure-servicebus' && (
+                        <div style={styles.cardMetaItem}>
+                            <span style={styles.cardMetaLabel}>{'Queue'}</span>
+                            {conn.azure_servicebus?.queue_name}
                         </div>
                     )}
                     {conn.provider === 'azure-blob' && (
