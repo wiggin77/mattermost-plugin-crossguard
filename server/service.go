@@ -929,5 +929,11 @@ func redactConnection(conn ConnectionConfig, direction string) RedactedConnectio
 	if conn.AzureBlob != nil {
 		rc.BlobContainerName = conn.AzureBlob.BlobContainerName
 	}
+	if conn.AzureServiceBus != nil {
+		// Only safe-to-expose fields: queue name and (optional) blob container.
+		// ConnectionString and BlobAccountKey MUST never appear on the redacted view.
+		rc.QueueName = conn.AzureServiceBus.QueueName
+		rc.BlobContainerName = conn.AzureServiceBus.BlobContainerName
+	}
 	return rc
 }

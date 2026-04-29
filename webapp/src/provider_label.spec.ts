@@ -11,19 +11,24 @@ test.describe('providerLabel', () => {
         expect(providerLabel('azure-blob')).toBe('AZURE BLOB');
     });
 
+    test('returns AZURE SERVICE BUS for azure-servicebus provider', () => {
+        expect(providerLabel('azure-servicebus')).toBe('AZURE SERVICE BUS');
+    });
+
     test('returns NATS for nats provider', () => {
         expect(providerLabel('nats')).toBe('NATS');
     });
 
-    test('returns NATS when provider is undefined', () => {
-        expect(providerLabel(undefined)).toBe('NATS');
+    test('returns UNKNOWN when provider is undefined', () => {
+        // Typically indicates an orphaned connection (no longer in config).
+        expect(providerLabel(undefined)).toBe('UNKNOWN');
     });
 
-    test('returns NATS when provider is an empty string', () => {
-        expect(providerLabel('')).toBe('NATS');
+    test('returns UNKNOWN when provider is an empty string', () => {
+        expect(providerLabel('')).toBe('UNKNOWN');
     });
 
-    test('returns NATS for an unknown provider value', () => {
-        expect(providerLabel('unknown-provider')).toBe('NATS');
+    test('returns UNKNOWN for an unrecognized provider value', () => {
+        expect(providerLabel('foo-bar')).toBe('UNKNOWN');
     });
 });

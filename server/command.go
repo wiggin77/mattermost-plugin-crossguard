@@ -48,6 +48,12 @@ func providerDetails(conn RedactedConnection) string {
 			parts = append(parts, "blob: "+conn.BlobContainerName)
 		}
 		return strings.Join(parts, ", ")
+	case ProviderAzureServiceBus:
+		parts := []string{"queue: " + conn.QueueName}
+		if conn.BlobContainerName != "" {
+			parts = append(parts, "blob: "+conn.BlobContainerName)
+		}
+		return strings.Join(parts, ", ")
 	case ProviderAzureBlob:
 		return "blob: " + conn.BlobContainerName
 	case ProviderNATS, "":

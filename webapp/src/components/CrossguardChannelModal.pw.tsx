@@ -14,6 +14,7 @@ const mockChannelStatus = {
         {
             name: 'inbound-conn',
             direction: 'inbound',
+            provider: 'nats',
             linked: false,
             file_transfer_enabled: true,
             file_filter_mode: 'allow',
@@ -22,6 +23,7 @@ const mockChannelStatus = {
         {
             name: 'outbound-conn',
             direction: 'outbound',
+            provider: 'nats',
             linked: true,
             file_transfer_enabled: false,
         },

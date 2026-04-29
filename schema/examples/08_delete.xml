@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CrossguardMessage xmlns="urn:mattermost-crossguard"><Type>crossguard_delete</Type><Timestamp>2026-04-15T18:00:00Z</Timestamp><DeleteMessage><PostID>4uuucd8ra1buzieqbg46xpeuyi</PostID><ChannelID>85ykawbwgw8ciijy10hg5c8uwq</ChannelID><ChannelName>general</ChannelName><TeamID>lttp1g6g5hohz5lc2y0jgvb37n</TeamID><TeamName>federal-comms</TeamName></DeleteMessage></CrossguardMessage>

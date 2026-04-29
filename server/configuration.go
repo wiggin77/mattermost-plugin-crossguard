@@ -27,19 +27,21 @@ const (
 	fileFilterModeAllow = "allow"
 	fileFilterModeDeny  = "deny"
 
-	ProviderNATS       = "nats"
-	ProviderAzureQueue = "azure-queue"
-	ProviderAzureBlob  = "azure-blob"
+	ProviderNATS            = "nats"
+	ProviderAzureQueue      = "azure-queue"
+	ProviderAzureBlob       = "azure-blob"
+	ProviderAzureServiceBus = "azure-servicebus"
 )
 
 var (
-	errMissingNATSConfig       = errors.New("nats config block is required when provider is \"nats\"")
-	errMissingAzureQueueConfig = errors.New("azure_queue config block is required when provider is \"azure-queue\"")
-	errMissingAzureBlobConfig  = errors.New("azure_blob config block is required when provider is \"azure-blob\"")
+	errMissingNATSConfig            = errors.New("nats config block is required when provider is \"nats\"")
+	errMissingAzureQueueConfig      = errors.New("azure_queue config block is required when provider is \"azure-queue\"")
+	errMissingAzureBlobConfig       = errors.New("azure_blob config block is required when provider is \"azure-blob\"")
+	errMissingAzureServiceBusConfig = errors.New("azure_servicebus config block is required when provider is \"azure-servicebus\"")
 )
 
 func errUnknownProvider(p string) error {
-	return fmt.Errorf("unknown provider %q, must be \"nats\", \"azure-queue\", or \"azure-blob\"", p)
+	return fmt.Errorf("unknown provider %q, must be \"nats\", \"azure-queue\", \"azure-blob\", or \"azure-servicebus\"", p)
 }
 
 // ConnectionConfig represents a single connection configuration.
@@ -55,9 +57,10 @@ type ConnectionConfig struct {
 	MessageFormat       string `json:"message_format"`    // "json" or "xml"
 
 	// Provider-specific (exactly one must be set, matching Provider)
-	NATS       *NATSProviderConfig       `json:"nats,omitempty"`
-	AzureQueue *AzureQueueProviderConfig `json:"azure_queue,omitempty"`
-	AzureBlob  *AzureBlobProviderConfig  `json:"azure_blob,omitempty"`
+	NATS            *NATSProviderConfig            `json:"nats,omitempty"`
+	AzureQueue      *AzureQueueProviderConfig      `json:"azure_queue,omitempty"`
+	AzureBlob       *AzureBlobProviderConfig       `json:"azure_blob,omitempty"`
+	AzureServiceBus *AzureServiceBusProviderConfig `json:"azure_servicebus,omitempty"`
 }
 
 // NATSProviderConfig holds NATS-specific connection settings.
@@ -85,6 +88,30 @@ type AzureQueueProviderConfig struct {
 	BlobContainerName       string `json:"blob_container_name"`
 	PollIntervalSeconds     int    `json:"poll_interval_seconds,omitempty"`      // default 5
 	BlobPollIntervalSeconds int    `json:"blob_poll_interval_seconds,omitempty"` // default 15
+}
+
+// AzureServiceBusProviderConfig holds Azure Service Bus queue + optional Azure Blob file transfer settings.
+//
+// Auth is connection-string only in Phase 1. Managed Identity is tracked as a
+// separate cross-provider effort. Message lock duration is NOT a client knob
+// (it is an Azure entity property set on the queue definition), so there is
+// no corresponding field here.
+type AzureServiceBusProviderConfig struct {
+	ConnectionString string `json:"connection_string"`
+	QueueName        string `json:"queue_name"`
+
+	// Optional Blob sidecar for file transfer (only populated when the parent
+	// ConnectionConfig has FileTransferEnabled=true). Service Bus is
+	// message-only; files flow through a separate Blob Storage container.
+	BlobServiceURL    string `json:"blob_service_url,omitempty"`
+	BlobAccountName   string `json:"blob_account_name,omitempty"`
+	BlobAccountKey    string `json:"blob_account_key,omitempty"`
+	BlobContainerName string `json:"blob_container_name,omitempty"`
+
+	// Tunables (optional). Everything else (batch size 32, receive max-wait 5 s,
+	// ack timeout 10 s) is a package-level const.
+	MaxMessageSizeBytes     int `json:"max_message_size_bytes,omitempty"`     // default 192000; Premium can raise to 100 MiB
+	BlobPollIntervalSeconds int `json:"blob_poll_interval_seconds,omitempty"` // default 15 (mirrors azure-queue)
 }
 
 // AzureBlobProviderConfig holds Azure Blob Storage provider settings for batch message relay.
@@ -248,8 +275,10 @@ func validateConnectionList(connections []ConnectionConfig, direction string, al
 			errs = append(errs, validateAzureQueueConnection(conn, prefix)...)
 		case ProviderAzureBlob:
 			errs = append(errs, validateAzureBlobConnection(conn, prefix)...)
+		case ProviderAzureServiceBus:
+			errs = append(errs, validateAzureServiceBusConnection(conn, prefix)...)
 		default:
-			errs = append(errs, fmt.Sprintf("%s: provider must be \"nats\", \"azure-queue\", or \"azure-blob\"", prefix))
+			errs = append(errs, fmt.Sprintf("%s: provider must be \"nats\", \"azure-queue\", \"azure-blob\", or \"azure-servicebus\"", prefix))
 		}
 
 		if conn.MessageFormat == "" {
@@ -438,6 +467,77 @@ func validateAzureBlobConnection(conn ConnectionConfig, prefix string) []string 
 	}
 
 	errs = append(errs, validatePollInterval(ab.BatchPollIntervalSeconds, prefix, "batch_poll_interval_seconds")...)
+
+	return errs
+}
+
+// serviceBusQueueNamePattern matches valid Azure Service Bus queue paths: letters,
+// digits, periods, hyphens, underscores, and forward slashes (hierarchical paths).
+// Length is capped at 260 characters by Service Bus itself.
+var serviceBusQueueNamePattern = regexp.MustCompile(`^[A-Za-z0-9._/\-]+$`)
+
+const serviceBusQueueNameMaxLen = 260
+
+// serviceBusMaxMessageSizeBytesCap is the hard upper bound for the
+// MaxMessageSizeBytes config knob: 100 MiB matches the Service Bus Premium
+// tier's published single-message ceiling.
+const serviceBusMaxMessageSizeBytesCap = 100 * 1024 * 1024
+
+// serviceBusMinMessageSizeBytes guards against typos that would reject every
+// realistic payload.
+const serviceBusMinMessageSizeBytes = 1024
+
+func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []string {
+	var errs []string
+
+	if conn.AzureServiceBus == nil {
+		errs = append(errs, fmt.Sprintf("%s: azure_servicebus config block is required when provider is \"azure-servicebus\"", prefix))
+		return errs
+	}
+
+	sb := conn.AzureServiceBus
+
+	if strings.TrimSpace(sb.ConnectionString) == "" {
+		errs = append(errs, fmt.Sprintf("%s: connection_string is required", prefix))
+	}
+
+	trimmedQueue := strings.TrimSpace(sb.QueueName)
+	switch {
+	case trimmedQueue == "":
+		errs = append(errs, fmt.Sprintf("%s: queue_name is required", prefix))
+	case len(trimmedQueue) > serviceBusQueueNameMaxLen:
+		errs = append(errs, fmt.Sprintf("%s: queue_name must be at most %d characters", prefix, serviceBusQueueNameMaxLen))
+	case !serviceBusQueueNamePattern.MatchString(trimmedQueue):
+		errs = append(errs, fmt.Sprintf("%s: queue_name may contain only letters, digits, periods, hyphens, underscores, and forward slashes", prefix))
+	}
+
+	if conn.FileTransferEnabled {
+		if strings.TrimSpace(sb.BlobServiceURL) == "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_service_url is required when file_transfer_enabled is true", prefix))
+		} else if _, err := url.Parse(sb.BlobServiceURL); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: blob_service_url is not a valid URL: %v", prefix, err))
+		}
+		if strings.TrimSpace(sb.BlobAccountName) == "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_account_name is required when file_transfer_enabled is true", prefix))
+		}
+		if strings.TrimSpace(sb.BlobAccountKey) == "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_account_key is required when file_transfer_enabled is true", prefix))
+		}
+		if strings.TrimSpace(sb.BlobContainerName) == "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_container_name is required when file_transfer_enabled is true", prefix))
+		}
+	}
+
+	if sb.MaxMessageSizeBytes != 0 {
+		if sb.MaxMessageSizeBytes < serviceBusMinMessageSizeBytes {
+			errs = append(errs, fmt.Sprintf("%s: max_message_size_bytes must be at least %d", prefix, serviceBusMinMessageSizeBytes))
+		}
+		if sb.MaxMessageSizeBytes > serviceBusMaxMessageSizeBytesCap {
+			errs = append(errs, fmt.Sprintf("%s: max_message_size_bytes must be at most %d", prefix, serviceBusMaxMessageSizeBytesCap))
+		}
+	}
+
+	errs = append(errs, validatePollInterval(sb.BlobPollIntervalSeconds, prefix, "blob_poll_interval_seconds")...)
 
 	return errs
 }

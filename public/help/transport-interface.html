@@ -39,29 +39,31 @@
         <!-- Overview -->
         <h2>Overview</h2>
         <p>
-            Cross Guard supports two transport providers for relaying messages between Mattermost
-            instances: <a href="https://nats.io">NATS</a> and Azure Queue Storage. Each provider
-            has different delivery guarantees, latency characteristics, and infrastructure
-            requirements. Text events (posts, edits, deletes, reactions) are wrapped in a message
-            envelope (serialized as JSON or XML, per connection configuration) and delivered via
-            the configured transport. File attachments use a provider-specific subsystem: NATS
-            JetStream Object Store or Azure Blob Storage, depending on the transport.
+            Cross Guard supports four transport providers for relaying messages between Mattermost
+            instances: <a href="https://nats.io">NATS</a>, Azure Queue Storage, Azure Blob Storage
+            (batched WAL), and Azure Service Bus. Each provider has different delivery guarantees,
+            latency characteristics, and infrastructure requirements. Text events (posts, edits,
+            deletes, reactions) are wrapped in a message envelope (serialized as JSON or XML, per
+            connection configuration) and delivered via the configured transport. File attachments
+            use a provider-specific subsystem: NATS JetStream Object Store, Azure Blob Storage
+            (paired sidecar for Azure Queue and Azure Service Bus, or the same container for Azure
+            Blob), depending on the transport.
         </p>
 
         <h3>Transport Providers</h3>
         <table>
             <thead>
-                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th></tr>
+                <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th><th>Azure Blob Storage</th><th>Azure Service Bus</th></tr>
             </thead>
             <tbody>
-                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, 5s interval)</td></tr>
-                <tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td></tr>
-                <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td></tr>
-                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td></tr>
-                <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td></tr>
-                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Connection string (shared key)</td></tr>
-                <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td></tr>
-                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes (queue and container auto-created)</td></tr>
+                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, 5s interval)</td><td>Batched WAL blob (60s flush, lease-based read)</td><td>PeekLock pull (32-msg batch, 5s max wait)</td></tr>
+                <tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td><td>At-least-once</td><td>At-least-once (PeekLock with server-side DeliveryCount)</td></tr>
+                <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
+                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td><td>Same container as WAL (deferred file blobs)</td><td>Azure Blob Storage sidecar (15s poll, independent credentials)</td></tr>
+                <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td><td>TLS always (Azure endpoint)</td><td>TLS always (AMQP over TLS)</td></tr>
+                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Connection string (shared key)</td><td>Connection string (shared key)</td><td>SAS connection string</td></tr>
+                <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td><td>Length-prefixed batch within the blob</td><td>AMQP message body (raw bytes)</td></tr>
+                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes (queue and container auto-created)</td><td>Yes (container auto-created)</td><td>No (queue must be pre-created with chosen LockDuration and MaxDeliveryCount)</td></tr>
             </tbody>
         </table>
 
@@ -683,7 +685,7 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
                             <td><code>provider</code></td>
                             <td>string</td>
                             <td>No</td>
-                            <td>Transport provider: <code>"nats"</code>, <code>"azure-queue"</code>, or <code>"azure-blob"</code>. Default: <code>"nats"</code>.</td>
+                            <td>Transport provider: <code>"nats"</code>, <code>"azure-queue"</code>, <code>"azure-blob"</code>, or <code>"azure-servicebus"</code>. Default: <code>"nats"</code>.</td>
                         </tr>
                         <tr>
                             <td><code>file_transfer_enabled</code></td>
@@ -1133,6 +1135,54 @@ Release semaphore</pre>
             </p>
         </div>
 
+        <h3 id="xml-examples">Schema-Valid Example Payloads</h3>
+        <p>
+            The repository ships 12 schema-valid sample payloads under
+            <code>schema/examples/</code>, one per message-type variant the plugin emits. They
+            collectively exercise: simple posts, markdown-rich posts, fenced code blocks with
+            literal <code>&lt;</code>, <code>&gt;</code>, and <code>&amp;</code> in the body, GFM
+            tables and reference links, threaded replies, long-form incident reports, post edits,
+            deletes, standard-emoji reactions, custom-emoji reactions, reaction removal, and the
+            connectivity test message. A full index lives in
+            <code>schema/examples/README.md</code>.
+        </p>
+        <p>
+            Each example file is <strong>byte-for-byte identical</strong> to the bytes the plugin
+            puts on the wire: the output of <code>model.Marshal(env, FormatXML)</code> plus a
+            trailing newline, nothing else. That means a single line per message after the
+            <code>&lt;?xml?&gt;</code> header (no inter-element indentation), entity-escaped
+            <code>MessageText</code> content (<code>&lt;</code> becomes <code>&amp;lt;</code>,
+            <code>&gt;</code> becomes <code>&amp;gt;</code>, <code>&amp;</code> becomes
+            <code>&amp;amp;</code>, embedded newlines become <code>&amp;#xA;</code>), and no CDATA
+            sections. The byte-equality contract is enforced by
+            <code>TestExampleFiles_Symmetric</code> in
+            <code>server/model/examples_roundtrip_test.go</code>, which also verifies that
+            <code>Unmarshal</code> followed by <code>Marshal</code> is a fixed point and that
+            marshalling is deterministic.
+        </p>
+        <p>
+            All sample IDs are 26 characters of <code>[a-z0-9]</code> (per the
+            <code>MattermostIDType</code> constraint in <code>schema/crossguard.xsd</code>).
+            Envelope <code>Timestamp</code> is ISO 8601 (RFC 3339), while
+            <code>PostMessage/CreateAt</code> is Unix epoch <strong>milliseconds</strong> and is
+            earlier than the envelope timestamp to reflect "post was created, then relayed".
+        </p>
+        <p>
+            To validate the examples locally:
+        </p>
+<pre><code>for f in schema/examples/*.xml; do
+  xmllint --noout --schema schema/crossguard.xsd "$f"
+done</code></pre>
+        <p>
+            The simplest example, a minimal top-level post, is reproduced below. Open the file in
+            an editor that soft-wraps, or pipe through <code>xmllint --format</code>, for a
+            human-readable view.
+        </p>
+        <h4>Example: <code>01_post_simple.xml</code></h4>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;&lt;Type&gt;crossguard_post&lt;/Type&gt;&lt;Timestamp&gt;2026-04-15T09:00:00Z&lt;/Timestamp&gt;&lt;PostMessage&gt;&lt;PostID&gt;4uuucd8ra1buzieqbg46xpeuyi&lt;/PostID&gt;&lt;ChannelID&gt;85ykawbwgw8ciijy10hg5c8uwq&lt;/ChannelID&gt;&lt;ChannelName&gt;general&lt;/ChannelName&gt;&lt;TeamID&gt;lttp1g6g5hohz5lc2y0jgvb37n&lt;/TeamID&gt;&lt;TeamName&gt;federal-comms&lt;/TeamName&gt;&lt;UserID&gt;gmnrkopt52jod8eip8t227e9ov&lt;/UserID&gt;&lt;Username&gt;alice&lt;/Username&gt;&lt;MessageText&gt;Morning team. Standup at 9:30 in the usual room, see you there.&lt;/MessageText&gt;&lt;CreateAt&gt;1776243550000&lt;/CreateAt&gt;&lt;/PostMessage&gt;&lt;/CrossguardMessage&gt;
+</code></pre>
+
         <!-- Azure Queue Storage Transport -->
         <h2>Azure Queue Storage Transport</h2>
 
@@ -1361,6 +1411,146 @@ Release semaphore</pre>
     "blob_container_name": "crossguard-wal",
     "flush_interval_seconds": 60,
     "blob_lock_max_age_seconds": 300
+  }
+}</code></pre>
+
+        <!-- Azure Service Bus Transport -->
+        <h2>Azure Service Bus Transport</h2>
+
+        <h3>Overview</h3>
+        <p>
+            The Azure Service Bus provider uses an AMQP-based Service Bus queue for message delivery
+            and an optional Azure Blob Storage sidecar container for file transfer. Unlike the Azure
+            Queue provider, Service Bus uses PeekLock receive semantics with server-side delivery
+            counts and a native dead-letter queue (DLQ). Authentication is via a SAS connection
+            string. Service Bus and Azure Storage are independent Azure resources, so the blob
+            sidecar takes its own credentials separate from the Service Bus namespace.
+        </p>
+        <p>
+            The plugin does <em>not</em> auto-create queues. Pre-create the queue in the Azure
+            portal or via ARM/Terraform with your chosen <code>LockDuration</code> and
+            <code>MaxDeliveryCount</code> before saving the connection. Lock duration is an entity
+            property; the plugin cannot set it.
+        </p>
+
+        <h3>Message Flow</h3>
+        <div class="diagram-box">
+<pre>Outbound Server                Azure Service Bus           Inbound Server
++------------------+    +-------------------------+    +------------------+
+|                  |    |                         |    |                  |
+| Serialize msg    |    |  Queue: crossguard-     |    | ReceiveMessages  |
+| SendMessage      |--->|  relay (PeekLock)       |--->| (batch 32)       |
+|                  |    |                         |    | Complete on      |
+|                  |    |  Blob Sidecar (opt):    |    | handler success  |
+| Upload file?     |--->|  crossguard-files       |--->| Abandon on error |
+| Blob metadata    |    |  (Azure Blob Storage)   |    | (15s blob poll)  |
++------------------+    +-------------------------+    +------------------+</pre>
+        </div>
+
+        <h3>Receive Parameters</h3>
+        <table>
+            <thead>
+                <tr><th>Parameter</th><th>Value</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Receive Mode</td><td>PeekLock</td><td>Messages are locked on receive; the plugin calls Complete on success or Abandon on handler error.</td></tr>
+                <tr><td>Receive Batch Size</td><td>32 messages</td><td>Maximum messages requested per receive call.</td></tr>
+                <tr><td>Receive Max Wait</td><td>5 seconds</td><td>Per-call context deadline. Empty-queue waits are bounded by this timeout, then the loop restarts.</td></tr>
+                <tr><td>Ack Timeout</td><td>10 seconds</td><td>Detached timeout for Complete / Abandon / Close so shutdown races cannot starve settlement.</td></tr>
+                <tr><td>Blob Poll Interval</td><td>15 seconds (configurable)</td><td>How often the inbound side polls the blob sidecar container for file attachments.</td></tr>
+                <tr><td>Default Max Message Size</td><td>192,000 bytes</td><td>Default ceiling for outbound payload size (Service Bus Standard tier caps messages at 256 KiB). Configurable up to 100 MiB on Premium.</td></tr>
+            </tbody>
+        </table>
+
+        <h3>Message Lifecycle</h3>
+        <ol>
+            <li>Outbound serializes the message envelope (JSON or XML) and sends it via the Service Bus SDK.</li>
+            <li>Oversized payloads (above <code>max_message_size_bytes</code>) are rejected at the client boundary before send.</li>
+            <li>Inbound receives messages in batches (up to 32) under PeekLock.</li>
+            <li>Messages with <code>DeliveryCount &gt; 1</code> log a WARN (error code <code>26004</code>) so operators can detect poison-message buildup before DLQ moves happen.</li>
+            <li>Empty-body messages are dropped via Complete to avoid infinite redelivery loops (error code <code>26005</code>).</li>
+            <li>On handler success, the message is Completed. On handler error, the message is Abandoned; Service Bus increments <code>DeliveryCount</code> and redelivers.</li>
+            <li>After <code>MaxDeliveryCount</code> is exceeded, Service Bus auto-moves the message to the queue's dead-letter sub-queue. The plugin does NOT inspect or process DLQ messages; use the Azure portal, <code>az servicebus queue message</code>, or Azure monitoring to inspect the DLQ.</li>
+        </ol>
+
+        <h3>Service Bus File Transfer (Blob Sidecar)</h3>
+        <p>
+            When <code>file_transfer_enabled</code> is <code>true</code> and the blob sidecar fields
+            are configured, file attachments are transferred via Azure Blob Storage using the same
+            upload/download mechanics as the Azure Queue provider (<code>{post_id}/{unique_id}</code>
+            blob keys, Base64-encoded JSON metadata under the <code>crossguard_headers</code> key).
+            Service Bus queues themselves are message-only; files never flow through the queue.
+        </p>
+
+        <h3>Service Bus Connection Configuration</h3>
+        <table>
+            <thead>
+                <tr><th>Field</th><th>JSON Key</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Connection String</td>
+                    <td><code>connection_string</code></td>
+                    <td>Yes</td>
+                    <td>SAS connection string for the Service Bus namespace. Treat as a secret.</td>
+                </tr>
+                <tr>
+                    <td>Queue Name</td>
+                    <td><code>queue_name</code></td>
+                    <td>Yes</td>
+                    <td>Pre-created queue name or hierarchical path. Up to 260 characters; letters, digits, periods, hyphens, underscores, and forward slashes.</td>
+                </tr>
+                <tr>
+                    <td>Blob Service URL</td>
+                    <td><code>blob_service_url</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Azure Blob Storage endpoint for the file sidecar.</td>
+                </tr>
+                <tr>
+                    <td>Blob Account Name</td>
+                    <td><code>blob_account_name</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Storage account name for the blob sidecar (independent of the Service Bus namespace).</td>
+                </tr>
+                <tr>
+                    <td>Blob Account Key</td>
+                    <td><code>blob_account_key</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Shared access key for the blob sidecar storage account. Treat as a secret.</td>
+                </tr>
+                <tr>
+                    <td>Blob Container Name</td>
+                    <td><code>blob_container_name</code></td>
+                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>Blob container used for file attachments. Auto-created on startup if it does not exist.</td>
+                </tr>
+                <tr>
+                    <td>Max Message Size</td>
+                    <td><code>max_message_size_bytes</code></td>
+                    <td>No</td>
+                    <td>Outbound payload ceiling. Default 192000. Range 1024 to 104857600 (100 MiB Premium cap).</td>
+                </tr>
+                <tr>
+                    <td>Blob Poll Interval</td>
+                    <td><code>blob_poll_interval_seconds</code></td>
+                    <td>No</td>
+                    <td>Inbound blob-sidecar poll cadence. Default 15, minimum 1.</td>
+                </tr>
+            </tbody>
+        </table>
+
+                <h4>Example: Azure Service Bus Connection</h4>
+<pre><code>{
+  "name": "azure-servicebus-relay",
+  "provider": "azure-servicebus",
+  "file_transfer_enabled": true,
+  "azure_servicebus": {
+    "connection_string": "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=...",
+    "queue_name": "crossguard-relay",
+    "blob_service_url": "https://mystorageaccount.blob.core.windows.net",
+    "blob_account_name": "mystorageaccount",
+    "blob_account_key": "base64-account-key",
+    "blob_container_name": "crossguard-files"
   }
 }</code></pre>
 

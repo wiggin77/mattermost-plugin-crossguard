@@ -6,14 +6,37 @@ import CrossguardTeamModal from './CrossguardTeamModal';
 
 import {test, expect} from '../../playwright/ct-coverage';
 
-const mockTeamStatus = {
+// Loose shape so individual tests can omit fields (e.g., provider) without
+// tripping strict structural typing. Production ConnectionStatus has provider
+// optional; fixtures do the same.
+interface MockConn {
+    name: string;
+    direction: string;
+    provider?: string;
+    linked: boolean;
+    orphaned?: boolean;
+    remote_team_name?: string;
+    file_transfer_enabled: boolean;
+    file_filter_mode?: string;
+    file_filter_types?: string;
+}
+
+interface MockTeamStatus {
+    team_id: string;
+    team_name: string;
+    team_display_name: string;
+    initialized: boolean;
+    connections: MockConn[];
+}
+
+const mockTeamStatus: MockTeamStatus = {
     team_id: 'team-456',
     team_name: 'alpha-team',
     team_display_name: 'Alpha Team',
     initialized: true,
     connections: [
-        {name: 'inbound-relay', direction: 'inbound', linked: true, remote_team_name: 'beta-team', file_transfer_enabled: true, file_filter_mode: ''},
-        {name: 'outbound-relay', direction: 'outbound', linked: false, remote_team_name: '', file_transfer_enabled: false, file_filter_mode: ''},
+        {name: 'inbound-relay', direction: 'inbound', provider: 'nats', linked: true, remote_team_name: 'beta-team', file_transfer_enabled: true, file_filter_mode: ''},
+        {name: 'outbound-relay', direction: 'outbound', provider: 'nats', linked: false, remote_team_name: '', file_transfer_enabled: false, file_filter_mode: ''},
     ],
 };
 

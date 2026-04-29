@@ -20,8 +20,9 @@ const maxRequestBodySize = 5 << 20 // 5 MB
 
 // Test seams so handler-level tests can exercise every branch without hitting Azure.
 var (
-	testAzureQueueConnectionFn = testAzureQueueConnection
-	testAzureBlobConnectionFn  = testAzureBlobConnection
+	testAzureQueueConnectionFn      = testAzureQueueConnection
+	testAzureBlobConnectionFn       = testAzureBlobConnection
+	testAzureServiceBusConnectionFn = testAzureServiceBusConnection
 )
 
 func (p *Plugin) initAPI() {
@@ -83,8 +84,10 @@ func (p *Plugin) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		p.handleTestAzureQueueConnection(w, conn, direction)
 	case ProviderAzureBlob:
 		p.handleTestAzureBlobConnection(w, conn, direction)
+	case ProviderAzureServiceBus:
+		p.handleTestAzureServiceBusConnection(w, conn, direction)
 	default:
-		writeJSONError(w, "provider must be \"nats\", \"azure-queue\", or \"azure-blob\"", http.StatusBadRequest)
+		writeJSONError(w, "provider must be \"nats\", \"azure-queue\", \"azure-blob\", or \"azure-servicebus\"", http.StatusBadRequest)
 	}
 }
 
@@ -322,6 +325,47 @@ func (p *Plugin) handleTestAzureBlobConnection(w http.ResponseWriter, conn Conne
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status":  "ok",
 		"message": "Azure Blob Storage connection test successful",
+	})
+}
+
+func (p *Plugin) handleTestAzureServiceBusConnection(w http.ResponseWriter, conn ConnectionConfig, _ string) {
+	if conn.AzureServiceBus == nil {
+		writeJSONError(w, "azure_servicebus config block is required", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(conn.AzureServiceBus.ConnectionString) == "" {
+		writeJSONError(w, "connection_string is required", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(conn.AzureServiceBus.QueueName) == "" {
+		writeJSONError(w, "queue_name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Share the same validation as config persistence so the "test" button
+	// catches name-regex violations, out-of-range MaxMessageSizeBytes, etc.
+	// before we even try to connect.
+	if errs := validateAzureServiceBusConnection(conn, "connection "+conn.Name); len(errs) > 0 {
+		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
+		return
+	}
+
+	if err := testAzureServiceBusConnectionFn(*conn.AzureServiceBus); err != nil {
+		// The error from testAzureServiceBusConnection has already been sanitized.
+		p.API.LogError("Azure Service Bus connection test failed",
+			"error_code", errcode.APIAzureServiceBusTestFailed,
+			"error", err.Error())
+		writeJSONError(w, "Azure Service Bus connection test failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"message": "Azure Service Bus connection test successful",
 	})
 }
 

@@ -393,6 +393,11 @@ func (p *Plugin) createProvider(cfg ConnectionConfig, direction string) (QueuePr
 		}
 		isOutbound := direction == "Outbound"
 		return newAzureBlobProvider(p.ctx, *cfg.AzureBlob, p.API, &p.client.KV, p.nodeID, cfg.Name, getFile, isOutbound)
+	case ProviderAzureServiceBus:
+		if cfg.AzureServiceBus == nil {
+			return nil, errMissingAzureServiceBusConfig
+		}
+		return newAzureServiceBusProvider(*cfg.AzureServiceBus, p.API)
 	default:
 		return nil, errUnknownProvider(cfg.Provider)
 	}

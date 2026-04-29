@@ -313,7 +313,7 @@ endif
 nuke: docker-kill-orphans
 	@echo "Nuking everything..."
 	@$(DOCKER_COMPOSE) down -v 2>/dev/null || true
-	@rm -rf docker/postgres-a-data docker/postgres-b-data docker/mattermost-a docker/mattermost-b docker/azurite-data
+	@rm -rf docker/postgres-a-data docker/postgres-b-data docker/mattermost-a docker/mattermost-b docker/azurite-data docker/servicebus-mssql-data
 	@rm -fr dist/
 	@rm -fr server/coverage.txt server/dist
 	@rm -fr webapp/junit.xml webapp/dist webapp/node_modules
@@ -348,7 +348,7 @@ docker-down:
 .PHONY: docker-clean
 docker-clean:
 	@$(DOCKER_COMPOSE) down -v
-	@rm -rf docker/postgres-a-data docker/postgres-b-data docker/mattermost-a docker/mattermost-b docker/azurite-data
+	@rm -rf docker/postgres-a-data docker/postgres-b-data docker/mattermost-a docker/mattermost-b docker/azurite-data docker/servicebus-mssql-data
 	@echo "Containers and data removed"
 
 ## Kill orphaned Docker containers on the MM ports (useful after deleting a worktree)

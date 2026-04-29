@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CrossguardMessage xmlns="urn:mattermost-crossguard"><Type>crossguard_reaction_add</Type><Timestamp>2026-04-15T18:15:00Z</Timestamp><ReactionMessage><PostID>ivlu2lptxbgpz126h5vne0f2w3</PostID><ChannelID>5s4sxdq8d3gaqovpyjr3428dz8</ChannelID><ChannelName>incident-response</ChannelName><TeamID>kvh7caoiznyam4v2k81bpu2v1s</TeamID><TeamName>cross-guard-team</TeamName><UserID>6pzsk9dxmcgzseuvjaju2ifc20</UserID><Username>carol</Username><EmojiName>party-parrot_plus+1</EmojiName></ReactionMessage></CrossguardMessage>

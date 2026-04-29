@@ -373,6 +373,7 @@ docker-integration-test: docker-check
 	@echo "Running Azure integration tests..."
 	@$(MAKE) docker-azure-smoke-test
 	@$(MAKE) docker-azure-blob-smoke-test
+	@$(MAKE) docker-servicebus-smoke-test
 
 ## Azure Queue Storage smoke test using Azurite (local emulator)
 ## Configures an Azure loopback on Server A: outbound -> azurite queue -> inbound
@@ -644,3 +645,134 @@ docker-azure-blob-smoke-test: docker-check
 	echo "azure-blob deferred file relay test: $$AZB_FILE_FOUND" || \
 	{ echo "azure-blob file relay FAILED: azure-blob-file-test:$$AZB_FILE_ID not found with attachments on Server A test/azure-blob-loopback"; exit 1; }
 
+
+## Azure Service Bus smoke test using the local Service Bus emulator.
+## Readiness is gated by servicebus-probe (AMQP PeekMessages) rather than
+## docker healthcheck because the emulator binds 5672 before its SQL schema
+## is ready.
+
+SERVICEBUS_PORT_DEFAULT := 5672
+SERVICEBUS_QUEUE := crossguard-relay
+SERVICEBUS_EMULATOR_CONNSTR := Endpoint=sb://servicebus-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true
+SERVICEBUS_HOST_CONNSTR := Endpoint=sb://localhost:$(SERVICEBUS_PORT_DEFAULT);SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true
+
+.PHONY: servicebus-probe-build
+servicebus-probe-build:
+	@echo "Building servicebus-probe..."
+	@go build -o ./build/bin/servicebus-probe ./build/servicebus-probe
+
+## Bring up the Service Bus emulator + SQL sidecar (servicebus compose profile).
+## The servicebus-* services are profiled so a plain `docker compose up` skips
+## them; this target enables the profile explicitly. Idempotent.
+.PHONY: docker-servicebus-up
+docker-servicebus-up:
+	@echo "Starting Service Bus emulator and SQL sidecar (profile: servicebus)..."
+	@$(DOCKER_COMPOSE) --profile servicebus up -d servicebus-emulator
+
+.PHONY: servicebus-probe-run
+servicebus-probe-run: servicebus-probe-build docker-servicebus-up
+	@echo "Waiting for Service Bus emulator to become ready..."
+	@./build/bin/servicebus-probe -connstr '$(SERVICEBUS_HOST_CONNSTR)' -queue '$(SERVICEBUS_QUEUE)' -deadline 120s
+
+.PHONY: docker-servicebus-smoke-test
+docker-servicebus-smoke-test: docker-check servicebus-probe-run
+	@echo ""
+	@echo "Running Azure Service Bus smoke test..."
+	@echo "Ensuring loop team exists on Server A..."
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team create \
+		--name loop \
+		--display-name "Loop" 2>/dev/null || echo "  Team 'loop' already exists on Server A"
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add loop admin 2>/dev/null || true
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add loop usera 2>/dev/null || true
+	@TOKEN_A=$$(curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	echo "Getting team IDs..." && \
+	LOOP_TEAM=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/teams/name/loop \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	if [ -z "$$LOOP_TEAM" ]; then echo "FAILED: could not get loop team id"; exit 1; fi && \
+	TEST_TEAM=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/teams/name/test \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "Creating servicebus-loopback channels on Server A..." && \
+	SB_LOOP_CH=$$(curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$LOOP_TEAM"'","name":"servicebus-loopback","display_name":"Service Bus Loopback","type":"O"}' \
+		2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || \
+		curl -sf http://localhost:$(MM_PORT_A)/api/v4/teams/name/loop/channels/name/servicebus-loopback \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "  Server A loop/servicebus-loopback channel ($$SB_LOOP_CH)" && \
+	SB_LB_CH=$$(curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$TEST_TEAM"'","name":"servicebus-loopback","display_name":"Service Bus Loopback","type":"O"}' \
+		2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || \
+		curl -sf http://localhost:$(MM_PORT_A)/api/v4/teams/name/test/channels/name/servicebus-loopback \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "  Server A test/servicebus-loopback channel ($$SB_LB_CH)" && \
+	USERA_ID=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/users/username/usera \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$SB_LOOP_CH/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/channels/$$SB_LB_CH/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
+	echo "  usera added to both servicebus-loopback channels" && \
+	echo "Adding azure-servicebus loopback connection to Server A config..." && \
+	EXISTING=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
+	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	EXISTING_IB=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
+	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	curl -sf -X PUT http://localhost:$(MM_PORT_A)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"'"$$(echo $$NEW_OB | sed 's/"/\\"/g')"'","inboundconnections":"'"$$(echo $$NEW_IB | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	echo "Server A configured with azure-servicebus loopback connection (outbound + inbound)" && \
+	echo "Resetting plugin to pick up new config..." && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin disable $(PLUGIN_ID) && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin enable $(PLUGIN_ID) && \
+	sleep 2 && \
+	echo "Initializing Service Bus loopback teams..." && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LOOP_CH"'","command":"/crossguard init-team outbound:servicebus-loopback"}' >/dev/null && \
+	echo "  Server A loop: init-team outbound:servicebus-loopback" && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LB_CH"'","command":"/crossguard init-team inbound:servicebus-loopback"}' >/dev/null && \
+	echo "  Server A test: init-team inbound:servicebus-loopback" && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LOOP_CH"'","command":"/crossguard init-channel outbound:servicebus-loopback"}' >/dev/null && \
+	echo "  Server A loop/servicebus-loopback: init-channel outbound:servicebus-loopback" && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LB_CH"'","command":"/crossguard init-channel inbound:servicebus-loopback"}' >/dev/null && \
+	echo "  Server A test/servicebus-loopback: init-channel inbound:servicebus-loopback" && \
+	echo "Setting rewrite-team rule..." && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LB_CH"'","command":"/crossguard rewrite-team servicebus-loopback loop"}' >/dev/null && \
+	echo "  Server A: rewrite-team servicebus-loopback loop -> test" && \
+	echo "Posting Service Bus smoke-test message from Server A loop/servicebus-loopback..." && \
+	TOKEN_USERA=$$(curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"usera","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	SB_ID=$$(date +%s)-$$$$-sb && \
+	curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_LOOP_CH"'","message":"servicebus-smoke-test:'"$$SB_ID"'"}' >/dev/null && \
+	echo "  Posted servicebus-smoke-test:$$SB_ID to Server A loop/servicebus-loopback" && \
+	echo "Waiting for Service Bus relay (3s)..." && \
+	sleep 3 && \
+	SB_FOUND=$$(curl -sf "http://localhost:$(MM_PORT_A)/api/v4/channels/$$SB_LB_CH/posts?per_page=10" \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json;data=json.load(sys.stdin);sid='$$SB_ID';found=any('servicebus-smoke-test:'+sid in p.get('message','') for p in data.get('posts',{}).values());print('PASS' if found else 'FAIL');sys.exit(0 if found else 1)") && \
+	echo "Service Bus message relay test: $$SB_FOUND" || \
+	{ echo "Service Bus message relay FAILED: servicebus-smoke-test:$$SB_ID not found on Server A test/servicebus-loopback"; exit 1; }

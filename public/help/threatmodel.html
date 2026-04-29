@@ -118,9 +118,9 @@
         <h2>Data Crossing the Domain Boundary</h2>
 
         <p>
-            The following data structures from <code>server/model/</code> transit the transport layer (NATS bus
-            or Azure Queue Storage) between trust zones. Understanding exactly what crosses the boundary
-            is critical for CDS evaluation.
+            The following data structures from <code>server/model/</code> transit the transport layer
+            (NATS bus, Azure Queue Storage, Azure Blob Storage, or Azure Service Bus) between trust
+            zones. Understanding exactly what crosses the boundary is critical for CDS evaluation.
         </p>
 
         <h3>Envelope (<code>model/message.go:Envelope</code>)</h3>
@@ -128,6 +128,12 @@
             The envelope is a single-layer structure with the payload embedded directly (not as a serialized string).
             Messages may be serialized as JSON or XML depending on the outbound connection's <code>message_format</code> setting.
             Inbound format is auto-detected by <code>model.DetectFormat()</code>.
+            The XML wire format is defined by <code>schema/crossguard.xsd</code>
+            (namespace <code>urn:mattermost-crossguard</code>); 12 schema-valid round-trip-tested
+            example payloads (one per message-type variant) live under
+            <code>schema/examples/</code> and are byte-for-byte identical to what the plugin puts on
+            the wire, with that contract enforced by <code>TestExampleFiles_Symmetric</code> in
+            <code>server/model/examples_roundtrip_test.go</code>.
         </p>
         <table class="field-table">
             <tbody>
@@ -228,10 +234,12 @@
                 (<code>post.Props</code>, except the internal <code>crossguard_relayed</code> flag),
                 user metadata (email, profile image, custom fields), channel purpose/header, hashtags,
                 pinned status, edit history, and interactive message elements (buttons, menus).
-                File attachments (<code>post.FileIds</code>) are not included in the envelope but can
-                be transferred separately via NATS JetStream Object Store or Azure Blob Storage
-                (depending on the configured provider) when <code>file_transfer_enabled</code> is true
-                on the connection. File transfer is disabled by default and supports allow/deny type
+                File attachments (<code>post.FileIds</code>) are not included in the envelope but
+                can be transferred separately via NATS JetStream Object Store, Azure Blob Storage
+                (a paired sidecar container for the Azure Queue and Azure Service Bus providers, or
+                the same container as the WAL for the Azure Blob provider), depending on the
+                configured provider, when <code>file_transfer_enabled</code> is true on the
+                connection. File transfer is disabled by default and supports allow/deny type
                 filtering and size limits.
             </p>
         </div>
@@ -279,12 +287,21 @@
             </tbody>
         </table>
 
-        <h4 id="t-spoof-az1">T-SPOOF-AZ1: Azure Connection String Compromise</h4>
+        <h4 id="t-spoof-az1">T-SPOOF-AZ1: Azure Credential Compromise</h4>
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-sysadmin">HIGH</span></td></tr>
-                <tr><td>Description</td><td>An attacker who obtains the Azure Storage connection string can enqueue arbitrary messages or read queued messages. The connection string provides full access to the storage account.</td></tr>
-                <tr><td>Mitigation</td><td>Store connection strings securely (Mattermost encrypts plugin config at rest). Rotate storage account keys regularly. Use Azure Private Endpoints to restrict network access. Monitor Azure Storage analytics for anomalous access patterns.</td></tr>
+                <tr><td>Description</td><td>An attacker who obtains the Azure Storage connection string (Azure Queue or Azure Blob providers) or the Service Bus SAS connection string (Azure Service Bus provider) can send or read messages on the corresponding transport. Azure Storage account credentials provide full access to the storage account; a Service Bus SAS connection string built from <code>RootManageSharedAccessKey</code> grants full namespace control, while a scoped SAS rule grants only the rights it was created with. The Azure Service Bus provider also uses an independent Azure Storage account credential for its blob sidecar (file attachments). Mattermost does not encrypt plugin settings at rest: by default the connections JSON (containing the SAS or shared-key credentials) lives as plaintext in <code>config.json</code> on disk and in the Mattermost configuration database, where any operator with disk, backup, or DB access can read it.</td></tr>
+                <tr><td>Mitigation</td><td>
+                    <ol>
+                        <li><strong>Inject the connections JSON via environment variables instead of saving it through the System Console.</strong> Mattermost substitutes plugin settings from environment variables of the form <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> and <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_INBOUNDCONNECTIONS</code> at config-load time. The credential then lives only in the Mattermost process environment (and any orchestrator-managed secret store such as Kubernetes secrets, systemd <code>LoadCredential=</code>, or HashiCorp Vault that produced it), not in <code>config.json</code> on disk and not in the Mattermost configuration database. This is the recommended pattern for CDS deployments.</li>
+                        <li>Prefer scoped Service Bus SAS rules over the namespace-wide <code>RootManageSharedAccessKey</code> so an exposed credential grants only the minimum needed rights (Send / Listen / Manage scoped to one queue).</li>
+                        <li>Rotate Azure Storage account keys and Service Bus SAS keys on a regular schedule. Update the env-var-managed secret after rotation.</li>
+                        <li>The Service Bus provider sanitizes SAS material out of error messages (<code>SharedAccessKey=</code>, <code>SharedAccessSignature=</code>, and <code>sig=</code> query params) before logging via <code>sanitizeServiceBusError()</code>, so a compromised log file does not leak the credential.</li>
+                        <li>Use Azure Private Endpoints to restrict network access to the storage account and Service Bus namespace. Monitor Azure Storage analytics and Service Bus diagnostic logs for anomalous access patterns.</li>
+                    </ol>
+                </td></tr>
+                <tr><td>Residual Risk</td><td>With env-var injection the credential is not on disk or in the Mattermost DB, but it is still readable by anyone who can read the Mattermost process environment (root on the host, container exec, <code>/proc/&lt;pid&gt;/environ</code>, container orchestrator logs). Without env-var injection, the credential sits in plaintext in <code>config.json</code> and in the configuration database, exposing every operator with disk, backup, or DB access. In either case, a compromised credential grants full transport access until the underlying Azure key is rotated.</td></tr>
             </tbody>
         </table>
 
@@ -322,12 +339,12 @@
             </tbody>
         </table>
 
-        <h4 id="t-tamp-az1">T-TAMP-AZ1: Azure Queue Message Tampering</h4>
+        <h4 id="t-tamp-az1">T-TAMP-AZ1: Azure Transport Message Tampering</h4>
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-teamadmin">MEDIUM</span></td></tr>
-                <tr><td>Description</td><td>Messages in Azure Queue Storage are Base64-encoded but not encrypted or signed by the application. An attacker with storage account access could modify queued messages before they are consumed.</td></tr>
-                <tr><td>Mitigation</td><td>Restrict storage account access via Azure RBAC and network rules. Consider using SAS tokens with limited permissions instead of full connection strings. Azure Storage provides its own integrity checks at the transport level via TLS.</td></tr>
+                <tr><td>Description</td><td>The envelope is not signed or encrypted by the application on any Azure transport: messages in Azure Queue Storage are Base64-encoded, batched WAL blobs in the Azure Blob provider are length-prefixed plaintext envelopes, and Azure Service Bus AMQP message bodies are raw envelope bytes. An attacker with sufficient access to the underlying store (storage account or Service Bus namespace) could modify in-flight or at-rest messages before they are consumed. The Azure Service Bus provider's blob sidecar (file attachments) inherits the same exposure as the Azure Blob provider.</td></tr>
+                <tr><td>Mitigation</td><td>Restrict storage account and Service Bus namespace access via Azure RBAC and network rules. Prefer scoped SAS tokens (Storage) and scoped Service Bus SAS rules over root credentials. Azure Storage and Azure Service Bus both provide transport-level integrity via TLS. Azure Service Bus's PeekLock with <code>DeliveryCount</code> limits how many times a tampered message can be redelivered before the broker auto-moves it to the dead-letter sub-queue.</td></tr>
             </tbody>
         </table>
 
@@ -348,8 +365,8 @@
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-member">LOW</span></td></tr>
-                <tr><td>Description</td><td>Azure Storage provides access logging, but correlating queue operations to specific Cross Guard messages requires additional effort. Message content is Base64-encoded in logs.</td></tr>
-                <tr><td>Mitigation</td><td>Enable Azure Storage Analytics logging. Enable Azure Monitor diagnostic settings for the storage account. Cross Guard logs all inbound/outbound operations with connection names and post IDs.</td></tr>
+                <tr><td>Description</td><td>Azure Storage and Azure Service Bus both provide access logging, but correlating queue, blob, or AMQP operations to specific Cross Guard messages requires additional effort. Azure Queue message content is Base64-encoded in logs; Azure Blob batch blobs are opaque containers from the audit log's perspective; Azure Service Bus diagnostic logs record send/receive operations and message metadata but not application payloads.</td></tr>
+                <tr><td>Mitigation</td><td>Enable Azure Storage Analytics logging on the storage account, and enable Azure Service Bus diagnostic settings for the namespace. Enable Azure Monitor diagnostic settings on both. Cross Guard logs all inbound/outbound operations with connection names, post IDs, and (for Service Bus) <code>DeliveryCount</code> warnings via error code <code>26004</code>.</td></tr>
             </tbody>
         </table>
 
@@ -402,8 +419,15 @@
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-teamadmin">MEDIUM</span></td></tr>
-                <tr><td>Description</td><td>The Azure connection string is stored in the Mattermost plugin configuration. System admins with database access or config export access can view the connection string.</td></tr>
-                <tr><td>Mitigation</td><td>Mattermost encrypts plugin settings at rest. Limit System Admin access. Rotate storage account keys if compromise is suspected. Use Azure Key Vault integration where possible.</td></tr>
+                <tr><td>Description</td><td>Azure transports store credentials in the plugin's connections JSON: the Azure Storage connection string (or account name plus shared key) for the Azure Queue and Azure Blob providers, and a Service Bus SAS connection string for the Azure Service Bus provider (with a separate Storage account credential for its blob sidecar). Mattermost does not encrypt plugin settings at rest, so by default these credentials are stored as plaintext in <code>config.json</code> on disk and in the Mattermost configuration database. System Admins with System Console access can view them; any operator with disk, backup, or DB access can also read them.</td></tr>
+                <tr><td>Mitigation</td><td>
+                    <ol>
+                        <li>Inject the connections JSON via the Mattermost env-var pattern (<code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> and <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_INBOUNDCONNECTIONS</code>) sourced from a secret store (Kubernetes secrets, systemd <code>LoadCredential=</code>, HashiCorp Vault). This keeps the credential out of <code>config.json</code> and the Mattermost configuration database. See T-SPOOF-AZ1 for details.</li>
+                        <li>Limit System Admin access; the System Console still allows reading of the in-memory plugin settings.</li>
+                        <li>Rotate Azure Storage account keys and Service Bus SAS keys on a regular schedule. Update the env-var-managed secret after rotation.</li>
+                        <li>Prefer scoped Service Bus SAS rules over <code>RootManageSharedAccessKey</code> so an exposed credential grants only the minimum needed rights.</li>
+                    </ol>
+                </td></tr>
             </tbody>
         </table>
 
@@ -430,12 +454,12 @@
             </tbody>
         </table>
 
-        <h4 id="t-dos-az1">T-DOS-AZ1: Azure Queue Saturation</h4>
+        <h4 id="t-dos-az1">T-DOS-AZ1: Azure Transport Saturation</h4>
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-teamadmin">MEDIUM</span></td></tr>
-                <tr><td>Description</td><td>An attacker with queue write access (or a misconfigured outbound server) could flood the queue with messages, causing the inbound poller to process excessive messages and potentially overwhelming the Mattermost server.</td></tr>
-                <tr><td>Mitigation</td><td>Azure Queue Storage has built-in throttling. The inbound poller processes a maximum of 32 messages per batch with a 5-second interval, providing natural rate limiting. Monitor queue depth via Azure metrics. Set up alerts for unusual queue growth.</td></tr>
+                <tr><td>Description</td><td>An attacker with write access to an Azure transport (Queue, Blob container, or Service Bus queue), or a misconfigured outbound server, could flood the transport with messages, causing the inbound side to process excessive messages and potentially overwhelming the Mattermost server.</td></tr>
+                <tr><td>Mitigation</td><td>Azure Queue Storage and Azure Service Bus both have built-in throttling. The inbound side bounds processing rate per provider: Azure Queue polls at most 32 messages per batch with a 5-second interval, the Azure Blob provider's batch reads are bounded by <code>flush_interval_seconds</code> and per-blob lease, and the Azure Service Bus provider uses PeekLock receive (batch up to 32, 5-second max wait) plus server-side <code>DeliveryCount</code> with automatic dead-letter on <code>MaxDeliveryCount</code> exceedance. The Service Bus DLQ contains poison messages without a custom retry-tracking layer; the plugin logs a WARN with error code <code>26004</code> when <code>DeliveryCount &gt; 1</code> so operators can detect buildup before DLQ moves happen. Monitor queue depth, blob container size, and Service Bus active/DLQ counts via Azure metrics. Set up alerts for unusual growth.</td></tr>
             </tbody>
         </table>
 
@@ -467,8 +491,8 @@
         <table class="field-table">
             <tbody>
                 <tr><td>Severity</td><td><span class="permission-tag permission-sysadmin">HIGH</span></td></tr>
-                <tr><td>Description</td><td>If the Azure Blob container is accidentally configured with public access (blob or container level), file attachments become accessible to anyone on the internet without authentication.</td></tr>
-                <tr><td>Mitigation</td><td>The plugin creates containers with private access by default. Enforce "no public access" at the storage account level via Azure policy. Audit container access levels regularly. Use Azure Defender for Storage to detect public access misconfigurations.</td></tr>
+                <tr><td>Description</td><td>If an Azure Blob container is accidentally configured with public access (blob or container level), its contents become accessible to anyone on the internet without authentication. This applies to file attachment containers used by the Azure Queue and Azure Service Bus providers and to the combined WAL-plus-files container used by the Azure Blob provider. The Azure Service Bus provider's blob sidecar uses an independent storage account and so must be audited separately from the Service Bus namespace.</td></tr>
+                <tr><td>Mitigation</td><td>The plugin creates containers with private access by default. Enforce "no public access" at the storage account level via Azure policy. Audit container access levels regularly across every storage account in scope (including the independent Service Bus blob sidecar account). Use Azure Defender for Storage to detect public access misconfigurations.</td></tr>
             </tbody>
         </table>
 
@@ -792,19 +816,19 @@
                 </tr>
                 <tr>
                     <td><a href="#t-spoof-az1">T-SPOOF-AZ1</a></td>
-                    <td>Azure connection string compromise</td>
+                    <td>Azure credential compromise (Storage and Service Bus SAS)</td>
                     <td>Spoofing</td>
                     <td><span class="permission-tag permission-sysadmin">HIGH</span></td>
                     <td>Partial</td>
-                    <td>Encrypted config + key rotation + Private Endpoints</td>
+                    <td>Env-var injection + key rotation + Private Endpoints + scoped SAS rules + SAS error sanitization</td>
                 </tr>
                 <tr>
                     <td><a href="#t-tamp-az1">T-TAMP-AZ1</a></td>
-                    <td>Azure queue message tampering</td>
+                    <td>Azure transport message tampering (Queue, Blob, Service Bus)</td>
                     <td>Tampering</td>
                     <td><span class="permission-tag permission-teamadmin">MEDIUM</span></td>
                     <td>Partial</td>
-                    <td>Azure RBAC + network rules + TLS transport integrity</td>
+                    <td>Azure RBAC + network rules + TLS transport integrity + Service Bus DeliveryCount/DLQ</td>
                 </tr>
                 <tr>
                     <td><a href="#t-repud-az1">T-REPUD-AZ1</a></td>
@@ -812,7 +836,7 @@
                     <td>Repudiation</td>
                     <td><span class="permission-tag permission-member">LOW</span></td>
                     <td>Partial</td>
-                    <td>Azure Storage Analytics + plugin logs</td>
+                    <td>Azure Storage Analytics + Service Bus diagnostic logs + plugin logs</td>
                 </tr>
                 <tr>
                     <td><a href="#t-info-az1">T-INFO-AZ1</a></td>
@@ -820,19 +844,19 @@
                     <td>Info Disclosure</td>
                     <td><span class="permission-tag permission-teamadmin">MEDIUM</span></td>
                     <td>Partial</td>
-                    <td>Encrypted config + key rotation</td>
+                    <td>Env-var injection + key rotation + scoped SAS rules</td>
                 </tr>
                 <tr>
                     <td><a href="#t-dos-az1">T-DOS-AZ1</a></td>
-                    <td>Azure queue saturation</td>
+                    <td>Azure transport saturation</td>
                     <td>DoS</td>
                     <td><span class="permission-tag permission-teamadmin">MEDIUM</span></td>
                     <td>Partial</td>
-                    <td>Azure throttling + batch polling (32 msgs/5s)</td>
+                    <td>Azure throttling + bounded inbound batches + Service Bus DeliveryCount/DLQ</td>
                 </tr>
                 <tr>
                     <td><a href="#t-elev-az1">T-ELEV-AZ1</a></td>
-                    <td>Blob container public access</td>
+                    <td>Blob container public access (incl. Service Bus blob sidecar)</td>
                     <td>Privilege</td>
                     <td><span class="permission-tag permission-sysadmin">HIGH</span></td>
                     <td>By design</td>
@@ -844,15 +868,31 @@
         <!-- Section 10: Azure Transport Security -->
         <h2>Azure Transport Security Considerations</h2>
         <p>
-            When using Azure Queue Storage as the transport provider, the following security
-            measures should be implemented:
+            When using any Azure transport provider (Azure Queue Storage, Azure Blob Storage, or
+            Azure Service Bus), the following security measures should be implemented:
         </p>
+
+        <h3>Common to all Azure transports</h3>
         <ul>
-            <li><strong>Private Endpoints:</strong> Configure Azure Private Endpoints for the storage account to ensure queue and blob traffic stays within the Azure backbone network.</li>
-            <li><strong>Network Rules:</strong> Use Azure Storage firewall rules to restrict access to specific IP ranges or virtual networks.</li>
-            <li><strong>Key Rotation:</strong> Rotate storage account access keys on a regular schedule. Update the plugin configuration after rotation.</li>
-            <li><strong>Monitoring:</strong> Enable Azure Monitor diagnostic settings and Storage Analytics to track access patterns and detect anomalies.</li>
-            <li><strong>Least Privilege:</strong> Consider using Shared Access Signatures (SAS) scoped to only the required queue and container, rather than full account-level connection strings.</li>
+            <li><strong>Private Endpoints:</strong> Configure Azure Private Endpoints for storage accounts and Service Bus namespaces so queue, blob, and AMQP traffic stays within the Azure backbone network.</li>
+            <li><strong>Network Rules:</strong> Use Azure Storage firewall rules and Service Bus IP/VNet filters to restrict access to specific IP ranges or virtual networks.</li>
+            <li><strong>Key Rotation:</strong> Rotate storage account access keys and Service Bus SAS keys on a regular schedule. Update the plugin configuration after rotation.</li>
+            <li><strong>Monitoring:</strong> Enable Azure Monitor diagnostic settings, Storage Analytics, and Service Bus diagnostic logs to track access patterns and detect anomalies.</li>
+            <li><strong>Least Privilege:</strong> For Storage, consider scoped Shared Access Signatures (SAS) over full account-level connection strings. For Service Bus, prefer scoped SAS rules over the namespace-wide <code>RootManageSharedAccessKey</code>.</li>
+        </ul>
+
+        <h3>Azure Queue Storage and Azure Blob Storage</h3>
+        <ul>
+            <li><strong>Auto-provisioned containers/queues:</strong> The plugin auto-creates the configured queue and container with private access if they do not exist. Enforce "no public access" at the storage account level via Azure policy.</li>
+            <li><strong>Single-container footprint (Azure Blob):</strong> The Azure Blob provider stores both batch WAL blobs and deferred file blobs in the same container. Audit access policies and lifecycle rules on that one container.</li>
+        </ul>
+
+        <h3>Azure Service Bus</h3>
+        <ul>
+            <li><strong>Pre-created queues with broker-side tunables:</strong> The plugin does not auto-create Service Bus queues. Operators provision the queue with a chosen <code>LockDuration</code> and <code>MaxDeliveryCount</code> in the Azure portal, ARM, or Terraform. These broker-side properties cannot be set from a client; placing them under the same change-control as other Azure infrastructure keeps message-handling SLAs and DLQ policy auditable.</li>
+            <li><strong>SAS connection string handling:</strong> Service Bus authentication is via a SAS connection string of the form <code>Endpoint=sb://&lt;namespace&gt;.servicebus.windows.net/;SharedAccessKeyName=&lt;rule&gt;;SharedAccessKey=&lt;key&gt;</code>. The provider strips <code>SharedAccessKey=</code>, <code>SharedAccessSignature=</code>, and <code>sig=</code> query parameters out of any error messages it logs (<code>sanitizeServiceBusError()</code>) so SAS material does not leak into operator-visible logs.</li>
+            <li><strong>Dead-letter sub-queue (DLQ):</strong> Service Bus auto-moves messages whose <code>DeliveryCount</code> exceeds <code>MaxDeliveryCount</code> to the queue's dead-letter sub-queue. The plugin does not inspect or process DLQ messages; operators inspect the DLQ via the Azure portal, <code>az servicebus queue message</code>, or Azure monitoring. The plugin emits a WARN with error code <code>26004</code> when <code>DeliveryCount &gt; 1</code> so poison-message buildup is visible before DLQ moves happen.</li>
+            <li><strong>Independent blob sidecar credentials:</strong> When <code>file_transfer_enabled</code> is true, file attachments transit an Azure Blob Storage sidecar that takes its own storage account credentials, separate from the Service Bus namespace. The two stores can live in different Azure subscriptions and have independent access policies. Audit and rotate the two credentials independently.</li>
         </ul>
 
     </main>

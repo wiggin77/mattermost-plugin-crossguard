@@ -1971,6 +1971,16 @@ func TestProviderDetails(t *testing.T) {
 			want: "blob: c1",
 		},
 		{
+			name: "azure-servicebus with blob",
+			conn: RedactedConnection{Provider: "azure-servicebus", QueueName: "sb1", BlobContainerName: "c1"},
+			want: "queue: sb1, blob: c1",
+		},
+		{
+			name: "azure-servicebus without blob",
+			conn: RedactedConnection{Provider: "azure-servicebus", QueueName: "sb1"},
+			want: "queue: sb1",
+		},
+		{
 			name: "nats with all fields",
 			conn: RedactedConnection{Provider: "nats", Address: "nats://localhost:4222", Subject: "sub", AuthType: "token"},
 			want: "nats://localhost:4222, subject: sub, auth: token",

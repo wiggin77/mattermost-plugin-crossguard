@@ -10,6 +10,7 @@ async function getCalls(page: any): Promise<{onChange: Array<{id: string; value:
 
 const natsConn = {name: 'test-conn', provider: 'nats', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', nats: {address: 'nats://localhost:4222', subject: 'crossguard.test-conn', tls_enabled: false, auth_type: 'none', token: '', username: '', password: '', client_cert: '', client_key: '', ca_cert: ''}};
 const azureConn = {name: 'azure-conn', provider: 'azure-queue', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', azure_queue: {queue_service_url: 'https://test.queue.core.windows.net', blob_service_url: '', account_name: 'test', account_key: 'dGVzdA==', queue_name: 'test-queue', blob_container_name: ''}};
+const serviceBusConn = {name: 'sb-conn', provider: 'azure-servicebus', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', azure_servicebus: {connection_string: 'Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=root;SharedAccessKey=abc', queue_name: 'sb-queue', blob_service_url: '', blob_account_name: '', blob_account_key: '', blob_container_name: ''}};
 
 function defaultProps(overrides?: Partial<{id: string; value: string; disabled: boolean}>) {
     return {
@@ -820,6 +821,62 @@ test.describe('ConnectionSettings Edge Cases', () => {
             const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
             expect(saved[0].file_transfer_enabled).toBe(true);
             expect(saved[0].azure_queue.blob_container_name).toBe('my-blob-container');
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Azure Service Bus provider
+    // -------------------------------------------------------------------------
+    test.describe('Azure Service Bus provider', () => {
+        test('round-trips an azure-servicebus connection without mutating it', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([serviceBusConn])})}/>);
+            await expect(component.getByText('sb-conn').first()).toBeVisible();
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await component.getByRole('button', {name: 'Update Connection'}).click();
+
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved).toHaveLength(1);
+            expect(saved[0].provider).toBe('azure-servicebus');
+            expect(saved[0].azure_servicebus.connection_string).toContain('servicebus.windows.net');
+            expect(saved[0].azure_servicebus.queue_name).toBe('sb-queue');
+            expect(saved[0].nats).toBeUndefined();
+            expect(saved[0].azure_queue).toBeUndefined();
+            expect(saved[0].azure_blob).toBeUndefined();
+        });
+
+        test('switching provider to azure-servicebus nulls other provider blocks', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            const providerSelect = component.locator('select').first();
+            await providerSelect.selectOption('azure-servicebus');
+            await component.locator('input[placeholder^="Endpoint=sb://"]').fill('Endpoint=sb://foo.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=xyz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('my-sb-queue');
+            await component.getByRole('button', {name: 'Update Connection'}).click();
+
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('azure-servicebus');
+            expect(saved[0].azure_servicebus.queue_name).toBe('my-sb-queue');
+            expect(saved[0].nats).toBeUndefined();
+            expect(saved[0].azure_queue).toBeUndefined();
+            expect(saved[0].azure_blob).toBeUndefined();
+        });
+
+        test('file transfer toggle reveals the four blob fields', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([serviceBusConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+
+            // Not visible before toggling.
+            await expect(component.getByLabel('Azure Service Bus Blob Service URL')).not.toBeVisible();
+
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+
+            await expect(component.getByLabel('Azure Service Bus Blob Service URL')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Blob Account Name')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Blob Account Key')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Blob Container Name')).toBeVisible();
         });
     });
 });

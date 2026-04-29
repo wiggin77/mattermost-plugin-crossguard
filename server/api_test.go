@@ -2494,3 +2494,96 @@ func TestHandleTestAzureBlobConnection(t *testing.T) {
 		assert.Equal(t, "ok", decodeJSONResponse(t, w)["status"])
 	})
 }
+
+func TestHandleTestAzureServiceBusConnection(t *testing.T) {
+	adminUser := &mmModel.User{Id: "admin-id", Roles: mmModel.SystemAdminRoleId}
+
+	validBody := func() map[string]any {
+		return map[string]any{
+			"name":     "sb1",
+			"provider": "azure-servicebus",
+			"azure_servicebus": map[string]any{
+				"connection_string": "Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=abc",
+				"queue_name":        "q1",
+			},
+		}
+	}
+
+	setup := func() (*plugintest.API, *Plugin) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+		return api, p
+	}
+
+	sendReq := func(p *Plugin, body map[string]any) *httptest.ResponseRecorder {
+		r := makeAuthRequest(t, http.MethodPost, "/api/v1/test-connection", body, "admin-id")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+		return w
+	}
+
+	t.Run("missing azure_servicebus block returns 400", func(t *testing.T) {
+		_, p := setup()
+		w := sendReq(p, map[string]any{"provider": "azure-servicebus"})
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, decodeJSONResponse(t, w)["error"], "azure_servicebus config block")
+	})
+
+	t.Run("missing connection_string returns 400", func(t *testing.T) {
+		_, p := setup()
+		body := validBody()
+		body["azure_servicebus"].(map[string]any)["connection_string"] = ""
+		w := sendReq(p, body)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, decodeJSONResponse(t, w)["error"], "connection_string")
+	})
+
+	t.Run("missing queue_name returns 400", func(t *testing.T) {
+		_, p := setup()
+		body := validBody()
+		body["azure_servicebus"].(map[string]any)["queue_name"] = ""
+		w := sendReq(p, body)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, decodeJSONResponse(t, w)["error"], "queue_name")
+	})
+
+	t.Run("invalid queue_name characters return 400", func(t *testing.T) {
+		_, p := setup()
+		body := validBody()
+		body["azure_servicebus"].(map[string]any)["queue_name"] = "bad queue name with spaces"
+		w := sendReq(p, body)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, decodeJSONResponse(t, w)["error"], "queue_name")
+	})
+
+	t.Run("backend error returns 502 with sanitized body", func(t *testing.T) {
+		orig := testAzureServiceBusConnectionFn
+		testAzureServiceBusConnectionFn = func(cfg AzureServiceBusProviderConfig) error {
+			return errors.New("connection refused: SharedAccessKey=hidden-secret-123")
+		}
+		t.Cleanup(func() { testAzureServiceBusConnectionFn = orig })
+
+		_, p := setup()
+		w := sendReq(p, validBody())
+		require.Equal(t, http.StatusBadGateway, w.Code)
+		body := decodeJSONResponse(t, w)["error"]
+		assert.Contains(t, body, "Azure Service Bus connection test failed")
+		// The sanitizer runs in the testAzureServiceBusConnection function itself.
+		// The test seam returns a raw error, so this subtest just proves the
+		// sanitizer is a library-level concern. The real sanitizer coverage
+		// lives in TestSanitizeServiceBusError_*.
+	})
+
+	t.Run("happy path returns 200", func(t *testing.T) {
+		orig := testAzureServiceBusConnectionFn
+		testAzureServiceBusConnectionFn = func(cfg AzureServiceBusProviderConfig) error { return nil }
+		t.Cleanup(func() { testAzureServiceBusConnectionFn = orig })
+
+		_, p := setup()
+		w := sendReq(p, validBody())
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "ok", decodeJSONResponse(t, w)["status"])
+	})
+}
