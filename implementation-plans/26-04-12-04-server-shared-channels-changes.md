@@ -1,5 +1,9 @@
 # Mattermost Server: Shared Channels Plugin API Changes
 
+**Status**: Implemented and merged to master (Mattermost server PR #36126, commit `81d4fe3793`, 2026-04-28). Follow-up PR #36309 (commit `fdaea9dec3`) added `CleanRemoteName()` slugification of `RemoteCluster.Name` in plugin registration.
+
+**Implementation deviation from plan**: Empty `SiteURL` is no longer a hard error. For backward compatibility with existing plugins (e.g. MS Teams), `RegisterPluginForSharedChannels` now defaults `SiteURL` to the legacy `"plugin_<PluginID>"` value when not provided. Plugins registering multiple remotes must provide a `SiteURL`; single-remote plugins can omit it and continue to work unchanged.
+
 Prerequisite for:
 - [Cross Guard: Shared Channels API Refactor Plan](26-04-12-02-shared-channels-api-refactor.md)
 - Matrix Bridge plugin (`mattermost-plugin-matrix-bridge`)
@@ -72,29 +76,29 @@ The only constraint is in registration and the store's uniqueness assumption.
 
 ### Phase 1: XML Struct Tags
 
-- [ ] Model types have `xml` struct tags alongside existing `json` tags
-- [ ] `SyncMsg.Users` map serializes to XML via custom `MarshalXML`/`UnmarshalXML`
-- [ ] `SyncMsg.MentionTransforms` map serializes to XML via custom methods
-- [ ] `Post.Metadata` is excluded from XML serialization (`xml:"-"`)
-- [ ] XML round-trip tests pass for `SyncMsg` with all nested types
-- [ ] Existing JSON serialization is unaffected
-- [ ] Existing tests pass without modification
+- [x] Model types have `xml` struct tags alongside existing `json` tags
+- [x] `SyncMsg.Users` map serializes to XML via custom `MarshalXML`/`UnmarshalXML`
+- [x] `SyncMsg.MentionTransforms` map serializes to XML via custom methods
+- [x] `Post.Metadata` is excluded from XML serialization (`xml:"-"`)
+- [x] XML round-trip tests pass for `SyncMsg` with all nested types
+- [x] Existing JSON serialization is unaffected
+- [x] Existing tests pass without modification
 
 ### Phase 2: Multi-Remote Registration
 
-- [ ] `RegisterPluginForSharedChannels` requires `SiteURL`; multiple calls with different SiteURLs register multiple remotes
-- [ ] Each remote has an independent sync cursor
-- [ ] `OnSharedChannelsSyncMsg` is called per remote with the correct `RemoteCluster`
-- [ ] `OnSharedChannelsPing` is called per remote
-- [ ] `InviteRemoteToChannel` targets a specific remote by ID
-- [ ] `Receive*` APIs accept `remoteID` to identify which connection the plugin is acting as
-- [ ] `UnregisterPluginForSharedChannels` unregisters all remotes for a plugin (bulk cleanup)
-- [ ] `UnregisterPluginRemoteForSharedChannels` (new) unregisters a single remote
-- [ ] `GetByPluginID` (deprecated) unchanged, new `GetAllByPluginID` added
-- [ ] Registration fails on empty SiteURL or SiteURL collision with a different plugin/server-to-server remote
-- [ ] No new database column; SiteURL uniqueness provides the dedup key
-- [ ] `IsPlugin()` simplified to check `PluginID != ""` only; `SiteURLPlugin` prefix deprecated
-- [ ] Existing tests pass without modification
+- [x] `RegisterPluginForSharedChannels` accepts `SiteURL`; multiple calls with different SiteURLs register multiple remotes (deviation: empty `SiteURL` now defaults to `"plugin_<PluginID>"` instead of failing, for backward compatibility)
+- [x] Each remote has an independent sync cursor
+- [x] `OnSharedChannelsSyncMsg` is called per remote with the correct `RemoteCluster`
+- [x] `OnSharedChannelsPing` is called per remote
+- [x] `InviteRemoteToChannel` targets a specific remote by ID
+- [x] `Receive*` APIs accept `remoteID` to identify which connection the plugin is acting as
+- [x] `UnregisterPluginForSharedChannels` unregisters all remotes for a plugin (bulk cleanup)
+- [x] `UnregisterPluginRemoteForSharedChannels` (new) unregisters a single remote
+- [x] `GetByPluginID` (deprecated) unchanged, new `GetAllByPluginID` added
+- [x] SiteURL collision with a different plugin/server-to-server remote rejected (deviation: empty SiteURL no longer rejected; defaults to legacy prefix)
+- [x] No new database column; SiteURL uniqueness provides the dedup key
+- [x] `IsPlugin()` simplified to check `PluginID != ""` only; `SiteURLPlugin` prefix deprecated
+- [x] Existing tests pass without modification
 
 ## Out of Scope
 
@@ -619,57 +623,63 @@ These already work per-remote and need no modification:
 
 ### Phase 1
 
-1. [ ] Add `xml` struct tags to `SyncMsg`, `SyncResponse`, `MembershipChangeMsg`
+1. [x] Add `xml` struct tags to `SyncMsg`, `SyncResponse`, `MembershipChangeMsg`
        in `server/public/model/shared_channel.go`. Add `MarshalXML`/`UnmarshalXML`
        methods to `SyncMsg` for the `Users` map and `MentionTransforms` map.
 
-2. [ ] Add `xml` struct tags to `Post` in `server/public/model/post.go`. Tag
+2. [x] Add `xml` struct tags to `Post` in `server/public/model/post.go`. Tag
        `Metadata` as `xml:"-"`. Add `MarshalXML`/`UnmarshalXML` for
-       `StringInterface` (Post.Props).
+       `StringInterface` (Post.Props). (Custom map methods landed in
+       `server/public/model/xml_helpers.go`.)
 
-3. [ ] Add `xml` struct tags to `User` in `server/public/model/user.go`. Add
+3. [x] Add `xml` struct tags to `User` in `server/public/model/user.go`. Add
        `MarshalXML`/`UnmarshalXML` for `StringMap` (Props, NotifyProps, Timezone).
 
-4. [ ] Add `xml` struct tags to `Reaction`, `Status`, `PostAcknowledgement`,
+4. [x] Add `xml` struct tags to `Reaction`, `Status`, `PostAcknowledgement`,
        `FileInfo` in their respective files.
 
-5. [ ] Add XML round-trip tests for all modified types. Verify JSON serialization
-       is unchanged.
+5. [x] Add XML round-trip tests for all modified types. Verify JSON serialization
+       is unchanged. (See `server/public/model/shared_channel_test.go`,
+       including `TestXMLDoesNotAffectJSON`.)
 
-6. [ ] Run existing test suite. Verify zero regressions.
+6. [x] Run existing test suite. Verify zero regressions.
 
 ### Phase 2
 
-7. [ ] Add `SiteURL` field to `RegisterPluginOpts` in
+7. [x] Add `SiteURL` field to `RegisterPluginOpts` in
        `server/public/model/shared_channel.go`.
 
-8. [ ] Deprecate `GetByPluginID` (add deprecation comment, keep unchanged). Add
+8. [x] Deprecate `GetByPluginID` (add deprecation comment, keep unchanged). Add
        `GetAllByPluginID` and `GetBySiteURL` to `RemoteClusterStore` interface.
        Implement in SQL store, timer layer, retry layer. Regenerate mocks. Update
        `Save` collision check to use `GetBySiteURL`.
 
-9. [ ] Rewrite `RegisterPluginForSharedChannels` to construct SiteURL from opts
+9. [x] Rewrite `RegisterPluginForSharedChannels` to construct SiteURL from opts
        and dedup via `GetBySiteURL`. Rewrite `UnregisterPluginForSharedChannels`
        to use `GetAllByPluginID` and delete all remotes. Add
        `UnregisterPluginRemoteForSharedChannels` for single-remote removal.
+       (Deviation: empty `SiteURL` defaults to `"plugin_<PluginID>"` instead of
+       failing. Follow-up #36309 added `model.CleanRemoteName()` to slugify
+       `RemoteCluster.Name` from `Displayname`.)
 
-10. [ ] Add `UnregisterPluginRemoteForSharedChannels` to the Plugin API
+10. [x] Add `UnregisterPluginRemoteForSharedChannels` to the Plugin API
         interface and `plugin_api.go` implementation.
 
-11. [ ] Change `Receive*` Plugin API signatures in PR 35962 to accept `remoteID`
+11. [x] Change `Receive*` Plugin API signatures in PR 35962 to accept `remoteID`
         parameter. Update app-layer functions in `shared_channel.go` to accept
         both `pluginID` and `remoteID`, validate `rc.PluginID == pluginID` after
         lookup. Update `PluginAPI` wrappers in `plugin_api.go` to pass `api.id`
         as `pluginID` and caller-supplied `remoteID`.
 
-12. [ ] Migrate remaining `GetByPluginID` callers within the server to use
+12. [x] Migrate remaining `GetByPluginID` callers within the server to use
         `GetAllByPluginID` or `GetBySiteURL` as appropriate.
 
-13. [ ] Add all Phase 2 tests (multi-remote registration, per-remote dispatch,
+13. [x] Add all Phase 2 tests (multi-remote registration, per-remote dispatch,
         per-remote cursor tracking, `Receive*` with remoteID, backward
-        compatibility).
+        compatibility). (See `server/channels/app/remote_cluster_test.go` and
+        `server/channels/store/storetest/remote_cluster_store.go`.)
 
-14. [ ] Run full test suite including shared channel integration tests. Verify
+14. [x] Run full test suite including shared channel integration tests. Verify
         zero regressions for existing single-remote plugins.
 
 ## Risks and Mitigations
@@ -688,28 +698,28 @@ These already work per-remote and need no modification:
 ## Acceptance Criteria
 
 ### Phase 1
-- [ ] All model types in the target list have `xml` struct tags
-- [ ] `SyncMsg` XML round-trips correctly with Users map and MentionTransforms map
-- [ ] `Post.Metadata` is excluded from XML
-- [ ] `StringMap` and `StringInterface` custom XML methods work correctly
-- [ ] JSON serialization for all modified types is byte-identical to before
-- [ ] All existing tests pass
+- [x] All model types in the target list have `xml` struct tags
+- [x] `SyncMsg` XML round-trips correctly with Users map and MentionTransforms map
+- [x] `Post.Metadata` is excluded from XML
+- [x] `StringMap` and `StringInterface` custom XML methods work correctly
+- [x] JSON serialization for all modified types is byte-identical to before
+- [x] All existing tests pass
 
 ### Phase 2
-- [ ] `SiteURL` is required; registration fails on empty
-- [ ] Registration fails if SiteURL is already used by a different plugin or server-to-server remote
-- [ ] A plugin can register multiple remotes by calling register with different SiteURLs
-- [ ] Each remote gets an independent sync cursor
-- [ ] `OnSharedChannelsSyncMsg` is called once per remote for shared channels
-- [ ] `OnSharedChannelsPing` is called once per remote
-- [ ] `InviteRemoteToChannel` targets a specific remote
-- [ ] `Receive*` APIs accept remoteID, validate plugin ownership via server-injected pluginID, and resolve the correct remote
-- [ ] Unregistering by pluginID removes all remotes (bulk cleanup)
-- [ ] Unregistering by remoteID removes only that remote
-- [ ] `GetByPluginID` is deprecated but continues to work for single-connection plugins
-- [ ] No new database column or migration required
-- [ ] Existing single-remote plugins work after setting `SiteURL` in their `RegisterPluginOpts` (one-line change)
-- [ ] All existing tests pass
+- [ ] ~~`SiteURL` is required; registration fails on empty~~ (deviation: empty `SiteURL` defaults to `"plugin_<PluginID>"` for backward compatibility with existing single-remote plugins. Multi-remote registration still requires distinct SiteURLs.)
+- [x] Registration fails if SiteURL is already used by a different plugin or server-to-server remote
+- [x] A plugin can register multiple remotes by calling register with different SiteURLs
+- [x] Each remote gets an independent sync cursor
+- [x] `OnSharedChannelsSyncMsg` is called once per remote for shared channels
+- [x] `OnSharedChannelsPing` is called once per remote
+- [x] `InviteRemoteToChannel` targets a specific remote
+- [x] `Receive*` APIs accept remoteID, validate plugin ownership via server-injected pluginID, and resolve the correct remote
+- [x] Unregistering by pluginID removes all remotes (bulk cleanup)
+- [x] Unregistering by remoteID removes only that remote
+- [x] `GetByPluginID` is deprecated but continues to work for single-connection plugins
+- [x] No new database column or migration required
+- [x] Existing single-remote plugins work without code changes (deviation: SiteURL is now optional rather than a required one-line addition)
+- [x] All existing tests pass
 
 ## Decisions
 

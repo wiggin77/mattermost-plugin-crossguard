@@ -184,12 +184,39 @@ so that:
 
 This requires a server-side API change (see [Server Shared Channels Changes](26-04-12-04-server-shared-channels-changes.md), Phase 2).
 
-**Connection name pairing**: The connection `Name` field is the pairing key between
-inbound and outbound. An inbound connection named `"high"` and an outbound connection
-named `"high"` represent the same logical remote server. The validation in
-`configuration.go` currently enforces name uniqueness across both directions using a
-shared `allNames` map. This must be relaxed to enforce uniqueness per direction only,
-so the same name can appear once in inbound and once in outbound.
+**Connection identity (pairing key)**: Each connection has a `SiteURL` field on
+its config struct (in addition to `Name`). `SiteURL` is the pairing key between
+inbound and outbound and the dedup key the server uses to identify the remote.
+Two connections with identical `SiteURL` values share a single `remoteID`,
+regardless of direction.
+
+`SiteURL` is populated when a connection is first added to the config:
+
+```go
+// In the config save/validate path, when a connection has no SiteURL set,
+// initialize it from the current Name. After this point it is immutable;
+// renames update Name but leave SiteURL alone.
+if conn.SiteURL == "" {
+    conn.SiteURL = "crossguard:" + conn.Name
+}
+```
+
+Once persisted, `SiteURL` does not change. This means:
+- Renames preserve the remote's identity. The server keeps the same `remoteID`
+  and sync cursor, so cross-domain message flow is uninterrupted.
+- Inbound and outbound connections that were paired at creation time
+  (defaulted from the same `Name`) remain paired even if one side is later
+  renamed. The pairing follows `SiteURL`, not the current `Name`.
+- A user who wants two previously-paired connections to become unpaired
+  must explicitly edit `SiteURL` (or remove and re-add one of the
+  connections).
+
+The validation in `configuration.go` currently enforces `Name` uniqueness across
+both directions using a shared `allNames` map. This must be relaxed to per-direction
+uniqueness so an inbound and outbound connection can share a name (and therefore
+the default `SiteURL`). `SiteURL` itself need not be globally unique within plugin
+config (since paired inbound+outbound share one), but each direction's set of
+`SiteURL` values must be unique within the direction.
 
 Asymmetric configurations (outbound-only or inbound-only) are supported. An
 outbound-only connection registers a remote for outbound sync delivery. An
@@ -198,61 +225,94 @@ valid `remoteID` to pass.
 
 **OnActivate** changes (`plugin.go`):
 
-After initializing the KV store and bot user, collect unique connection names from
-both directions and register one remote per unique name:
+After initializing the KV store and bot user, register one remote per unique
+`SiteURL` across both directions, then populate `p.remoteIDs[connName]` for every
+configured connection (paired connections map to the same `remoteID`):
 
 ```go
 p.remoteIDs = make(map[string]string) // connName -> remoteID
 
-// Collect unique names across both inbound and outbound.
-remoteNames := make(map[string]bool)
+// Build a unique set of SiteURLs across both directions, with a representative
+// display name for each (used only as the registration's Displayname).
+siteURLToDisplayName := make(map[string]string)
 for _, conn := range outboundConns {
-    remoteNames[conn.Name] = true
+    if _, exists := siteURLToDisplayName[conn.SiteURL]; !exists {
+        siteURLToDisplayName[conn.SiteURL] = conn.Name
+    }
 }
 for _, conn := range inboundConns {
-    remoteNames[conn.Name] = true
+    if _, exists := siteURLToDisplayName[conn.SiteURL]; !exists {
+        siteURLToDisplayName[conn.SiteURL] = conn.Name
+    }
 }
 
-// Register one remote per unique connection name.
-for name := range remoteNames {
+// Register one remote per unique SiteURL. The server returns the existing
+// remoteID for re-registration with the same SiteURL (idempotent).
+siteURLToRemoteID := make(map[string]string)
+for siteURL, displayName := range siteURLToDisplayName {
     remoteID, err := p.API.RegisterPluginForSharedChannels(mmModel.RegisterPluginOpts{
-        Displayname:  fmt.Sprintf("Cross Guard (%s)", name),
+        Displayname:  fmt.Sprintf("Cross Guard (%s)", displayName),
         PluginID:     manifest.Id,
         CreatorID:    p.botUserID,
         AutoShareDMs: false,
         AutoInvited:  false,
+        SiteURL:      siteURL,
     })
     if err != nil {
-        return fmt.Errorf("failed to register remote for connection %s: %w", name, err)
+        return fmt.Errorf("failed to register remote for %s: %w", siteURL, err)
     }
-    p.remoteIDs[name] = remoteID
+    siteURLToRemoteID[siteURL] = remoteID
+}
+
+// Map each connection name to its remoteID. Paired inbound+outbound connections
+// (same SiteURL) end up pointing to the same remoteID.
+for _, conn := range outboundConns {
+    p.remoteIDs[conn.Name] = siteURLToRemoteID[conn.SiteURL]
+}
+for _, conn := range inboundConns {
+    p.remoteIDs[conn.Name] = siteURLToRemoteID[conn.SiteURL]
 }
 ```
 
-Add `remoteIDs map[string]string` field to the `Plugin` struct (connName to remoteID).
-This replaces the single `remoteID string` field.
+Add `remoteIDs map[string]string` field to the `Plugin` struct (connName to
+remoteID). This replaces the single `remoteID string` field. Lookups elsewhere
+(`p.remoteIDs[connName]` in `inbound.go`, `connNameForRemote(rc.RemoteId)` in
+`hooks.go`) work unchanged.
 
 **OnDeactivate** changes:
 
-Before closing providers, unregister all remotes:
+Before closing providers, unregister all remotes for this plugin via the bulk
+cleanup API. One call removes every `RemoteCluster` row for this plugin:
 
 ```go
-for connName, remoteID := range p.remoteIDs {
-    if err := p.API.UnregisterPluginForSharedChannels(remoteID); err != nil {
-        p.API.LogWarn("Failed to unregister remote from shared channels",
-            "error_code", errcode.PluginUnregisterFailed,
-            "conn_name", connName, "error", err.Error())
-    }
+if err := p.API.UnregisterPluginForSharedChannels(manifest.Id); err != nil {
+    p.API.LogWarn("Failed to unregister remotes from shared channels",
+        "error_code", errcode.PluginUnregisterFailed,
+        "error", err.Error())
 }
 ```
 
+`UnregisterPluginForSharedChannels` takes a `pluginID` and deletes all of the
+plugin's remotes. Use `UnregisterPluginRemoteForSharedChannels(remoteID)` only
+when removing a single remote (config change reconciliation, see below).
+
 **OnConfigurationChange** considerations:
 
-When the configuration changes (connections added/removed), the plugin must reconcile
-registered remotes. Connections added since last activation get a new
-`RegisterPluginForSharedChannels` call. Connections removed get
-`UnregisterPluginForSharedChannels`. Connections unchanged keep their existing
-remoteID. This reconciliation happens in the existing config change handler.
+When the configuration changes (connections added/removed/renamed), the plugin
+must reconcile registered remotes:
+
+- New connection (no existing `SiteURL` in config): default `SiteURL` to
+  `"crossguard:" + Name`, then call `RegisterPluginForSharedChannels` with that
+  `SiteURL`. Idempotent re-registration ensures no-op for SiteURLs that already
+  have a remote on the server.
+- Removed connection: if no other connection in either direction shares the
+  removed connection's `SiteURL`, call
+  `UnregisterPluginRemoteForSharedChannels(remoteID)` for surgical removal.
+  Otherwise, leave the remote in place (it is still in use by the paired
+  direction).
+- Renamed connection: `SiteURL` is preserved, so no registration change is
+  needed. Just update `p.remoteIDs[newName] = oldRemoteID` and remove
+  `p.remoteIDs[oldName]`.
 
 **Removed from OnActivate**:
 - Retry queue creation and `Start()` call
@@ -750,6 +810,11 @@ caching changes needed since these were not cached).
 **configuration.go**:
 - Remove `MessageFormat` from `ConnectionConfig` (wire format is always XML, not
   per-connection configurable)
+- Add `SiteURL string` field to `ConnectionConfig`. In `validate()` (or the
+  config save path), populate `SiteURL` with the default `"crossguard:" + Name`
+  when empty. Once set, never overwrite it on subsequent config saves: this is
+  what makes `SiteURL` immutable across renames and the stable identity for the
+  registered remote (preserving `remoteID` and sync cursor across renames)
 - Remove retry queue max age recalculation from `OnConfigurationChange()`
   (`computeRetryMaxAge()` itself lives in `retry_dispatch.go` and is deleted with
   that file)
@@ -758,8 +823,14 @@ caching changes needed since these were not cached).
 - Relax connection name uniqueness from global to per-direction. Change `validate()`
   to use separate `allNames` maps for inbound and outbound instead of a single shared
   map. This allows an inbound and outbound connection to share the same name, which
-  pairs them as a single logical remote (shared `remoteID` for registration, loop
-  prevention, and synthetic user tagging)
+  defaults their `SiteURL` to the same value and pairs them as a single logical
+  remote (shared `remoteID` for registration, loop prevention, and synthetic
+  user tagging)
+- Add config-change reconciliation: collect unique `SiteURL` values across both
+  directions, register any new ones via `RegisterPluginForSharedChannels` (idempotent
+  for unchanged), and unregister removed ones via
+  `UnregisterPluginRemoteForSharedChannels(remoteID)` (only when no remaining
+  connection in either direction still references that `SiteURL`)
 
 **outboundConn struct** (`connections.go`):
 - Remove `messageFormat string` field (always XML)
@@ -893,17 +964,39 @@ indicator, and user popover are unchanged.
 See [Server Shared Channels Changes](26-04-12-04-server-shared-channels-changes.md)
 for the complete server-side plan. Status of server prerequisites:
 
-- **PR 35962 (inbound `Receive*` APIs)**: **Merged.** `ReceiveSharedChannelSyncMsg`,
+- [x] **PR 35962 (inbound `Receive*` APIs)**: **Merged.** `ReceiveSharedChannelSyncMsg`,
   `ReceiveSharedChannelAttachmentSyncMsg`, and `ReceiveSharedChannelProfileImageSyncMsg`
-  are available in the server. This unblocks the inbound flow implementation.
-- **Phase 1 (XML struct tags)**: Pending. Additive `xml` tags on model types, custom
-  `MarshalXML`/`UnmarshalXML` for maps. Low risk, can merge first.
-- **Phase 2 (multi-remote API)**: Pending. `RegisterPluginOpts.Name` field, `PluginName`
-  column on `RemoteClusters`, `GetByPluginIDAndName` store method, new
-  `UnregisterPluginRemoteForSharedChannels` API method. Requires migration.
+  are available in the server. The signatures were updated in PR 36126 to accept
+  a leading `remoteID string` parameter so the plugin specifies which connection
+  it is acting as.
+- [x] **Phase 1 (XML struct tags)**: **Merged in PR 36126** (commit `81d4fe3793`,
+  2026-04-28). `xml` struct tags added to `SyncMsg`, `SyncResponse`,
+  `MembershipChangeMsg`, `Post`, `User`, `Reaction`, `Status`,
+  `PostAcknowledgement`, `FileInfo`. Custom `MarshalXML`/`UnmarshalXML` for
+  `SyncMsg.Users`, `SyncMsg.MentionTransforms`, `StringMap`, `StringInterface`
+  (in new `server/public/model/xml_helpers.go`). Sensitive fields excluded via
+  `xml:"-"`. JSON serialization unaffected.
+- [x] **Phase 2 (multi-remote API)**: **Merged in PR 36126** (and follow-up
+  PR 36309 commit `fdaea9dec3` for `CleanRemoteName()` slugification). The
+  uniqueness key is `SiteURL` (not a new `PluginName` column): plugins register
+  multiple remotes by calling `RegisterPluginForSharedChannels` with distinct
+  `SiteURL` values on `RegisterPluginOpts`. New store methods `GetAllByPluginID`
+  and `GetBySiteURL` were added; `GetByPluginID` is deprecated. New plugin API
+  `UnregisterPluginRemoteForSharedChannels(remoteID)` was added; the existing
+  `UnregisterPluginForSharedChannels(pluginID)` now deletes all remotes for the
+  plugin (bulk cleanup). `IsPlugin()` was simplified to `PluginID != ""`. No
+  database migration was needed.
+  - **Deviation from server plan**: empty `SiteURL` is no longer rejected. It
+    defaults to the legacy `"plugin_<PluginID>"` value for backward
+    compatibility with existing single-remote plugins. **Implication for this
+    plan**: Cross Guard MUST set a distinct `SiteURL` on every
+    `RegisterPluginOpts`, otherwise all multi-remote registrations collide on
+    the same default value and only the first succeeds. See the OnActivate code
+    in section 2 below, which has been updated accordingly.
 
-Plugin development on tasks 1-17 can proceed in parallel using local model patches,
-but merge is blocked until the remaining server PRs (Phase 1, Phase 2) land.
+**All prerequisites are met.** Server v11.7+ shipped earlier APIs; the remaining
+multi-remote and XML changes are in master and are slated for the next server
+release. Plugin development can proceed without local model patches.
 
 ## Tasks
 
@@ -916,11 +1009,15 @@ but merge is blocked until the remaining server PRs (Phase 1, Phase 2) land.
        from the `KVStore` interface. Update `client.go` and `client_test.go` to match.
 
 3. [ ] Update `server/plugin.go`: add `remoteIDs map[string]string` field and
-       `connNameForRemote` helper. OnActivate: collect unique connection names
-       from both inbound and outbound, register one remote per unique name via
-       `RegisterPluginForSharedChannels`. OnDeactivate: unregister all remotes
-       via `UnregisterPluginForSharedChannels`. Remove `retryQueue`, `fileSem`,
-       `fileWatcherWg` fields and their initialization. Update `plugin_test.go`.
+       `connNameForRemote` helper. OnActivate: collect unique `SiteURL` values
+       across both directions, register one remote per unique `SiteURL` via
+       `RegisterPluginForSharedChannels` (passing `opts.SiteURL`), then populate
+       `p.remoteIDs[connName] = remoteID` for every configured connection
+       (paired connections share a `remoteID`). OnDeactivate: bulk-unregister
+       all remotes for this plugin via
+       `UnregisterPluginForSharedChannels(manifest.Id)`. Remove `retryQueue`,
+       `fileSem`, `fileWatcherWg` fields and their initialization. Update
+       `plugin_test.go`.
 
 4. [ ] Rewrite `server/hooks.go`: replace the five Mattermost hooks with
        `OnSharedChannelsSyncMsg` (uses `rc` to route to correct connection),
@@ -956,13 +1053,18 @@ but merge is blocked until the remaining server PRs (Phase 1, Phase 2) land.
 9. [ ] Update `server/api.go`: change `handleTestConnection` to use
        `TransportEnvelope`. Update `api_test.go`.
 
-10. [ ] Update `server/configuration.go`: remove `MessageFormat` field, remove retry
-        queue recalc from `OnConfigurationChange()`. Relax `validate()` name
-        uniqueness to per-direction (separate maps for inbound and outbound). Add
-        remote registration reconciliation (collect unique names from both
-        directions, register new connections, unregister removed ones via
-        `UnregisterPluginRemoteForSharedChannels`). Update `configuration_test.go`
-        with tests for cross-direction name sharing and same-direction uniqueness.
+10. [ ] Update `server/configuration.go`: remove `MessageFormat` field. Add
+        `SiteURL string` field to `ConnectionConfig` and populate it with
+        `"crossguard:" + Name` on first save when empty (immutable thereafter).
+        Remove retry queue recalc from `OnConfigurationChange()`. Relax
+        `validate()` name uniqueness to per-direction (separate maps for inbound
+        and outbound). Add remote registration reconciliation (collect unique
+        `SiteURL` values from both directions, register new ones, unregister
+        removed ones via `UnregisterPluginRemoteForSharedChannels` only when no
+        connection still references that `SiteURL`). Update `configuration_test.go`
+        with tests for cross-direction name sharing, same-direction uniqueness,
+        `SiteURL` defaulting on first save, and `SiteURL` immutability on
+        rename.
 
 11. [ ] Update `server/command_test.go`: add mock expectations for shared channel API
         calls triggered by init/teardown commands.
@@ -1054,13 +1156,15 @@ but merge is blocked until the remaining server PRs (Phase 1, Phase 2) land.
 | `server/service_test.go` | `TestTeardownChannel_UnsharesChannel` | Verifies UninviteRemoteFromChannel + UnshareChannel called |
 | `server/inbound_test.go` | `TestHandleInboundSyncMsg_NoRemoteForConn` | Returns nil (permanent failure) when connName has no registered remoteID |
 | `server/inbound_test.go` | `TestHandleInboundSyncMsg_OutboundOnlyConn` | Rejects sync message for a connection with no inbound provider configured |
-| `server/plugin_test.go` | `TestOnActivate_RegistersMultipleRemotes` | Verifies RegisterPluginForSharedChannels called once per unique connection name (not once per connection) |
-| `server/plugin_test.go` | `TestOnActivate_SharedNameRegistersOnce` | Inbound "high" and outbound "high" result in a single RegisterPluginForSharedChannels call |
-| `server/plugin_test.go` | `TestOnDeactivate_UnregistersAllRemotes` | Verifies UnregisterPluginForSharedChannels called for each remote |
+| `server/plugin_test.go` | `TestOnActivate_RegistersMultipleRemotes` | Verifies RegisterPluginForSharedChannels called once per unique SiteURL (not once per connection) |
+| `server/plugin_test.go` | `TestOnActivate_SharedSiteURLRegistersOnce` | Inbound and outbound with the same SiteURL result in a single RegisterPluginForSharedChannels call; both connNames map to the same remoteID |
+| `server/plugin_test.go` | `TestOnDeactivate_UnregistersAllRemotes` | Verifies a single UnregisterPluginForSharedChannels(pluginID) bulk call |
 | `server/plugin_test.go` | `TestConnNameForRemote` | Maps remote ID back to connection name |
 | `server/connections_test.go` | `TestPublishToOutboundConn_TransportEnvelope` | Publishes TransportEnvelope to a single named provider |
-| `server/configuration_test.go` | `TestValidate_SameNameAcrossDirections` | Inbound "high" and outbound "high" passes validation (per-direction uniqueness) |
+| `server/configuration_test.go` | `TestValidate_SameNameAcrossDirections` | Inbound "high" and outbound "high" passes validation (per-direction uniqueness) and defaults to the same SiteURL |
 | `server/configuration_test.go` | `TestValidate_DuplicateNameSameDirection` | Two inbound connections both named "high" fails validation |
+| `server/configuration_test.go` | `TestValidate_SiteURLDefaultedOnFirstSave` | New connection with empty SiteURL gets `"crossguard:" + Name` as default |
+| `server/configuration_test.go` | `TestValidate_SiteURLImmutableOnRename` | Renaming a connection (Name change) does not modify its SiteURL |
 
 ### Tests to modify
 
@@ -1135,8 +1239,9 @@ api.On("ReceiveSharedChannelSyncMsg", mock.AnythingOfType("string"), mock.Anythi
 | Team-level connection tracking | Kept | Still needed for UI grouping and for routing inbound messages to the correct channel lookup scope. |
 | Channel-level connection tracking | Kept | Still needed for routing: determines which providers to publish to for a given channel. |
 | Health reporting (OnSharedChannelsPing) | Per-remote: returns the health of the specific provider associated with the pinged remote | Each remote maps to one outbound connection. The server pings each remote independently, so health reporting is precise per-connection. |
-| Registration model | One remote per unique connection name, shared across inbound and outbound (multi-remote) | The connection `Name` is the pairing key. Inbound and outbound connections with the same name share a single `remoteID`. This is required for loop prevention (content from a remote is not sent back to that remote) and synthetic user tagging (`RemoteId` on users must match across both directions). Requires server API change ([Server plan, Phase 2](26-04-12-04-server-shared-channels-changes.md)). |
-| Connection name uniqueness | Per-direction (not global) | Relaxed from the current global uniqueness so that an inbound and outbound can share the same name. This is the pairing mechanism. Names are still unique within inbound and within outbound. Asymmetric configs (outbound-only, inbound-only) are supported. |
+| Registration model | One remote per unique `SiteURL`, shared across inbound and outbound (multi-remote) | `SiteURL` is the pairing key and the dedup key the server uses. Connections with the same `SiteURL` share a single `remoteID`. This is required for loop prevention (content from a remote is not sent back to that remote) and synthetic user tagging (`RemoteId` on users must match across both directions). Requires server API change ([Server plan, Phase 2](26-04-12-04-server-shared-channels-changes.md)). |
+| Connection name uniqueness | Per-direction (not global) | Relaxed from the current global uniqueness so that an inbound and outbound can share the same `Name`. When they do, they default to the same `SiteURL` and are paired as one remote. Names are still unique within inbound and within outbound. Asymmetric configs (outbound-only, inbound-only) are supported. |
+| `SiteURL` default and lifecycle | Default `"crossguard:" + Name` on first save; immutable thereafter (persisted in `ConnectionConfig`) | Tying `SiteURL` to a connection's initial `Name` keeps the value human-readable for debugging. Persisting it as an immutable field means renames do not change remote identity (server keeps the same `remoteID` and sync cursor). It also means a previously-paired inbound/outbound stay paired even if one side is renamed (pairing follows `SiteURL`, not current `Name`). To deliberately unpair, the user edits `SiteURL` directly or removes and re-adds the connection. |
 | Inbound-only hook behavior | Acknowledge and advance cursor, do not publish | Inbound-only connections register a remote (needed for `ReceiveSharedChannelSyncMsg` remoteID), so the server calls outbound hooks for them. `OnSharedChannelsSyncMsg` checks `hasOutboundProvider` and returns a successful `SyncResponse` without publishing if no outbound provider exists. This advances the cursor so it does not get stuck. `OnSharedChannelsPing` returns true for inbound-only connections so the server does not mark the remote as offline. |
 | Outbound-only inbound guard | Reject inbound sync messages for connections with no inbound provider | Data arrives from external transport and cannot be trusted. `handleInboundSyncMsg` checks `hasInboundProvider(connName)` before processing. Although outbound-only connections should never have a subscription set up, the guard provides defense in depth against misconfiguration or a misbehaving remote. |
 | SyncMsg splitting for size-limited providers | Split by reducing posts per envelope | Keeps the full Users map in each split (needed for post context). Reactions included only with their associated posts. |
