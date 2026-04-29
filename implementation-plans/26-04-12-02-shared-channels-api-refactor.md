@@ -12,8 +12,8 @@ delivers them to the plugin, and the plugin can push received content back into
 Mattermost via `ReceiveSharedChannelSyncMsg` (landed in PR 35962, available since v11.7).
 
 This refactor replaces the custom hook-based capture and manual inbound handling with the
-Shared Channels APIs while keeping the transport layer (NATS, Azure Queue, Azure Blob)
-unchanged.
+Shared Channels APIs while keeping the transport layer (NATS, Azure Queue, Azure Blob,
+Azure Service Bus) unchanged.
 
 ## Current State
 
@@ -91,7 +91,7 @@ element reference and examples.
 This requires two things:
 1. Mattermost server changes: XML struct tags on model types, and multi-remote
    registration support. See [Server Shared Channels Changes](26-04-12-04-server-shared-channels-changes.md)
-   for the complete plan. Both server PRs must merge before this plugin work can land.
+   for the complete plan. Both have merged (PR 36126 + follow-up PR 36309).
 2. Define a `TransportEnvelope` in the plugin that wraps `SyncMsg` with routing metadata.
 
 #### Plugin TransportEnvelope
@@ -462,10 +462,11 @@ that deserializes the `TransportEnvelope` and calls `ReceiveSharedChannelSyncMsg
 processing outcome. The `QueueProvider` contract states that a nil return means
 "processed" (provider may ack/delete) and a non-nil return means "not processed"
 (provider should redeliver if possible). An async handler that always returns nil
-breaks this contract for ack-based providers (Azure Queue today, NATS JetStream in
-the future). Core NATS ignores the return value, so synchronous processing has no
-downside there. The semaphore blocks rather than drops when full, applying
-backpressure to the provider instead of silently losing messages.
+breaks this contract for ack-based providers (Azure Queue and Azure Service Bus
+today, NATS JetStream in the future). Core NATS ignores the return value, so
+synchronous processing has no downside there. The semaphore blocks rather than
+drops when full, applying backpressure to the provider instead of silently
+losing messages.
 
 ```go
 // server/inbound.go (rewritten, dramatically smaller)
@@ -475,7 +476,8 @@ func (p *Plugin) handleInboundMessage(connName string) func(data []byte) error {
         // Block until a semaphore slot is available. This applies
         // backpressure to the provider rather than dropping messages,
         // which is important for ack-based providers (Azure Queue,
-        // future JetStream) where a drop would ack a lost message.
+        // Azure Service Bus, future JetStream) where a drop would
+        // ack a lost message.
         select {
         case p.relaySem <- struct{}{}:
             defer func() { <-p.relaySem }()
@@ -951,7 +953,9 @@ existing prompt accept handlers.
 | `server/azure_provider_test.go` | Unchanged. |
 | `server/azure_blob_provider.go` | Unchanged. |
 | `server/azure_blob_provider_test.go` | Unchanged. |
-| `server/provider.go` | Comment-only update. Strengthen `Subscribe` handler contract documentation to make explicit that all providers should respect the handler's error return for delivery acknowledgement. This is the universal contract: nil = processed (ack/delete), error = not processed (nack/redeliver if supported). Core NATS ignores the return (fire-and-forget), Azure Queue already respects it, and future JetStream will depend on it. No interface signature changes. |
+| `server/azure_servicebus_provider.go` | Unchanged. Already implements the `QueueProvider` contract with ack-based delivery (handler nil → `CompleteMessage`, error → `AbandonMessage`) and a 192 KiB default `MaxMessageSize`. |
+| `server/azure_servicebus_provider_test.go` | Unchanged. |
+| `server/provider.go` | Comment-only update. Strengthen `Subscribe` handler contract documentation to make explicit that all providers should respect the handler's error return for delivery acknowledgement. This is the universal contract: nil = processed (ack/delete), error = not processed (nack/redeliver if supported). Core NATS ignores the return (fire-and-forget); Azure Queue and Azure Service Bus already respect it; future JetStream will depend on it. No interface signature changes. |
 
 ### Frontend files (no changes)
 
@@ -1094,14 +1098,13 @@ release. Plugin development can proceed without local model patches.
 
 | Risk | Mitigation |
 |---|---|
-| Server PRs blocked or delayed | PR 35962 (inbound `Send*` APIs) has merged. Remaining server PRs (XML struct tags, multi-remote API) are still prerequisites. See [Server Shared Channels Changes](26-04-12-04-server-shared-channels-changes.md). Plugin development can proceed in parallel using local model patches, but merge is blocked until all remaining server PRs land. |
 | SyncMsg XML serialization is large for Azure Queue's 48KB limit | XML is more verbose than JSON. `splitTransportEnvelope` splits by post count. Single-post messages that exceed the limit are logged as errors. Azure Blob provider has no limit. |
-| `model.SyncMsg.Users` map not natively XML-serializable | `MarshalXML`/`UnmarshalXML` methods on `SyncMsg` handle the map-to-element conversion. Covered by server PR tests. |
+| `model.SyncMsg.Users` map not natively XML-serializable | `MarshalXML`/`UnmarshalXML` methods on `SyncMsg` handle the map-to-element conversion. Covered by server-side tests in `server/public/model/shared_channel_test.go`. |
 | Channel ID rewriting on inbound misses nested references | Rewrite `ChannelId` on `SyncMsg`, `Post`, `Reaction`, `MembershipChange`, and `PostAcknowledgement`. `Status.ActiveChannel` is not rewritten (it is informational, not used for routing by `ReceiveSharedChannelSyncMsg`). |
 | Shared channel cursor advances but provider publish fails | Return error from `OnSharedChannelsSyncMsg` so server does not advance cursor. Server retries the batch. Duplicate delivery is safe because `SyncMsg` content is idempotent (posts upserted by ID). |
 | Test-connection feature breaks without Envelope type | Replaced by `TransportEnvelope` with `Type: "test"`. Same round-trip test, different wire format. |
 | Plugin deployed against pre-11.7 server | `RegisterPluginForSharedChannels` fails, `OnActivate` returns error, plugin does not start. This is intentional (clean break). Admins must upgrade the server before deploying the new plugin version. Documented in release notes. |
-| Multi-remote API not available in server | Server Phase 2 PR is a prerequisite. If the API only supports single-remote registration, the plugin falls back to a single remote and fans out internally (degraded mode, loses per-connection cursor tracking). |
+| Empty `SiteURL` collides on the server's legacy default | The server defaults empty `SiteURL` to `"plugin_<PluginID>"` for backward compatibility. If two of Cross Guard's connections were registered with empty `SiteURL`, all but the first would collide. Mitigated by always populating `SiteURL` on `ConnectionConfig` (defaulted to `"crossguard:" + Name` on first save), and by registering with `opts.SiteURL` set. |
 | Synchronous inbound handler blocks provider thread | The handler blocks on the semaphore instead of dropping messages. For core NATS this means the subscription callback blocks, which applies backpressure to the NATS client (acceptable, NATS buffers pending messages). For Azure Queue the poll loop naturally serializes. When JetStream is added, blocking is correct behavior as it prevents premature ack. If throughput becomes an issue, increase the semaphore size rather than reverting to async dispatch. |
 
 ## Testing Plan
@@ -1245,4 +1248,4 @@ api.On("ReceiveSharedChannelSyncMsg", mock.AnythingOfType("string"), mock.Anythi
 | Inbound-only hook behavior | Acknowledge and advance cursor, do not publish | Inbound-only connections register a remote (needed for `ReceiveSharedChannelSyncMsg` remoteID), so the server calls outbound hooks for them. `OnSharedChannelsSyncMsg` checks `hasOutboundProvider` and returns a successful `SyncResponse` without publishing if no outbound provider exists. This advances the cursor so it does not get stuck. `OnSharedChannelsPing` returns true for inbound-only connections so the server does not mark the remote as offline. |
 | Outbound-only inbound guard | Reject inbound sync messages for connections with no inbound provider | Data arrives from external transport and cannot be trusted. `handleInboundSyncMsg` checks `hasInboundProvider(connName)` before processing. Although outbound-only connections should never have a subscription set up, the guard provides defense in depth against misconfiguration or a misbehaving remote. |
 | SyncMsg splitting for size-limited providers | Split by reducing posts per envelope | Keeps the full Users map in each split (needed for post context). Reactions included only with their associated posts. |
-| Inbound handler design | Synchronous with error propagation, blocking semaphore | The handler's return value is the delivery acknowledgement signal per the `QueueProvider.Subscribe` contract. Async dispatch (goroutine + return nil) breaks this contract for ack-based providers (Azure Queue today, NATS JetStream in the future). Blocking on a full semaphore applies backpressure instead of silently dropping messages. `processInboundMessage` and `handleInboundSyncMsg` return errors so that transient failures (e.g. `ReceiveSharedChannelSyncMsg` error) can trigger redelivery. Permanent failures (malformed XML, unknown type, unlinked team/channel) return nil since retrying would not help. |
+| Inbound handler design | Synchronous with error propagation, blocking semaphore | The handler's return value is the delivery acknowledgement signal per the `QueueProvider.Subscribe` contract. Async dispatch (goroutine + return nil) breaks this contract for ack-based providers (Azure Queue and Azure Service Bus today, NATS JetStream in the future). Blocking on a full semaphore applies backpressure instead of silently dropping messages. `processInboundMessage` and `handleInboundSyncMsg` return errors so that transient failures (e.g. `ReceiveSharedChannelSyncMsg` error) can trigger redelivery. Permanent failures (malformed XML, unknown type, unlinked team/channel) return nil since retrying would not help. |
