@@ -54,21 +54,27 @@ backpressure instead of silent drops.
 
 ## Requirements
 
-- [ ] Mattermost server model types (`SyncMsg`, `Post`, `User`, etc.) have `xml` struct tags
-- [ ] Shared Channels Plugin API supports multiple remotes per plugin with per-remote hooks
-- [ ] Plugin registers one remote per unique connection name (shared across inbound/outbound)
-- [ ] Connection name uniqueness is per-direction (inbound and outbound may share a name)
+Server-side prerequisites (XML struct tags on model types, multi-remote
+registration via `SiteURL`, `UnregisterPluginRemoteForSharedChannels`,
+`Receive*` APIs accepting `remoteID`) have all merged to master. See the
+Prerequisites section below for details. The remaining requirements are on the
+plugin.
+
+- [ ] `ConnectionConfig` has a `SiteURL` field, defaulted to `"crossguard:" + Name` on first save and immutable thereafter
+- [ ] Plugin registers one remote per unique `SiteURL` across both directions; paired inbound + outbound connections share a single `remoteID`
+- [ ] Connection name uniqueness is per-direction (inbound and outbound may share a name; sharing pairs them via the same default `SiteURL`)
 - [ ] Wire format between servers is XML (customer content inspection requirement)
-- [ ] Outbound: `OnSharedChannelsSyncMsg` serializes to XML and publishes to outbound providers
-- [ ] Inbound: XML messages from providers are deserialized and pushed via `ReceiveSharedChannelSyncMsg`
-- [ ] Channel init/teardown calls `ShareChannel`/`InviteRemoteToChannel`/`UninviteRemoteFromChannel`
+- [ ] Outbound: `OnSharedChannelsSyncMsg` serializes to XML and publishes to the matching outbound provider
+- [ ] Inbound: XML messages from providers are deserialized and pushed via `ReceiveSharedChannelSyncMsg(remoteID, msg)`
+- [ ] Channel init calls `ShareChannel` + `InviteRemoteToChannel`; teardown calls `UninviteRemoteFromChannel` and `UnshareChannel` when no connections remain
+- [ ] OnDeactivate uses `UnregisterPluginForSharedChannels(pluginID)` for bulk cleanup; config-change reconciliation uses `UnregisterPluginRemoteForSharedChannels(remoteID)` for surgical removal
 - [ ] `OnSharedChannelsPing` returns health per remote based on its provider connectivity
 - [ ] File attachment hooks are stubbed with logging
 - [ ] Profile image hook is stubbed with logging
 - [ ] All removed code paths have corresponding test removals
 - [ ] New code paths have tests
 - [ ] `make check-style` and `make test` pass
-- [ ] Plugin deploys and relays messages in the Docker dev environment
+- [ ] Plugin deploys and relays messages in the Docker dev environment across all four transports (NATS, Azure Queue, Azure Blob, Azure Service Bus)
 
 ## Out of Scope
 
@@ -159,14 +165,14 @@ where Azure Queue has a hard 48KB limit).
 ### 2. Plugin Registration (Multi-Remote)
 
 Cross Guard manages separate inbound and outbound connections (e.g., outbound
-`nats-low-to-high`, inbound `nats-low-to-high`). Each unique connection name
-represents a distinct remote endpoint. Inbound and outbound connections that share
-the same name are paired and share a single remote registration. This is critical
-because the `remoteID` is used by the server for loop prevention (content received
-from a remote is not sent back to that same remote) and for tagging synthetic users
-with the correct `RemoteId`. If inbound and outbound had separate `remoteID`s,
-loop prevention would break and synthetic users would not be associated with the
-correct remote.
+`nats-low-to-high`, inbound `nats-low-to-high`). Each unique `SiteURL` represents
+a distinct remote endpoint. Inbound and outbound connections that share the same
+`SiteURL` (which defaults from `Name` on first save) are paired and share a
+single remote registration. This is critical because the `remoteID` is used by
+the server for loop prevention (content received from a remote is not sent back
+to that same remote) and for tagging synthetic users with the correct
+`RemoteId`. If inbound and outbound had separate `remoteID`s, loop prevention
+would break and synthetic users would not be associated with the correct remote.
 
 The Shared Channels Plugin API must support registering multiple remotes per plugin
 so that:
@@ -582,8 +588,8 @@ func (p *Plugin) handleInboundSyncMsg(connName string, env *TransportEnvelope) e
         ack.ChannelId = channel.Id
     }
 
-    // Look up the remoteID for this connection name. Inbound and outbound
-    // connections that share the same name share the same remoteID.
+    // Look up the remoteID for this connection name. Paired inbound and
+    // outbound connections (same SiteURL) share the same remoteID.
     remoteID := p.remoteIDs[connName]
     if remoteID == "" {
         p.API.LogError("No registered remote for inbound connection",
@@ -726,13 +732,17 @@ if err != nil {
         "channel_id", channelID, "error", err.Error())
 }
 
-// Invite each remote (one per outbound connection) to this channel.
-// Only connections that are linked to this channel (from KV store
-// channel connections) get invited.
-for connName, remoteID := range p.remoteIDs {
-    if !hasOutboundConnection(channelConns, connName) {
+// Invite each remote linked to this channel. Iterate the channel's outbound
+// connections (not p.remoteIDs) so we only invite remotes that are actually
+// linked here. Dedupe by remoteID since paired connections share one and a
+// channel could in principle reference both sides.
+invited := make(map[string]bool)
+for _, connName := range channelConns.OutboundNames() {
+    remoteID := p.remoteIDs[connName]
+    if remoteID == "" || invited[remoteID] {
         continue
     }
+    invited[remoteID] = true
     err = p.API.InviteRemoteToChannel(channelID, remoteID, userID, true)
     if err != nil {
         p.API.LogError("Failed to invite remote to channel",
@@ -748,10 +758,17 @@ for connName, remoteID := range p.remoteIDs {
 After removing the connection from KV, uninvite the remote:
 
 ```go
-// Uninvite all remotes from this channel
-for connName, remoteID := range p.remoteIDs {
-    err = p.API.UninviteRemoteFromChannel(channelID, remoteID)
-    if err != nil {
+// Uninvite remotes that were linked to this channel. Iterate the channel's
+// connection list (both directions) and dedupe by remoteID since paired
+// inbound and outbound share one.
+uninvited := make(map[string]bool)
+for _, connName := range channelConns.AllNames() {
+    remoteID := p.remoteIDs[connName]
+    if remoteID == "" || uninvited[remoteID] {
+        continue
+    }
+    uninvited[remoteID] = true
+    if err = p.API.UninviteRemoteFromChannel(channelID, remoteID); err != nil {
         p.API.LogWarn("Failed to uninvite remote from channel",
             "error_code", errcode.ServiceUninviteRemoteFailed,
             "channel_id", channelID, "conn_name", connName, "error", err.Error())
@@ -915,7 +932,7 @@ existing prompt accept handlers.
 
 | File | Changes |
 |---|---|
-| `server/plugin.go` | Add `remoteIDs map[string]string` field, `connNameForRemote` helper, `hasOutboundProvider` helper, and `hasInboundProvider` helper. OnActivate: collect unique connection names from both inbound and outbound, register one remote per unique name via `RegisterPluginForSharedChannels`, remove retry queue init. OnDeactivate: unregister all remotes, remove retry queue wait. Remove `retryQueue`, `fileSem`, `fileWatcherWg` fields. |
+| `server/plugin.go` | Add `remoteIDs map[string]string` field, `connNameForRemote` helper, `hasOutboundProvider` helper, and `hasInboundProvider` helper. OnActivate: collect unique `SiteURL` values across both directions, register one remote per unique `SiteURL` via `RegisterPluginForSharedChannels` (passing `opts.SiteURL`), then populate `p.remoteIDs[connName] = remoteID` for every configured connection (paired connections share a `remoteID`). Remove retry queue init. OnDeactivate: bulk-unregister via `UnregisterPluginForSharedChannels(manifest.Id)`, remove retry queue wait. Remove `retryQueue`, `fileSem`, `fileWatcherWg` fields. |
 | `server/hooks.go` | Replace five MM hooks with `OnSharedChannelsSyncMsg`, `OnSharedChannelsAttachmentSyncMsg` (stub), `OnSharedChannelsProfileImageSyncMsg` (stub), `OnSharedChannelsPing`. Remove `isChannelRelayEnabled`, `relayToOutbound`. |
 | `server/hooks_test.go` | Rewrite: test `OnSharedChannelsSyncMsg` with mock API and providers. Remove tests for old hooks. |
 | `server/inbound.go` | Rewrite: `handleInboundMessage` deserializes `TransportEnvelope`, looks up `remoteID` from `p.remoteIDs[connName]`, and calls `ReceiveSharedChannelSyncMsg(remoteID, msg)`. Remove all handler functions, file watching, team/channel resolution. Dramatically smaller. |
@@ -1038,7 +1055,9 @@ release. Plugin development can proceed without local model patches.
 6. [ ] Rewrite `server/inbound.go`: replace `handleInboundMessage` and all handlers
        with `TransportEnvelope` XML deserialization (`UnmarshalEnvelope`) and
        `ReceiveSharedChannelSyncMsg(remoteID, msg)` call. Look up `remoteID` from
-       `p.remoteIDs[connName]` (connection name is the pairing key). Handler must
+       `p.remoteIDs[connName]` (`connName` is the local map key; pairing is by
+       `SiteURL`, which is why paired inbound/outbound connections resolve to
+       the same `remoteID`). Handler must
        be synchronous with error propagation: block on semaphore (not drop),
        `processInboundMessage` and `handleInboundSyncMsg` return errors,
        `ReceiveSharedChannelSyncMsg` failures propagate to the provider so
@@ -1073,14 +1092,15 @@ release. Plugin development can proceed without local model patches.
 11. [ ] Update `server/command_test.go`: add mock expectations for shared channel API
         calls triggered by init/teardown commands.
 
-12. [ ] Update `server/errcode/codes.go`: add new codes (including 24000-24999 range
-        for plugin.go), remove codes for deleted functions, update `AllCodes`. Run
-        `TestCodesUnique` and `TestAllCodesComplete`.
-
-13. [ ] Delete removed files: `server/model/` (all files), `server/sync_user.go`,
+12. [ ] Delete removed files: `server/model/` (all files), `server/sync_user.go`,
         `server/sync_user_test.go`, `server/retry_queue.go`,
         `server/retry_queue_test.go`, `server/retry_dispatch.go`,
         `server/retry_dispatch_test.go`.
+
+13. [ ] Update `server/errcode/codes.go`: add new codes (including 24000-24999 range
+        for plugin.go), remove codes for deleted files/functions (sweep is
+        easier after task 12 since references are gone), update `AllCodes`.
+        Run `TestCodesUnique` and `TestAllCodesComplete`.
 
 14. [ ] Update `server/test_helpers_test.go`: remove post mapping and deleting flag
         fields from `flexibleKVStore`. Clean up any test infrastructure referencing
@@ -1101,11 +1121,12 @@ release. Plugin development can proceed without local model patches.
 | SyncMsg XML serialization is large for Azure Queue's 48KB limit | XML is more verbose than JSON. `splitTransportEnvelope` splits by post count. Single-post messages that exceed the limit are logged as errors. Azure Blob provider has no limit. |
 | `model.SyncMsg.Users` map not natively XML-serializable | `MarshalXML`/`UnmarshalXML` methods on `SyncMsg` handle the map-to-element conversion. Covered by server-side tests in `server/public/model/shared_channel_test.go`. |
 | Channel ID rewriting on inbound misses nested references | Rewrite `ChannelId` on `SyncMsg`, `Post`, `Reaction`, `MembershipChange`, and `PostAcknowledgement`. `Status.ActiveChannel` is not rewritten (it is informational, not used for routing by `ReceiveSharedChannelSyncMsg`). |
-| Shared channel cursor advances but provider publish fails | Return error from `OnSharedChannelsSyncMsg` so server does not advance cursor. Server retries the batch. Duplicate delivery is safe because `SyncMsg` content is idempotent (posts upserted by ID). |
+| Shared channel cursor advances but provider publish fails | Return error from `OnSharedChannelsSyncMsg` so server does not advance cursor. Server retries the batch. Duplicate delivery is safe because `SyncMsg` content is idempotent (posts upserted by ID). Note that "publish success" is whatever each transport's `Publish()` defines: ack-based providers (Azure Queue, Azure Service Bus, future JetStream) confirm broker durability; Azure Blob confirms local WAL append (replayed on restart); core NATS confirms only that bytes were handed to the client. Cursors are tracked per `(ChannelId, RemoteId)` so a publish failure on one remote does not block sync for others. |
+| Core NATS no-subscriber message loss | Core NATS is fire-and-forget: if no subscriber is connected when `Publish()` returns, the message is dropped but the cursor still advances. This is a transport-level property, not something the plugin can paper over without application-level acks. The mitigation is to use an ack-based transport (Azure Queue, Azure Service Bus) when at-least-once delivery is required, or wait for the planned JetStream upgrade. The risk is documented for operators choosing core NATS. |
 | Test-connection feature breaks without Envelope type | Replaced by `TransportEnvelope` with `Type: "test"`. Same round-trip test, different wire format. |
 | Plugin deployed against pre-11.7 server | `RegisterPluginForSharedChannels` fails, `OnActivate` returns error, plugin does not start. This is intentional (clean break). Admins must upgrade the server before deploying the new plugin version. Documented in release notes. |
 | Empty `SiteURL` collides on the server's legacy default | The server defaults empty `SiteURL` to `"plugin_<PluginID>"` for backward compatibility. If two of Cross Guard's connections were registered with empty `SiteURL`, all but the first would collide. Mitigated by always populating `SiteURL` on `ConnectionConfig` (defaulted to `"crossguard:" + Name` on first save), and by registering with `opts.SiteURL` set. |
-| Synchronous inbound handler blocks provider thread | The handler blocks on the semaphore instead of dropping messages. For core NATS this means the subscription callback blocks, which applies backpressure to the NATS client (acceptable, NATS buffers pending messages). For Azure Queue the poll loop naturally serializes. When JetStream is added, blocking is correct behavior as it prevents premature ack. If throughput becomes an issue, increase the semaphore size rather than reverting to async dispatch. |
+| Synchronous inbound handler blocks provider thread | The handler blocks on the semaphore instead of dropping messages. For core NATS this means the subscription callback blocks, which applies backpressure to the NATS client (acceptable, NATS buffers pending messages). For Azure Queue the poll loop naturally serializes. For Azure Service Bus the receiver loop holds the message lease while the handler runs; blocking just delays `CompleteMessage`/`AbandonMessage` and is correct (premature ack is the failure mode to avoid). For Azure Blob the WAL-flush dispatch is already serialized per blob, so the semaphore just bounds total in-flight handlers. When JetStream is added, blocking is correct behavior as it prevents premature ack. If throughput becomes an issue, increase the semaphore size rather than reverting to async dispatch. |
 
 ## Testing Plan
 
@@ -1168,6 +1189,9 @@ release. Plugin development can proceed without local model patches.
 | `server/configuration_test.go` | `TestValidate_DuplicateNameSameDirection` | Two inbound connections both named "high" fails validation |
 | `server/configuration_test.go` | `TestValidate_SiteURLDefaultedOnFirstSave` | New connection with empty SiteURL gets `"crossguard:" + Name` as default |
 | `server/configuration_test.go` | `TestValidate_SiteURLImmutableOnRename` | Renaming a connection (Name change) does not modify its SiteURL |
+| `server/configuration_test.go` | `TestOnConfigurationChange_RegistersNewSiteURL` | Adding a new connection triggers `RegisterPluginForSharedChannels` for its SiteURL |
+| `server/configuration_test.go` | `TestOnConfigurationChange_UnregistersRemovedSiteURL` | Removing a connection whose SiteURL is no longer referenced triggers `UnregisterPluginRemoteForSharedChannels(remoteID)` |
+| `server/configuration_test.go` | `TestOnConfigurationChange_KeepsSharedSiteURL` | Removing one side of a paired connection (SiteURL still referenced by the other side) does NOT unregister the remote |
 
 ### Tests to modify
 
@@ -1184,8 +1208,10 @@ release. Plugin development can proceed without local model patches.
 The `plugintest.API` mock needs expectations for new API methods:
 
 ```go
-// RegisterPluginForSharedChannels is called once per unique connection name
-// (shared across inbound and outbound). Each call returns a unique remote ID.
+// RegisterPluginForSharedChannels is called once per unique SiteURL (shared
+// across paired inbound/outbound connections). Each unique SiteURL gets a
+// distinct remote ID; idempotent re-registration with the same SiteURL
+// returns the existing remote ID.
 callCount := 0
 api.On("RegisterPluginForSharedChannels", mock.AnythingOfType("model.RegisterPluginOpts")).
     Return(func(opts mmModel.RegisterPluginOpts) string {
@@ -1193,6 +1219,7 @@ api.On("RegisterPluginForSharedChannels", mock.AnythingOfType("model.RegisterPlu
         return fmt.Sprintf("remote-id-%d", callCount)
     }, nil)
 api.On("UnregisterPluginForSharedChannels", mock.AnythingOfType("string")).Return(nil)
+api.On("UnregisterPluginRemoteForSharedChannels", mock.AnythingOfType("string")).Return(nil)
 api.On("ShareChannel", mock.AnythingOfType("*model.SharedChannel")).
     Return(&mmModel.SharedChannel{}, nil)
 api.On("InviteRemoteToChannel", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
@@ -1205,11 +1232,11 @@ api.On("ReceiveSharedChannelSyncMsg", mock.AnythingOfType("string"), mock.Anythi
 
 ## Acceptance Criteria
 
-- [ ] Shared Channels Plugin API supports multiple remotes per plugin with per-remote hooks
-- [ ] Mattermost server model types have `xml` struct tags and `SyncMsg` XML round-trips correctly
-- [ ] Plugin activates successfully and registers one remote per unique connection name
-- [ ] Inbound and outbound connections with the same name share a single `remoteID`
-- [ ] Plugin deactivates cleanly and unregisters all remotes
+- [ ] Plugin activates successfully and registers one remote per unique `SiteURL`
+- [ ] Inbound and outbound connections with the same `SiteURL` share a single `remoteID`
+- [ ] Renaming a connection preserves its `SiteURL` and therefore its `remoteID` and sync cursor
+- [ ] Config-change reconciliation: adding a new connection registers a new remote (or reuses one if its `SiteURL` matches an existing record); removing a connection unregisters the remote via `UnregisterPluginRemoteForSharedChannels` only when no remaining connection still references that `SiteURL`
+- [ ] Plugin deactivates cleanly and unregisters all remotes via a single bulk `UnregisterPluginForSharedChannels(pluginID)` call
 - [ ] Inbound-only connections: outbound hooks acknowledge sync messages (cursor
       advances) without publishing; ping returns true (remote stays online)
 - [ ] Outbound: posts, edits, deletes, and reactions made in a shared channel are
@@ -1225,7 +1252,7 @@ api.On("ReceiveSharedChannelSyncMsg", mock.AnythingOfType("string"), mock.Anythi
 - [ ] Attachment and profile image hooks are stubbed and log at Debug level
 - [ ] `make check-style` passes
 - [ ] `make test` passes with all new and modified tests
-- [ ] Docker dev environment: messages relay between Server A and Server B
+- [ ] Docker dev environment: messages relay between Server A and Server B across all four transports (NATS, Azure Queue, Azure Blob, Azure Service Bus)
 
 ## Decisions
 
@@ -1249,3 +1276,4 @@ api.On("ReceiveSharedChannelSyncMsg", mock.AnythingOfType("string"), mock.Anythi
 | Outbound-only inbound guard | Reject inbound sync messages for connections with no inbound provider | Data arrives from external transport and cannot be trusted. `handleInboundSyncMsg` checks `hasInboundProvider(connName)` before processing. Although outbound-only connections should never have a subscription set up, the guard provides defense in depth against misconfiguration or a misbehaving remote. |
 | SyncMsg splitting for size-limited providers | Split by reducing posts per envelope | Keeps the full Users map in each split (needed for post context). Reactions included only with their associated posts. |
 | Inbound handler design | Synchronous with error propagation, blocking semaphore | The handler's return value is the delivery acknowledgement signal per the `QueueProvider.Subscribe` contract. Async dispatch (goroutine + return nil) breaks this contract for ack-based providers (Azure Queue and Azure Service Bus today, NATS JetStream in the future). Blocking on a full semaphore applies backpressure instead of silently dropping messages. `processInboundMessage` and `handleInboundSyncMsg` return errors so that transient failures (e.g. `ReceiveSharedChannelSyncMsg` error) can trigger redelivery. Permanent failures (malformed XML, unknown type, unlinked team/channel) return nil since retrying would not help. |
+| Outbound cursor advancement semantics | The hook returns nil if and only if the provider's `Publish()` returns nil. Cursor advancement is per `(ChannelId, RemoteId)`. | Each transport defines its own durability contract via its `Publish()` return value, and the hook propagates that uniformly. Ack-based providers (Azure Queue, Azure Service Bus, future JetStream) confirm broker-side durability before returning nil. Azure Blob confirms local WAL append (durable across plugin restart). Core NATS confirms only that bytes were handed to the client (at-most-once if no subscriber is connected). The plugin does not add transport-specific cursor logic: each provider's `Publish()` already encodes the right semantics for its delivery model, and per-remote cursor tracking on the server isolates failures so one remote's stuck cursor never blocks another. |
