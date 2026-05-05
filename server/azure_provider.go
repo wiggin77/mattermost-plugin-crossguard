@@ -305,6 +305,10 @@ func (a *azureProvider) MaxMessageSize() int {
 	return azureMaxMessageSize
 }
 
+func (a *azureProvider) IsConnected() bool {
+	return true
+}
+
 func (a *azureProvider) Close() error {
 	if a.cancel != nil {
 		a.cancel()

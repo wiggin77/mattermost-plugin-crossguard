@@ -1405,6 +1405,10 @@ func (a *azureBlobProvider) MaxMessageSize() int {
 	return 0
 }
 
+func (a *azureBlobProvider) IsConnected() bool {
+	return true
+}
+
 // Close flushes pending data and stops background goroutines. Safe to call
 // concurrently; subsequent calls are no-ops.
 func (a *azureBlobProvider) Close() error {

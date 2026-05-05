@@ -31,6 +31,12 @@ type QueueProvider interface {
 	// Returns 0 for no limit. Caller checks before Publish.
 	MaxMessageSize() int
 
+	// IsConnected reports whether the provider's transport connection is
+	// alive. Providers that do not expose connection state (e.g. HTTP-based
+	// queues, SDKs that manage reconnection internally) return true
+	// unconditionally.
+	IsConnected() bool
+
 	// Close gracefully shuts down. In-flight operations complete or are abandoned.
 	Close() error
 }

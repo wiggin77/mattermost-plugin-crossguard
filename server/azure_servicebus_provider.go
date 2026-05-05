@@ -401,6 +401,10 @@ func (a *azureServiceBusProvider) MaxMessageSize() int {
 	return a.maxMsgSize
 }
 
+func (a *azureServiceBusProvider) IsConnected() bool {
+	return true
+}
+
 // Close cancels the poll context, waits for the poll goroutine, then closes
 // the SDK objects in deterministic order (receiver → sender → client) each
 // with its OWN fresh short timeout so a hung earlier call cannot starve

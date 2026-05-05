@@ -494,6 +494,10 @@ func (m *mockQueueProvider) MaxMessageSize() int {
 	return m.maxMsgSize
 }
 
+func (m *mockQueueProvider) IsConnected() bool {
+	return true
+}
+
 func (m *mockQueueProvider) Close() error {
 	if m.closeFn != nil {
 		return m.closeFn()

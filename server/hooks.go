@@ -112,29 +112,64 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(
 	return nil
 }
 
-// OnSharedChannelsPing reports the health of the remote's outbound provider.
-// Returning false would cause the server to mark the remote as offline and
-// stop sync delivery, so inbound-only connections (which have no outbound
-// provider to check) report healthy.
+// OnSharedChannelsPing reports whether the plugin can handle messages for the
+// given remote. Checks both directions: outbound provider connectivity for
+// publish, inbound provider connectivity for receive. Providers that do not
+// expose connection state report connected unconditionally; see
+// QueueProvider.IsConnected. Returning false causes the server to mark the
+// remote offline and stop sync.
 func (p *Plugin) OnSharedChannelsPing(rc *mmModel.RemoteCluster) bool {
 	if rc == nil {
 		return false
 	}
 	connName := p.connNameForRemote(rc.RemoteId)
 	if connName == "" {
+		p.API.LogWarn("Ping received for unknown remote",
+			"error_code", errcode.PingNoRemoteMatch,
+			"remote_id", rc.RemoteId, "display_name", rc.DisplayName)
 		return false
 	}
 
-	if !p.hasOutboundProvider(connName) {
-		return true
+	if !p.outboundConnected(connName) {
+		p.API.LogWarn("Ping: outbound provider not connected",
+			"error_code", errcode.PingOutboundUnhealthy,
+			"connection", connName,
+			"remote_id", rc.RemoteId, "display_name", rc.DisplayName)
+		return false
 	}
+	if !p.inboundConnected(connName) {
+		p.API.LogWarn("Ping: inbound provider not connected",
+			"error_code", errcode.PingInboundUnhealthy,
+			"connection", connName,
+			"remote_id", rc.RemoteId, "display_name", rc.DisplayName)
+		return false
+	}
+	return true
+}
 
+// outboundConnected reports whether the outbound provider for connName is
+// connected. Returns true if no outbound provider exists for connName, since
+// inbound-only configurations should not fail the ping on the outbound check.
+func (p *Plugin) outboundConnected(connName string) bool {
 	p.outboundMu.RLock()
 	defer p.outboundMu.RUnlock()
 	for _, oc := range p.outboundConns {
 		if oc.name == connName {
-			return oc.healthy
+			return oc.provider.IsConnected()
 		}
 	}
-	return false
+	return true
+}
+
+// inboundConnected reports whether the inbound provider for connName is
+// connected. Returns true if no inbound provider exists for connName.
+func (p *Plugin) inboundConnected(connName string) bool {
+	p.inboundMu.RLock()
+	defer p.inboundMu.RUnlock()
+	for _, ic := range p.inboundConns {
+		if ic.name == connName {
+			return ic.provider.IsConnected()
+		}
+	}
+	return true
 }

@@ -15,6 +15,9 @@ const (
 	OutboundSyncMsgPublishFailed       = 10102
 	OutboundAttachmentStubbed          = 10103
 	OutboundProfileImageStubbed        = 10104
+	PingNoRemoteMatch                  = 10105
+	PingOutboundUnhealthy              = 10106
+	PingInboundUnhealthy               = 10107
 )
 
 // configuration.go (12000-12999)
@@ -299,6 +302,9 @@ var AllCodes = []int{
 	OutboundSyncMsgPublishFailed,
 	OutboundAttachmentStubbed,
 	OutboundProfileImageStubbed,
+	PingNoRemoteMatch,
+	PingOutboundUnhealthy,
+	PingInboundUnhealthy,
 
 	APINATSTestConnectFailed,
 	APIBuildTestMessageFailed,
