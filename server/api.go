@@ -12,7 +12,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
-	cgModel "github.com/MattermostFederal/mattermost-plugin-crossguard/server/model"
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/store"
 )
 
@@ -134,14 +133,6 @@ func (p *Plugin) handleTestNATSConnection(w http.ResponseWriter, conn Connection
 		}
 	}
 
-	switch conn.MessageFormat {
-	case "json", "xml", "":
-		// valid
-	default:
-		writeJSONError(w, `message_format must be "json" or "xml"`, http.StatusBadRequest)
-		return
-	}
-
 	nc, err := newNATSProviderForTest(*natsCfg)
 	if err != nil {
 		p.API.LogError("NATS connection test failed",
@@ -163,16 +154,12 @@ func (p *Plugin) handleTestNATSConnection(w http.ResponseWriter, conn Connection
 }
 
 func (p *Plugin) handleTestNATSOutbound(w http.ResponseWriter, nc *nats.Conn, conn ConnectionConfig) {
-	format := cgModel.Format(conn.MessageFormat)
-	if format == "" {
-		format = cgModel.FormatJSON
-	}
-	data, msgID, err := buildTestMessage(format)
+	_, data, msgID, err := buildTestEnvelope()
 	if err != nil {
-		p.API.LogError("Failed to build test message",
+		p.API.LogError("Failed to build test envelope",
 			"error_code", errcode.APIBuildTestMessageFailed,
 			"error", err.Error())
-		writeJSONError(w, "failed to build test message", http.StatusInternalServerError)
+		writeJSONError(w, "failed to build test envelope", http.StatusInternalServerError)
 		return
 	}
 

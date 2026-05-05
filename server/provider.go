@@ -3,16 +3,20 @@ package main
 import "context"
 
 // QueueProvider abstracts the message transport and file transfer layer.
-// Both NATS and Azure Queue Storage implement this interface.
+// Implementations: NATS, Azure Queue, Azure Blob, Azure Service Bus.
 type QueueProvider interface {
 	// Publish sends a message. Includes internal retries appropriate to transport.
 	// A returned error is a final failure.
 	Publish(ctx context.Context, data []byte) error
 
-	// Subscribe starts delivering messages to the handler.
-	// NATS: push-based subscription. Azure: polling goroutine.
-	// Handler returning nil = message processed (Azure deletes it).
-	// Handler returning error = message not processed (Azure lets visibility timeout expire).
+	// Subscribe starts delivering messages to the handler. The handler's
+	// return value is the universal delivery acknowledgement signal:
+	//   nil   = processed (provider may ack/delete the message)
+	//   error = not processed (provider should redeliver if supported)
+	// Core NATS ignores the return (fire-and-forget). Azure Queue and
+	// Azure Service Bus already respect it. Future NATS JetStream will
+	// depend on it. Handlers must be synchronous: returning before
+	// processing completes would ack a message the plugin never handled.
 	Subscribe(ctx context.Context, handler func(data []byte) error) error
 
 	// UploadFile uploads a file with metadata.

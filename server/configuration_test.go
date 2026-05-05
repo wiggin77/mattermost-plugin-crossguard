@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
-	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/model"
 )
 
 func TestParseConnections(t *testing.T) {
@@ -279,35 +278,6 @@ func TestConfigurationValidate(t *testing.T) {
 		assert.Contains(t, err.Error(), "name must contain only lowercase letters, numbers, and hyphens")
 	})
 
-	t.Run("empty message_format defaults to json and passes", func(t *testing.T) {
-		conns := []ConnectionConfig{
-			{Name: "test", Provider: "nats", MessageFormat: "", NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
-		}
-		data, _ := json.Marshal(conns)
-		cfg := &configuration{OutboundConnections: string(data)}
-		assert.NoError(t, cfg.validate())
-	})
-
-	t.Run("xml message_format passes", func(t *testing.T) {
-		conns := []ConnectionConfig{
-			{Name: "test", Provider: "nats", MessageFormat: "xml", NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
-		}
-		data, _ := json.Marshal(conns)
-		cfg := &configuration{OutboundConnections: string(data)}
-		assert.NoError(t, cfg.validate())
-	})
-
-	t.Run("invalid message_format fails validation", func(t *testing.T) {
-		conns := []ConnectionConfig{
-			{Name: "test", Provider: "nats", MessageFormat: "yaml", NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
-		}
-		data, _ := json.Marshal(conns)
-		cfg := &configuration{OutboundConnections: string(data)}
-		err := cfg.validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "message_format must be")
-	})
-
 	t.Run("malformed JSON reports error", func(t *testing.T) {
 		cfg := &configuration{InboundConnections: "not json"}
 		err := cfg.validate()
@@ -315,7 +285,7 @@ func TestConfigurationValidate(t *testing.T) {
 		assert.Contains(t, err.Error(), "inbound connections")
 	})
 
-	t.Run("duplicate names across inbound and outbound fail validation", func(t *testing.T) {
+	t.Run("same name across inbound and outbound passes (paired)", func(t *testing.T) {
 		inbound := []ConnectionConfig{
 			{Name: "shared-name", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host1:4222", Subject: "crossguard.sub1", AuthType: "none"}},
 		}
@@ -328,6 +298,16 @@ func TestConfigurationValidate(t *testing.T) {
 			InboundConnections:  string(inData),
 			OutboundConnections: string(outData),
 		}
+		assert.NoError(t, cfg.validate())
+	})
+
+	t.Run("duplicate names within the same direction fail validation", func(t *testing.T) {
+		conns := []ConnectionConfig{
+			{Name: "dup", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host1:4222", Subject: "crossguard.sub1", AuthType: "none"}},
+			{Name: "dup", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host2:4222", Subject: "crossguard.sub2", AuthType: "none"}},
+		}
+		data, _ := json.Marshal(conns)
+		cfg := &configuration{InboundConnections: string(data)}
 		err := cfg.validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "duplicate name")
@@ -476,66 +456,28 @@ func TestIsChannelRequestMode(t *testing.T) {
 }
 
 func TestIsTestMessage(t *testing.T) {
-	t.Run("valid test message is detected via JSON", func(t *testing.T) {
-		env := &model.Envelope{
-			Type:        model.MessageTypeTest,
-			Timestamp:   "2026-04-06T12:00:00Z",
-			TestMessage: &model.TestMessage{ID: "abc-123"},
-		}
-		data, err := model.Marshal(env, model.FormatJSON)
+	t.Run("test envelope is detected", func(t *testing.T) {
+		env := &TransportEnvelope{Type: TransportTypeTest, TestID: "abc-123"}
+		data, err := MarshalEnvelope(env)
 		require.NoError(t, err)
 
-		result, ok := isTestMessage(data)
+		id, ok := isTestMessage(data)
 		require.True(t, ok)
-		assert.Equal(t, "abc-123", result.ID)
+		assert.Equal(t, "abc-123", id)
 	})
 
-	t.Run("valid test message is detected via XML", func(t *testing.T) {
-		env := &model.Envelope{
-			Type:        model.MessageTypeTest,
-			Timestamp:   "2026-04-06T12:00:00Z",
-			TestMessage: &model.TestMessage{ID: "xml-456"},
-		}
-		data, err := model.Marshal(env, model.FormatXML)
+	t.Run("non-test envelope is not detected", func(t *testing.T) {
+		env := &TransportEnvelope{Type: TransportTypeSyncMsg}
+		data, err := MarshalEnvelope(env)
 		require.NoError(t, err)
 
-		result, ok := isTestMessage(data)
-		require.True(t, ok)
-		assert.Equal(t, "xml-456", result.ID)
+		_, ok := isTestMessage(data)
+		assert.False(t, ok)
 	})
 
-	t.Run("non-test message type is not detected", func(t *testing.T) {
-		env := &model.Envelope{
-			Type:        "regular_message",
-			Timestamp:   "2026-04-06T12:00:00Z",
-			PostMessage: &model.PostMessage{PostID: "p1"},
-		}
-		data, err := model.Marshal(env, model.FormatJSON)
-		require.NoError(t, err)
-
-		result, ok := isTestMessage(data)
+	t.Run("garbage bytes are not detected", func(t *testing.T) {
+		_, ok := isTestMessage([]byte("not xml"))
 		assert.False(t, ok)
-		assert.Nil(t, result)
-	})
-
-	t.Run("invalid JSON is not detected", func(t *testing.T) {
-		result, ok := isTestMessage([]byte("not json"))
-		assert.False(t, ok)
-		assert.Nil(t, result)
-	})
-
-	t.Run("empty type is not detected", func(t *testing.T) {
-		env := &model.Envelope{
-			Type:        "",
-			Timestamp:   "2026-04-06T12:00:00Z",
-			TestMessage: &model.TestMessage{ID: "123"},
-		}
-		data, err := model.Marshal(env, model.FormatJSON)
-		require.NoError(t, err)
-
-		result, ok := isTestMessage(data)
-		assert.False(t, ok)
-		assert.Nil(t, result)
 	})
 }
 
@@ -636,34 +578,19 @@ func TestFileFilterValidation(t *testing.T) {
 	})
 }
 
-func TestBuildTestMessage(t *testing.T) {
-	t.Run("JSON format", func(t *testing.T) {
-		data, msgID, err := buildTestMessage(model.FormatJSON)
-		require.NoError(t, err)
-		require.NotEmpty(t, msgID)
-		require.NotEmpty(t, data)
+func TestBuildTestEnvelope(t *testing.T) {
+	env, data, msgID, err := buildTestEnvelope()
+	require.NoError(t, err)
+	require.NotEmpty(t, msgID)
+	require.NotEmpty(t, data)
+	require.NotNil(t, env)
+	assert.Equal(t, TransportTypeTest, env.Type)
+	assert.Equal(t, msgID, env.TestID)
 
-		env, err := model.Unmarshal(data, model.FormatJSON)
-		require.NoError(t, err)
-		assert.Equal(t, model.MessageTypeTest, env.Type)
-		assert.NotEmpty(t, env.Timestamp)
-		require.NotNil(t, env.TestMessage)
-		assert.Equal(t, msgID, env.TestMessage.ID)
-	})
-
-	t.Run("XML format", func(t *testing.T) {
-		data, msgID, err := buildTestMessage(model.FormatXML)
-		require.NoError(t, err)
-		require.NotEmpty(t, msgID)
-		require.NotEmpty(t, data)
-
-		env, err := model.Unmarshal(data, model.FormatXML)
-		require.NoError(t, err)
-		assert.Equal(t, model.MessageTypeTest, env.Type)
-		assert.NotEmpty(t, env.Timestamp)
-		require.NotNil(t, env.TestMessage)
-		assert.Equal(t, msgID, env.TestMessage.ID)
-	})
+	got, err := UnmarshalEnvelope(data)
+	require.NoError(t, err)
+	assert.Equal(t, TransportTypeTest, got.Type)
+	assert.Equal(t, msgID, got.TestID)
 }
 
 func TestAzureConfigValidation(t *testing.T) {
@@ -1086,7 +1013,6 @@ func TestOnConfigurationChange_WithReconnect(t *testing.T) {
 
 	// Simulate post-activation state.
 	p.relaySem = make(chan struct{}, 50)
-	p.fileSem = make(chan struct{}, 32)
 	p.inboundCancel = func() {}
 	p.configuration = &configuration{}
 

@@ -10,18 +10,11 @@ package errcode
 
 // hooks.go (10000-10999)
 const (
-	HooksChannelConnCheckFailed   = 10000
-	HooksGetChannelFailed         = 10001
-	HooksTeamConnCheckFailed      = 10002
-	HooksGetTeamFailed            = 10003
-	HooksRelaySemaphoreFull       = 10004
-	HooksGetUserForPostFailed     = 10005
-	HooksGetUserForUpdateFailed   = 10006
-	HooksDeleteFlagCheckFailed    = 10007
-	HooksGetPostForReactAddFailed = 10008
-	HooksGetUserForReactAddFailed = 10009
-	HooksGetPostForReactRemFailed = 10010
-	HooksGetUserForReactRemFailed = 10011
+	OutboundSyncMsgNoRemoteMatch       = 10100
+	OutboundSyncMsgChannelLookupFailed = 10101
+	OutboundSyncMsgPublishFailed       = 10102
+	OutboundAttachmentStubbed          = 10103
+	OutboundProfileImageStubbed        = 10104
 )
 
 // configuration.go (12000-12999)
@@ -71,56 +64,29 @@ const (
 	ServiceGlobalParseInConnFailed       = 14031
 	ServiceMapParseOutConnFailed         = 14032
 	ServiceMapParseInConnFailed          = 14033
+
+	ServiceShareChannelFailed   = 14100
+	ServiceInviteRemoteFailed   = 14101
+	ServiceUninviteRemoteFailed = 14102
+	ServiceUnshareFailed        = 14103
 )
 
 // inbound.go (15000-15999)
 const (
-	InboundParseConnsFailed             = 15000
-	InboundConnectFailed                = 15001
-	InboundSubscribeFailed              = 15002
-	InboundSubscriptionEstablished      = 15003
-	InboundRelaySemaphoreFull           = 15004
-	InboundUnmarshalFailed              = 15005
-	InboundPostMissingPayload           = 15006
-	InboundUpdateMissingPayload         = 15007
-	InboundDeleteMissingPayload         = 15008
-	InboundReactionAddMissingPayload    = 15009
-	InboundReactionRemoveMissingPayload = 15010
-	InboundTestMessageReceivedWithID    = 15011
-	InboundTestMessageReceived          = 15012
-	InboundUnknownMessageType           = 15013
-	InboundMissingMessageQueueFull      = 15014
-	InboundMissingMessageQueued         = 15015
-	InboundPostResolveFailed            = 15016
-	InboundPostIdempotencyLookupFailed  = 15017
-	InboundPostResolveUserFailed        = 15018
-	InboundPostRootMappingLookupFailed  = 15019
-	InboundPostRootNotFoundStandalone   = 15020
-	InboundPostCreateFailed             = 15021
-	InboundPostStoreMappingFailed       = 15022
-	InboundUpdateMappingLookupFailed    = 15023
-	InboundUpdateGetLocalPostFailed     = 15024
-	InboundUpdatePostFailed             = 15025
-	InboundDeleteMappingLookupFailed    = 15026
-	InboundDeleteSetFlagFailed          = 15027
-	InboundDeletePostFailed             = 15028
-	InboundDeleteRemoveFlagFailed       = 15029
-	InboundDeleteRemoveMappingFailed    = 15030
-	InboundReactionMappingLookupFailed  = 15031
-	InboundReactionResolveFailed        = 15032
-	InboundReactionResolveUserFailed    = 15033
-	InboundReactionAddFailed            = 15034
-	InboundReactionRemoveFailed         = 15035
-	InboundFileWatcherStarted           = 15036
-	InboundFileWatcherExited            = 15037
-	InboundFileMissingHeaders           = 15038
-	InboundFileConnInactive             = 15039
-	InboundFileFilteredByPolicy         = 15040
-	InboundFileMappingLookupFailed      = 15041
-	InboundFileNoMappingFound           = 15042
-	InboundFileGetLocalPostFailed       = 15043
-	InboundFileUploadFailed             = 15044
-	InboundFileAttachFailed             = 15045
+	InboundParseConnsFailed        = 15000
+	InboundConnectFailed           = 15001
+	InboundSubscribeFailed         = 15002
+	InboundSubscriptionEstablished = 15003
+	InboundUnmarshalFailed         = 15005
+
+	InboundReceiveSyncFailed   = 15100
+	InboundPostSyncErrors      = 15101
+	InboundAttachmentStubbed   = 15102
+	InboundProfileImageStubbed = 15103
+	InboundUnknownType         = 15104
+	InboundNoRemoteForConn     = 15105
+	InboundNotConfigured       = 15106
+	InboundTestReceived        = 15107
 )
 
 // api.go (11000-11999)
@@ -146,28 +112,12 @@ const (
 
 // connections.go (16000-16999)
 const (
-	ConnectionsParseOutboundFailed     = 16000
-	ConnectionsConnectOutboundFailed   = 16001
-	ConnectionsOutboundEstablished     = 16002
-	ConnectionsSerializeFailed         = 16003
-	ConnectionsMessageSplit            = 16004
-	ConnectionsSerializePartFailed     = 16005
-	ConnectionsPublishPartFailed       = 16006
-	ConnectionsPublishAfterRetriesFail = 16007
-	ConnectionsGetFileInfoFailed       = 16008
-	ConnectionsSkipOversizedFile       = 16009
-	ConnectionsDownloadFileFailed      = 16010
-	ConnectionsOutboundFileFiltered    = 16011
-	ConnectionsFileSemaphoreFull       = 16012
-	ConnectionsUploadFileFailed        = 16013
-)
-
-// sync_user.go (17000-17999)
-const (
-	SyncUserTruncatedUsername  = 17000
-	SyncUserLookupFallback     = 17001
-	SyncUserAddToTeamFailed    = 17002
-	SyncUserAddToChannelFailed = 17003
+	ConnectionsParseOutboundFailed   = 16000
+	ConnectionsConnectOutboundFailed = 16001
+	ConnectionsOutboundEstablished   = 16002
+	ConnectionsMessageSplit          = 16004
+	ConnectionsSerializePartFailed   = 16005
+	ConnectionsPublishPartFailed     = 16006
 )
 
 // azure_blob_provider.go (18000-18999)
@@ -266,15 +216,6 @@ const (
 	PromptUpdatePostFailed       = 21016
 )
 
-// retry_dispatch.go (22000-22999)
-const (
-	RetryDispatchSucceeded      = 22000
-	RetryDispatchStillMissing   = 22001
-	RetryDispatchDropMaxAge     = 22002
-	RetryDispatchDropUnmarshal  = 22003
-	RetryDispatchDropMaxRetries = 22004
-)
-
 // store/caching.go (23000-23999)
 const (
 	StoreCachePublishInvalidationFailed = 23000
@@ -321,9 +262,10 @@ const (
 	ChanRequestConfirmDMFailed       = 25016
 	ChanRequestNoAdminsNotified      = 25017
 	ChanRequestGetTeamAdminsFailed   = 25018
+)
 
-	// Azure Service Bus provider: 26000-26999.
-	// Initial allocation; additional codes appended on demand as provider code needs them.
+// Azure Service Bus provider: 26000-26999.
+const (
 	ServiceBusSendFailed         = 26000
 	ServiceBusReceiveFailed      = 26001
 	ServiceBusCompleteFailed     = 26002
@@ -333,22 +275,30 @@ const (
 	APIAzureServiceBusTestFailed = 26006
 )
 
+// plugin.go (27000-27999)
+const (
+	PluginRegisterFailed   = 27000
+	PluginUnregisterFailed = 27001
+
+	// Upgrade migrations (one-shot, run from OnActivate).
+	PluginMigrateListKVFailed     = 27100
+	PluginMigrateDeleteKVFailed   = 27101
+	PluginMigrateRecordKVFailed   = 27102
+	PluginMigrateGetChannelFailed = 27103
+	PluginMigrateShareFailed      = 27104
+	PluginMigrateInviteFailed     = 27105
+	PluginMigrateSummary          = 27106
+)
+
 // AllCodes lists every code declared in this package. Used by
 // TestCodesUnique to assert that no two call sites share a value.
 // Keep in sync when adding new constants.
 var AllCodes = []int{
-	HooksChannelConnCheckFailed,
-	HooksGetChannelFailed,
-	HooksTeamConnCheckFailed,
-	HooksGetTeamFailed,
-	HooksRelaySemaphoreFull,
-	HooksGetUserForPostFailed,
-	HooksGetUserForUpdateFailed,
-	HooksDeleteFlagCheckFailed,
-	HooksGetPostForReactAddFailed,
-	HooksGetUserForReactAddFailed,
-	HooksGetPostForReactRemFailed,
-	HooksGetUserForReactRemFailed,
+	OutboundSyncMsgNoRemoteMatch,
+	OutboundSyncMsgChannelLookupFailed,
+	OutboundSyncMsgPublishFailed,
+	OutboundAttachmentStubbed,
+	OutboundProfileImageStubbed,
 
 	APINATSTestConnectFailed,
 	APIBuildTestMessageFailed,
@@ -407,73 +357,31 @@ var AllCodes = []int{
 	ServiceGlobalParseInConnFailed,
 	ServiceMapParseOutConnFailed,
 	ServiceMapParseInConnFailed,
+	ServiceShareChannelFailed,
+	ServiceInviteRemoteFailed,
+	ServiceUninviteRemoteFailed,
+	ServiceUnshareFailed,
 
 	InboundParseConnsFailed,
 	InboundConnectFailed,
 	InboundSubscribeFailed,
 	InboundSubscriptionEstablished,
-	InboundRelaySemaphoreFull,
 	InboundUnmarshalFailed,
-	InboundPostMissingPayload,
-	InboundUpdateMissingPayload,
-	InboundDeleteMissingPayload,
-	InboundReactionAddMissingPayload,
-	InboundReactionRemoveMissingPayload,
-	InboundTestMessageReceivedWithID,
-	InboundTestMessageReceived,
-	InboundUnknownMessageType,
-	InboundMissingMessageQueueFull,
-	InboundMissingMessageQueued,
-	InboundPostResolveFailed,
-	InboundPostIdempotencyLookupFailed,
-	InboundPostResolveUserFailed,
-	InboundPostRootMappingLookupFailed,
-	InboundPostRootNotFoundStandalone,
-	InboundPostCreateFailed,
-	InboundPostStoreMappingFailed,
-	InboundUpdateMappingLookupFailed,
-	InboundUpdateGetLocalPostFailed,
-	InboundUpdatePostFailed,
-	InboundDeleteMappingLookupFailed,
-	InboundDeleteSetFlagFailed,
-	InboundDeletePostFailed,
-	InboundDeleteRemoveFlagFailed,
-	InboundDeleteRemoveMappingFailed,
-	InboundReactionMappingLookupFailed,
-	InboundReactionResolveFailed,
-	InboundReactionResolveUserFailed,
-	InboundReactionAddFailed,
-	InboundReactionRemoveFailed,
-	InboundFileWatcherStarted,
-	InboundFileWatcherExited,
-	InboundFileMissingHeaders,
-	InboundFileConnInactive,
-	InboundFileFilteredByPolicy,
-	InboundFileMappingLookupFailed,
-	InboundFileNoMappingFound,
-	InboundFileGetLocalPostFailed,
-	InboundFileUploadFailed,
-	InboundFileAttachFailed,
+	InboundReceiveSyncFailed,
+	InboundPostSyncErrors,
+	InboundAttachmentStubbed,
+	InboundProfileImageStubbed,
+	InboundUnknownType,
+	InboundNoRemoteForConn,
+	InboundNotConfigured,
+	InboundTestReceived,
 
 	ConnectionsParseOutboundFailed,
 	ConnectionsConnectOutboundFailed,
 	ConnectionsOutboundEstablished,
-	ConnectionsSerializeFailed,
 	ConnectionsMessageSplit,
 	ConnectionsSerializePartFailed,
 	ConnectionsPublishPartFailed,
-	ConnectionsPublishAfterRetriesFail,
-	ConnectionsGetFileInfoFailed,
-	ConnectionsSkipOversizedFile,
-	ConnectionsDownloadFileFailed,
-	ConnectionsOutboundFileFiltered,
-	ConnectionsFileSemaphoreFull,
-	ConnectionsUploadFileFailed,
-
-	SyncUserTruncatedUsername,
-	SyncUserLookupFallback,
-	SyncUserAddToTeamFailed,
-	SyncUserAddToChannelFailed,
 
 	AzureBlobContainerCreateRetry,
 	AzureBlobWALInTempStorage,
@@ -559,12 +467,6 @@ var AllCodes = []int{
 	PromptGetPostForUpdateFailed,
 	PromptUpdatePostFailed,
 
-	RetryDispatchSucceeded,
-	RetryDispatchStillMissing,
-	RetryDispatchDropMaxAge,
-	RetryDispatchDropUnmarshal,
-	RetryDispatchDropMaxRetries,
-
 	StoreCachePublishInvalidationFailed,
 
 	RequestGetFailed,
@@ -611,4 +513,14 @@ var AllCodes = []int{
 	ServiceBusRedelivery,
 	ServiceBusMalformedBody,
 	APIAzureServiceBusTestFailed,
+
+	PluginRegisterFailed,
+	PluginUnregisterFailed,
+	PluginMigrateListKVFailed,
+	PluginMigrateDeleteKVFailed,
+	PluginMigrateRecordKVFailed,
+	PluginMigrateGetChannelFailed,
+	PluginMigrateShareFailed,
+	PluginMigrateInviteFailed,
+	PluginMigrateSummary,
 }

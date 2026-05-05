@@ -52,12 +52,6 @@ type KVStore interface {
 	IsChannelInitialized(channelID string) (bool, error)
 	AddChannelConnection(channelID string, conn TeamConnection) error
 	RemoveChannelConnection(channelID string, conn TeamConnection) error
-	SetPostMapping(connName, remotePostID, localPostID string) error
-	GetPostMapping(connName, remotePostID string) (string, error)
-	DeletePostMapping(connName, remotePostID string) error
-	SetDeletingFlag(postID string) error
-	IsDeletingFlagSet(postID string) (bool, error)
-	ClearDeletingFlag(postID string) error
 	GetConnectionPrompt(teamID, connName string) (*ConnectionPrompt, error)
 	SetConnectionPrompt(teamID, connName string, prompt *ConnectionPrompt) error
 	DeleteConnectionPrompt(teamID, connName string) error

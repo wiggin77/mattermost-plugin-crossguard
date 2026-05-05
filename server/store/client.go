@@ -229,69 +229,6 @@ func (kv Client) RemoveChannelConnection(channelID string, conn TeamConnection) 
 	})
 }
 
-// postMappingKey returns the KV key for a remote-to-local post ID mapping.
-func postMappingKey(connName, remotePostID string) string {
-	return "pm-" + connName + "-" + remotePostID
-}
-
-// SetPostMapping stores a remote-to-local post ID mapping for a connection.
-func (kv Client) SetPostMapping(connName, remotePostID, localPostID string) error {
-	_, err := kv.client.KV.Set(postMappingKey(connName, remotePostID), localPostID)
-	if err != nil {
-		return errors.Wrap(err, "failed to set post mapping")
-	}
-	return nil
-}
-
-// GetPostMapping retrieves the local post ID for a remote post on a connection.
-func (kv Client) GetPostMapping(connName, remotePostID string) (string, error) {
-	var localPostID string
-	err := kv.client.KV.Get(postMappingKey(connName, remotePostID), &localPostID)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get post mapping")
-	}
-	return localPostID, nil
-}
-
-// DeletePostMapping removes a remote-to-local post ID mapping.
-func (kv Client) DeletePostMapping(connName, remotePostID string) error {
-	if err := kv.client.KV.Delete(postMappingKey(connName, remotePostID)); err != nil {
-		return errors.Wrap(err, "failed to delete post mapping")
-	}
-	return nil
-}
-
-func deletingFlagKey(postID string) string {
-	return "crossguard-deleting-" + postID
-}
-
-// SetDeletingFlag marks a post as being deleted by the inbound handler.
-func (kv Client) SetDeletingFlag(postID string) error {
-	_, err := kv.client.KV.Set(deletingFlagKey(postID), true)
-	if err != nil {
-		return errors.Wrap(err, "failed to set deleting flag")
-	}
-	return nil
-}
-
-// IsDeletingFlagSet returns true if the post is being deleted by the inbound handler.
-func (kv Client) IsDeletingFlagSet(postID string) (bool, error) {
-	var set bool
-	err := kv.client.KV.Get(deletingFlagKey(postID), &set)
-	if err != nil {
-		return false, errors.Wrap(err, "failed to get deleting flag")
-	}
-	return set, nil
-}
-
-// ClearDeletingFlag removes the deleting flag for a post.
-func (kv Client) ClearDeletingFlag(postID string) error {
-	if err := kv.client.KV.Delete(deletingFlagKey(postID)); err != nil {
-		return errors.Wrap(err, "failed to clear deleting flag")
-	}
-	return nil
-}
-
 // GetConnectionPrompt retrieves the connection prompt state for a team+connection.
 func (kv Client) GetConnectionPrompt(teamID, connName string) (*ConnectionPrompt, error) {
 	var prompt ConnectionPrompt

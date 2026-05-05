@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
-	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/model"
 )
 
 var validNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
@@ -50,11 +49,18 @@ type ConnectionConfig struct {
 	Name     string `json:"name"`
 	Provider string `json:"provider"` // "nats", "azure-queue", or "azure-blob"
 
+	// SiteURL is the stable identity used to register the connection as a
+	// shared channels remote on the server. It defaults to "crossguard:" + Name
+	// on first save, and is immutable thereafter so renames preserve the
+	// remote's identity (and its sync cursor). Inbound and outbound
+	// connections that share a SiteURL are paired and share a single
+	// remoteID for loop prevention and synthetic user tagging.
+	SiteURL string `json:"site_url,omitempty"`
+
 	// Common fields
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode"`  // "", "allow", "deny"
 	FileFilterTypes     string `json:"file_filter_types"` // ".pdf,.docx,.png"
-	MessageFormat       string `json:"message_format"`    // "json" or "xml"
 
 	// Provider-specific (exactly one must be set, matching Provider)
 	NATS            *NATSProviderConfig            `json:"nats,omitempty"`
@@ -204,13 +210,25 @@ func parseConnections(raw string) ([]ConnectionConfig, error) {
 		return nil, fmt.Errorf("failed to parse connections: %w", err)
 	}
 
-	// Default provider to NATS and populate nested name field.
+	// Default provider to NATS, populate nested name field, and default
+	// SiteURL when empty. SiteURL defaulting happens here (not just in
+	// validate) because every reader of the config goes through this
+	// function, including registerRemotes and reconcileRemotes. The
+	// admin console's saved JSON is the source of truth: a SiteURL
+	// already present in saved JSON survives renames; an empty SiteURL
+	// is stamped on every read so the runtime always has one.
 	for i := range connections {
 		if connections[i].Provider == "" {
 			connections[i].Provider = ProviderNATS
 		}
 		if connections[i].NATS != nil {
 			connections[i].NATS.Name = connections[i].Name
+		}
+		if strings.TrimSpace(connections[i].SiteURL) == "" {
+			name := strings.TrimSpace(connections[i].Name)
+			if name != "" {
+				connections[i].SiteURL = "crossguard:" + name
+			}
 		}
 	}
 
@@ -227,20 +245,21 @@ func (c *configuration) GetOutboundConnections() ([]ConnectionConfig, error) {
 
 func (c *configuration) validate() error {
 	var errs []string
-	allNames := make(map[string]bool)
 
 	inbound, err := c.GetInboundConnections()
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("inbound connections: %s", err.Error()))
 	} else {
-		errs = append(errs, validateConnectionList(inbound, "inbound", allNames)...)
+		inboundNames := make(map[string]bool)
+		errs = append(errs, validateConnectionList(inbound, "inbound", inboundNames)...)
 	}
 
 	outbound, err := c.GetOutboundConnections()
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("outbound connections: %s", err.Error()))
 	} else {
-		errs = append(errs, validateConnectionList(outbound, "outbound", allNames)...)
+		outboundNames := make(map[string]bool)
+		errs = append(errs, validateConnectionList(outbound, "outbound", outboundNames)...)
 	}
 
 	if len(errs) > 0 {
@@ -281,16 +300,9 @@ func validateConnectionList(connections []ConnectionConfig, direction string, al
 			errs = append(errs, fmt.Sprintf("%s: provider must be \"nats\", \"azure-queue\", \"azure-blob\", or \"azure-servicebus\"", prefix))
 		}
 
-		if conn.MessageFormat == "" {
-			connections[i].MessageFormat = "json"
-			conn.MessageFormat = "json"
-		}
-		switch conn.MessageFormat {
-		case "json", "xml":
-			// valid
-		default:
-			errs = append(errs, fmt.Sprintf("%s: message_format must be \"json\" or \"xml\"", prefix))
-		}
+		// SiteURL defaulting happens at parse time (see parseConnections),
+		// so we do not need to populate it here. Once saved by the admin,
+		// SiteURL travels with the connection across renames.
 
 		switch conn.FileFilterMode {
 		case "", fileFilterModeAllow, fileFilterModeDeny:
@@ -542,18 +554,18 @@ func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []s
 	return errs
 }
 
-func isTestMessage(data []byte) (*model.TestMessage, bool) {
-	format := model.DetectFormat(data)
-	env, err := model.Unmarshal(data, format)
+// isTestMessage returns the TestID and true when data is a TransportEnvelope
+// of Type "test". Used by NATS file watcher and inbound paths to recognize
+// test-connection probes.
+func isTestMessage(data []byte) (string, bool) {
+	env, err := UnmarshalEnvelope(data)
 	if err != nil {
-		return nil, false
+		return "", false
 	}
-
-	if env.Type != model.MessageTypeTest || env.TestMessage == nil {
-		return nil, false
+	if env.Type != TransportTypeTest {
+		return "", false
 	}
-
-	return env.TestMessage, true
+	return env.TestID, true
 }
 
 func (p *Plugin) getConfiguration() *configuration {
@@ -597,13 +609,10 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.setConfiguration(cfg)
 
-	if p.retryQueue != nil {
-		p.retryQueue.SetMaxAge(p.computeRetryMaxAge())
-	}
-
 	if p.relaySem != nil {
 		p.reconnectOutbound()
 		p.reconnectInbound()
+		p.reconcileRemotes()
 	}
 
 	return nil

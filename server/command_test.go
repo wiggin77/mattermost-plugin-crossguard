@@ -1538,17 +1538,14 @@ func TestFileTransferLabel(t *testing.T) {
 }
 
 func TestConnectionLabel(t *testing.T) {
-	t.Run("json format", func(t *testing.T) {
-		label := connectionLabel("json", true, "", "")
-		assert.Equal(t, "files on", label)
+	t.Run("files enabled", func(t *testing.T) {
+		assert.Equal(t, "xml, files on", connectionLabel(true, "", ""))
 	})
-	t.Run("xml format", func(t *testing.T) {
-		label := connectionLabel("xml", false, "", "")
-		assert.Equal(t, "xml, files off", label)
+	t.Run("files disabled", func(t *testing.T) {
+		assert.Equal(t, "xml, files off", connectionLabel(false, "", ""))
 	})
-	t.Run("empty format defaults to no prefix", func(t *testing.T) {
-		label := connectionLabel("", true, "allow", ".pdf")
-		assert.Equal(t, "files on, allow: .pdf", label)
+	t.Run("with allow filter", func(t *testing.T) {
+		assert.Equal(t, "xml, files on, allow: .pdf", connectionLabel(true, "allow", ".pdf"))
 	})
 }
 

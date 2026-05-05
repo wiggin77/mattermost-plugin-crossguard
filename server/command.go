@@ -25,12 +25,8 @@ func fileTransferLabel(enabled bool, filterMode, filterTypes string) string {
 	}
 }
 
-func connectionLabel(format string, fileEnabled bool, filterMode, filterTypes string) string {
-	label := fileTransferLabel(fileEnabled, filterMode, filterTypes)
-	if format == "xml" {
-		label = "xml, " + label
-	}
-	return label
+func connectionLabel(fileEnabled bool, filterMode, filterTypes string) string {
+	return "xml, " + fileTransferLabel(fileEnabled, filterMode, filterTypes)
 }
 
 func providerLabel(provider string) string {
@@ -409,7 +405,7 @@ func (p *Plugin) executeStatusTeam(teamID, channelID string) *model.CommandRespo
 			if !cs.Linked {
 				continue
 			}
-			label := connectionLabel(cs.MessageFormat, cs.FileTransferEnabled, cs.FileFilterMode, cs.FileFilterTypes)
+			label := connectionLabel(cs.FileTransferEnabled, cs.FileFilterMode, cs.FileFilterTypes)
 			fmt.Fprintf(&sb, "- `%s:%s` (%s, %s)\n", cs.Direction, cs.Name, providerLabel(cs.Provider), label)
 		}
 	}
@@ -420,7 +416,7 @@ func (p *Plugin) executeStatusTeam(teamID, channelID string) *model.CommandRespo
 		for _, tc := range channelConns {
 			key := connKey(tc)
 			cc := connMap[key]
-			clabel := connectionLabel(cc.MessageFormat, cc.FileTransferEnabled, cc.FileFilterMode, cc.FileFilterTypes)
+			clabel := connectionLabel(cc.FileTransferEnabled, cc.FileFilterMode, cc.FileFilterTypes)
 			fmt.Fprintf(&sb, "- `%s` (%s, %s)\n", key, providerLabel(cc.Provider), clabel)
 		}
 	}
@@ -468,7 +464,7 @@ func (p *Plugin) executeStatusSystemAdmin(channelID string) *model.CommandRespon
 		for _, tc := range channelConns {
 			key := connKey(tc)
 			cc := connMap[key]
-			clabel := connectionLabel(cc.MessageFormat, cc.FileTransferEnabled, cc.FileFilterMode, cc.FileFilterTypes)
+			clabel := connectionLabel(cc.FileTransferEnabled, cc.FileFilterMode, cc.FileFilterTypes)
 			fmt.Fprintf(&sb, "- `%s` (%s, %s)\n", key, providerLabel(cc.Provider), clabel)
 		}
 	}
@@ -494,11 +490,7 @@ func (p *Plugin) executeStatusSystemAdmin(channelID string) *model.CommandRespon
 		sb.WriteString("| Name | Direction | Provider | Details | Format | Files |\n")
 		sb.WriteString("|:-----|:----------|:---------|:--------|:-------|:------|\n")
 		for _, conn := range resp.Connections {
-			format := conn.MessageFormat
-			if format == "" {
-				format = "json"
-			}
-			fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s | %s |\n", conn.Name, conn.Direction, providerLabel(conn.Provider), providerDetails(conn), format, fileTransferLabelEmoji(conn.FileTransferEnabled, conn.FileFilterMode, conn.FileFilterTypes))
+			fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s | %s |\n", conn.Name, conn.Direction, providerLabel(conn.Provider), providerDetails(conn), "xml", fileTransferLabelEmoji(conn.FileTransferEnabled, conn.FileFilterMode, conn.FileFilterTypes))
 		}
 	}
 

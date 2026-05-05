@@ -14,6 +14,7 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/store"
 )
@@ -57,6 +58,114 @@ func connectToEmbeddedNATS(t *testing.T, addr, subject string) *natsProvider {
 	}
 }
 
+// testKVStore is the in-process KV double used by service/api/command/prompt
+// tests. It exposes the bare minimum of the KVStore interface and lets a
+// test override individual methods via flexibleKVStore.
+type testKVStore struct {
+	store.KVStore
+}
+
+func newTestKVStore() *testKVStore {
+	return &testKVStore{}
+}
+
+func (s *testKVStore) GetTeamConnections(string) ([]store.TeamConnection, error) {
+	return []store.TeamConnection{
+		{Direction: "inbound", Connection: "high"},
+		{Direction: "outbound", Connection: "high"},
+	}, nil
+}
+func (s *testKVStore) SetTeamConnections(string, []store.TeamConnection) error { return nil }
+func (s *testKVStore) DeleteTeamConnections(string) error                      { return nil }
+func (s *testKVStore) IsTeamInitialized(string) (bool, error)                  { return true, nil }
+func (s *testKVStore) AddTeamConnection(string, store.TeamConnection) error    { return nil }
+func (s *testKVStore) RemoveTeamConnection(string, store.TeamConnection) error { return nil }
+func (s *testKVStore) GetInitializedTeamIDs() ([]string, error)                { return nil, nil }
+func (s *testKVStore) AddInitializedTeamID(string) error                       { return nil }
+func (s *testKVStore) RemoveInitializedTeamID(string) error                    { return nil }
+func (s *testKVStore) GetChannelConnections(string) ([]store.TeamConnection, error) {
+	return []store.TeamConnection{
+		{Direction: "inbound", Connection: "high"},
+		{Direction: "outbound", Connection: "high"},
+	}, nil
+}
+func (s *testKVStore) SetChannelConnections(string, []store.TeamConnection) error { return nil }
+func (s *testKVStore) DeleteChannelConnections(string) error                      { return nil }
+func (s *testKVStore) IsChannelInitialized(string) (bool, error)                  { return true, nil }
+func (s *testKVStore) AddChannelConnection(string, store.TeamConnection) error    { return nil }
+func (s *testKVStore) RemoveChannelConnection(string, store.TeamConnection) error { return nil }
+func (s *testKVStore) GetConnectionPrompt(string, string) (*store.ConnectionPrompt, error) {
+	return nil, nil
+}
+func (s *testKVStore) SetConnectionPrompt(string, string, *store.ConnectionPrompt) error {
+	return nil
+}
+func (s *testKVStore) DeleteConnectionPrompt(string, string) error { return nil }
+func (s *testKVStore) CreateConnectionPrompt(string, string, *store.ConnectionPrompt) (bool, error) {
+	return true, nil
+}
+func (s *testKVStore) GetChannelConnectionPrompt(string, string) (*store.ConnectionPrompt, error) {
+	return nil, nil
+}
+func (s *testKVStore) SetChannelConnectionPrompt(string, string, *store.ConnectionPrompt) error {
+	return nil
+}
+func (s *testKVStore) DeleteChannelConnectionPrompt(string, string) error { return nil }
+func (s *testKVStore) CreateChannelConnectionPrompt(string, string, *store.ConnectionPrompt) (bool, error) {
+	return true, nil
+}
+func (s *testKVStore) GetTeamRewriteIndex(string, string) (string, error) { return "", nil }
+func (s *testKVStore) SetTeamRewriteIndex(string, string, string) error   { return nil }
+func (s *testKVStore) DeleteTeamRewriteIndex(string, string) error        { return nil }
+func (s *testKVStore) GetConnectionRequest(string, string) (*store.ConnectionRequest, error) {
+	return nil, nil
+}
+func (s *testKVStore) CreateConnectionRequest(string, string, *store.ConnectionRequest) (bool, error) {
+	return true, nil
+}
+func (s *testKVStore) DeleteConnectionRequest(string, string) error { return nil }
+func (s *testKVStore) GetChannelConnectionRequest(string, string) (*store.ConnectionRequest, error) {
+	return nil, nil
+}
+func (s *testKVStore) CreateChannelConnectionRequest(string, string, *store.ConnectionRequest) (bool, error) {
+	return true, nil
+}
+func (s *testKVStore) UpdateChannelConnectionRequest(string, string, *store.ConnectionRequest) error {
+	return nil
+}
+func (s *testKVStore) DeleteChannelConnectionRequest(string, string) error { return nil }
+
+// setupTestPlugin builds a minimal Plugin instance backed by a testKVStore.
+// Used by tests that need to exercise plugin methods without going through
+// the harness.
+func setupTestPlugin(api *plugintest.API) (*Plugin, *testKVStore) {
+	p := &Plugin{}
+	p.SetAPI(api)
+	p.botUserID = "bot-user-id"
+	kvs := newTestKVStore()
+	p.kvstore = kvs
+	ctx, cancel := context.WithCancel(context.Background())
+	p.ctx = ctx
+	p.cancel = cancel
+	p.relaySem = make(chan struct{}, 50)
+	return p, kvs
+}
+
+// stubLogs registers permissive log expectations on the mock API. Useful in
+// tests where the production code logs at any level and the test does not
+// care about the specific calls.
+func stubLogs(api *plugintest.API) {
+	for _, m := range []string{"LogDebug", "LogInfo", "LogWarn", "LogError"} {
+		for n := 1; n <= 16; n++ {
+			args := make([]any, n)
+			for i := range args {
+				args[i] = mock.Anything
+			}
+			api.On(m, args...).Maybe()
+		}
+	}
+}
+
 // flexibleKVStore extends testKVStore with configurable function overrides.
 // When a function pointer is nil, it delegates to the embedded testKVStore.
 type flexibleKVStore struct {
@@ -83,7 +192,6 @@ type flexibleKVStore struct {
 	getTeamRewriteIndexFn            func(string, string) (string, error)
 	setTeamRewriteIndexFn            func(string, string, string) error
 	deleteTeamRewriteIndexFn         func(string, string) error
-	isDeletingFlagSetFn              func(string) (bool, error)
 	getConnectionRequestFn           func(string, string) (*store.ConnectionRequest, error)
 	createConnectionRequestFn        func(string, string, *store.ConnectionRequest) (bool, error)
 	deleteConnectionRequestFn        func(string, string) error
@@ -247,13 +355,6 @@ func (s *flexibleKVStore) DeleteTeamRewriteIndex(connName, remoteTeamName string
 	return s.testKVStore.DeleteTeamRewriteIndex(connName, remoteTeamName)
 }
 
-func (s *flexibleKVStore) IsDeletingFlagSet(postID string) (bool, error) {
-	if s.isDeletingFlagSetFn != nil {
-		return s.isDeletingFlagSetFn(postID)
-	}
-	return s.testKVStore.IsDeletingFlagSet(postID)
-}
-
 func (s *flexibleKVStore) GetConnectionRequest(teamID, connKey string) (*store.ConnectionRequest, error) {
 	if s.getConnectionRequestFn != nil {
 		return s.getConnectionRequestFn(teamID, connKey)
@@ -315,7 +416,6 @@ func setupTestPluginWithRouter(api *plugintest.API) (*Plugin, *flexibleKVStore) 
 	p.ctx = ctx
 	p.cancel = cancel
 	p.relaySem = make(chan struct{}, 50)
-	p.fileSem = make(chan struct{}, 32)
 	p.initAPI()
 	return p, kvs
 }

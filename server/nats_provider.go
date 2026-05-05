@@ -32,21 +32,23 @@ const (
 
 // natsProvider implements QueueProvider using NATS and JetStream Object Store.
 type natsProvider struct {
-	nc      *nats.Conn
-	sub     *nats.Subscription
-	subject string
-	api     plugin.API
+	nc         *nats.Conn
+	sub        *nats.Subscription
+	subject    string
+	queueGroup string
+	api        plugin.API
 }
 
-func newNATSProvider(cfg NATSProviderConfig, api plugin.API, direction string) (QueueProvider, error) {
+func newNATSProvider(cfg NATSProviderConfig, api plugin.API, direction, queueGroup string) (QueueProvider, error) {
 	nc, err := connectNATSPersistent(cfg, api, direction)
 	if err != nil {
 		return nil, err
 	}
 	return &natsProvider{
-		nc:      nc,
-		subject: cfg.Subject,
-		api:     api,
+		nc:         nc,
+		subject:    cfg.Subject,
+		queueGroup: queueGroup,
+		api:        api,
 	}, nil
 }
 
@@ -76,10 +78,17 @@ func (n *natsProvider) Publish(ctx context.Context, data []byte) error {
 }
 
 func (n *natsProvider) Subscribe(_ context.Context, handler func(data []byte) error) error {
-	sub, err := n.nc.Subscribe(n.subject, func(msg *nats.Msg) {
-		// NATS ignores the error return since delivery is fire-and-forget.
+	msgHandler := func(msg *nats.Msg) {
 		_ = handler(msg.Data)
-	})
+	}
+
+	var sub *nats.Subscription
+	var err error
+	if n.queueGroup != "" {
+		sub, err = n.nc.QueueSubscribe(n.subject, n.queueGroup, msgHandler)
+	} else {
+		sub, err = n.nc.Subscribe(n.subject, msgHandler)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to %s: %w", n.subject, err)
 	}

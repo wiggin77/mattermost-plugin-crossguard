@@ -51,7 +51,6 @@ type RedactedConnection struct {
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode,omitempty"`
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
-	MessageFormat       string `json:"message_format,omitempty"`
 	QueueName           string `json:"queue_name,omitempty"`
 	BlobContainerName   string `json:"blob_container_name,omitempty"`
 }
@@ -102,7 +101,6 @@ func resolveConnDetails(ck string, connMap map[string]ConnectionConfig) connDeta
 	}
 	if cc, ok := connMap[ck]; ok {
 		d.provider = cc.Provider
-		d.msgFmt = cc.MessageFormat
 		d.files = "Disabled"
 		if cc.FileTransferEnabled {
 			d.files = "Enabled"
@@ -114,9 +112,7 @@ func resolveConnDetails(ck string, connMap map[string]ConnectionConfig) connDeta
 	if d.provider == "" {
 		d.provider = "nats"
 	}
-	if d.msgFmt == "" {
-		d.msgFmt = "json"
-	}
+	d.msgFmt = "xml"
 	return d
 }
 
@@ -325,7 +321,6 @@ func (p *Plugin) getTeamStatus(teamID string, callingUser *model.User) (*TeamSta
 			FileTransferEnabled: cc.FileTransferEnabled,
 			FileFilterMode:      cc.FileFilterMode,
 			FileFilterTypes:     cc.FileFilterTypes,
-			MessageFormat:       cc.MessageFormat,
 		}
 		if checkPending && !isLinked {
 			req, reqErr := p.kvstore.GetConnectionRequest(teamID, key)
@@ -440,7 +435,6 @@ type ConnectionStatus struct {
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode,omitempty"`
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
-	MessageFormat       string `json:"message_format,omitempty"`
 	RequestPending      bool   `json:"request_pending,omitempty"`
 }
 
@@ -527,7 +521,6 @@ func (p *Plugin) getChannelStatus(channelID string, callingUser *model.User) (*C
 			FileTransferEnabled: cc.FileTransferEnabled,
 			FileFilterMode:      cc.FileFilterMode,
 			FileFilterTypes:     cc.FileFilterTypes,
-			MessageFormat:       cc.MessageFormat,
 		}
 		if checkChanPending && !isLinked {
 			req, reqErr := p.kvstore.GetChannelConnectionRequest(channelID, key)
@@ -616,6 +609,8 @@ func (p *Plugin) initChannelForCrossGuard(user *model.User, channelID string, co
 		return nil, false, &apiError{Message: "failed to save channel connection state", Status: 500}
 	}
 
+	p.shareChannelForRemote(channel, conn, user.Id)
+
 	p.publishChannelConnectionUpdate(channelID, updated)
 
 	freshChannel, appErr := p.API.GetChannel(channelID)
@@ -695,12 +690,26 @@ func (p *Plugin) teardownChannelForCrossGuard(user *model.User, channelID string
 		return nil, &apiError{Message: "failed to check channel connection state", Status: 500}
 	}
 
+	p.uninviteRemoteFromChannel(channelID, conn)
+
 	if len(updated) == 0 {
 		if delErr := p.kvstore.DeleteChannelConnections(channelID); delErr != nil {
 			p.API.LogError("Failed to delete channel connections",
 				"error_code", errcode.ServiceDeleteChanConnsFailed,
 				"channel_id", channelID, "error", delErr.Error())
 			return nil, &apiError{Message: "failed to remove channel connections", Status: 500}
+		}
+
+		// Only unshare when we had at least one remote registered for this
+		// channel. Without remoteIDs (e.g. plugin not yet activated, or no
+		// remotes configured) ShareChannel was never called, so UnshareChannel
+		// would be a no-op at best and fail at worst.
+		if len(p.remoteIDs) > 0 {
+			if _, appErr := p.API.UnshareChannel(channelID); appErr != nil {
+				p.API.LogWarn("Failed to unshare channel",
+					"error_code", errcode.ServiceUnshareFailed,
+					"channel_id", channelID, "error", appErr.Error())
+			}
 		}
 
 		freshChannel, fErr := p.API.GetChannel(channelID)
@@ -907,6 +916,52 @@ func redactConnections(outbound, inbound []ConnectionConfig) []RedactedConnectio
 	return connections
 }
 
+// shareChannelForRemote ensures the channel is registered as shared and the
+// remote for the linked connection is invited. Both steps are idempotent at
+// the server side. Errors are logged but do not block the link operation.
+func (p *Plugin) shareChannelForRemote(channel *model.Channel, conn store.TeamConnection, userID string) {
+	remoteID := p.remoteIDs[connKey(conn)]
+	if remoteID == "" {
+		return
+	}
+
+	if _, err := p.API.ShareChannel(&model.SharedChannel{
+		ChannelId:        channel.Id,
+		TeamId:           channel.TeamId,
+		Home:             true,
+		ShareName:        channel.Name,
+		ShareDisplayName: channel.DisplayName,
+		CreatorId:        userID,
+	}); err != nil {
+		p.API.LogDebug("ShareChannel returned error (may already be shared)",
+			"error_code", errcode.ServiceShareChannelFailed,
+			"channel_id", channel.Id, "error", err.Error())
+	}
+
+	if err := p.API.InviteRemoteToChannel(channel.Id, remoteID, userID, true); err != nil {
+		p.API.LogError("Failed to invite remote to channel",
+			"error_code", errcode.ServiceInviteRemoteFailed,
+			"channel_id", channel.Id, "remote_id", remoteID, "error", err.Error())
+	}
+}
+
+// uninviteRemoteFromChannel uninvites the remote associated with the given
+// connection from the channel. Errors are logged but do not block teardown.
+// Paired connections share a remoteID, so callers should ensure the other
+// direction is not still linked before invoking this; otherwise the second
+// teardown is a noop.
+func (p *Plugin) uninviteRemoteFromChannel(channelID string, conn store.TeamConnection) {
+	remoteID := p.remoteIDs[connKey(conn)]
+	if remoteID == "" {
+		return
+	}
+	if err := p.API.UninviteRemoteFromChannel(channelID, remoteID); err != nil {
+		p.API.LogWarn("Failed to uninvite remote from channel",
+			"error_code", errcode.ServiceUninviteRemoteFailed,
+			"channel_id", channelID, "remote_id", remoteID, "error", err.Error())
+	}
+}
+
 func redactConnection(conn ConnectionConfig, direction string) RedactedConnection {
 	rc := RedactedConnection{
 		Name:                conn.Name,
@@ -915,7 +970,6 @@ func redactConnection(conn ConnectionConfig, direction string) RedactedConnectio
 		FileTransferEnabled: conn.FileTransferEnabled,
 		FileFilterMode:      conn.FileFilterMode,
 		FileFilterTypes:     conn.FileFilterTypes,
-		MessageFormat:       conn.MessageFormat,
 	}
 	if conn.NATS != nil {
 		rc.Address = conn.NATS.Address

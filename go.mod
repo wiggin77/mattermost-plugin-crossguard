@@ -3,11 +3,11 @@ module github.com/MattermostFederal/mattermost-plugin-crossguard
 go 1.26.1
 
 require (
+	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue v1.0.1
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/mattermost/mattermost-plugin-ai v1.14.0
 	github.com/mattermost/mattermost/server/public v0.3.0
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
@@ -18,7 +18,6 @@ require (
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0 // indirect
 	github.com/Azure/go-amqp v1.4.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
@@ -31,7 +30,6 @@ require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -79,3 +77,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/mattermost/mattermost/server/public => /home/dlauder/Development/mattermost/mattermost/server/public

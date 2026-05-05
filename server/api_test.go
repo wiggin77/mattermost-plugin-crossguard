@@ -308,25 +308,6 @@ func TestHandleTestConnection(t *testing.T) {
 		assert.Contains(t, resp["error"], "queue_name is required")
 	})
 
-	t.Run("invalid message_format returns 400", func(t *testing.T) {
-		api := &plugintest.API{}
-		mockLog(api)
-		api.On("GetUser", "admin-id").Return(adminUser, nil)
-		p, _ := setupTestPluginWithRouter(api)
-
-		body := map[string]any{
-			"provider":       "nats",
-			"message_format": "yaml",
-			"nats":           map[string]any{"address": "nats://localhost:4222", "subject": "crossguard.test"},
-		}
-		r := makeAuthRequest(t, http.MethodPost, "/api/v1/test-connection", body, "admin-id")
-		w := httptest.NewRecorder()
-		p.ServeHTTP(nil, w, r)
-
-		require.Equal(t, http.StatusBadRequest, w.Code)
-		resp := decodeJSONResponse(t, w)
-		assert.Contains(t, resp["error"], "message_format")
-	})
 }
 
 // --------------------------------------------------------------------------
@@ -1349,8 +1330,7 @@ func TestHandleTestNATSOutbound(t *testing.T) {
 		defer nc.Close()
 
 		conn := ConnectionConfig{
-			NATS:          &NATSProviderConfig{Subject: "crossguard.test", Address: addr},
-			MessageFormat: "json",
+			NATS: &NATSProviderConfig{Subject: "crossguard.test", Address: addr},
 		}
 
 		w := httptest.NewRecorder()
@@ -1402,28 +1382,6 @@ func TestHandleTestNATSOutbound(t *testing.T) {
 		require.Equal(t, http.StatusBadGateway, w.Code)
 	})
 
-	t.Run("unsupported format returns build error", func(t *testing.T) {
-		api := &plugintest.API{}
-		mockLog(api)
-		p, _ := setupTestPluginWithRouter(api)
-
-		addr := startEmbeddedNATS(t)
-		nc, err := nats.Connect(addr)
-		require.NoError(t, err)
-		defer nc.Close()
-
-		conn := ConnectionConfig{
-			NATS:          &NATSProviderConfig{Subject: "crossguard.test", Address: addr},
-			MessageFormat: "bogus-format",
-		}
-
-		w := httptest.NewRecorder()
-		p.handleTestNATSOutbound(w, nc, conn)
-
-		require.Equal(t, http.StatusInternalServerError, w.Code)
-		resp := decodeJSONResponse(t, w)
-		assert.Contains(t, resp["error"], "failed to build test message")
-	})
 }
 
 // TestHandleTestNATSConnection_EndToEnd drives handleTestNATSConnection via the

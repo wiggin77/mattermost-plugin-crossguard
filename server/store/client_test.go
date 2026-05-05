@@ -505,94 +505,6 @@ func TestClient_IsChannelInitialized(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Post mapping
-// ---------------------------------------------------------------------------
-
-func TestClient_SetPostMapping(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "pm-high-remote123", marshalJSON(t, "local456"), kvSetOpts()).Return(true, nil)
-	kv := newTestClient(api)
-
-	err := kv.SetPostMapping("high", "remote123", "local456")
-	require.NoError(t, err)
-	api.AssertExpectations(t)
-}
-
-func TestClient_GetPostMapping_Exists(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVGet", "pm-high-remote123").Return(marshalJSON(t, "local456"), nil)
-	kv := newTestClient(api)
-
-	localID, err := kv.GetPostMapping("high", "remote123")
-	require.NoError(t, err)
-	assert.Equal(t, "local456", localID)
-}
-
-func TestClient_GetPostMapping_Empty(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVGet", "pm-high-remote123").Return(nil, nil)
-	kv := newTestClient(api)
-
-	localID, err := kv.GetPostMapping("high", "remote123")
-	require.NoError(t, err)
-	assert.Equal(t, "", localID)
-}
-
-func TestClient_DeletePostMapping(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "pm-high-remote123", []byte(nil), kvSetOpts()).Return(true, nil)
-	kv := newTestClient(api)
-
-	err := kv.DeletePostMapping("high", "remote123")
-	require.NoError(t, err)
-	api.AssertExpectations(t)
-}
-
-// ---------------------------------------------------------------------------
-// Deleting flag
-// ---------------------------------------------------------------------------
-
-func TestClient_SetDeletingFlag(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "crossguard-deleting-post1", marshalJSON(t, true), kvSetOpts()).Return(true, nil)
-	kv := newTestClient(api)
-
-	err := kv.SetDeletingFlag("post1")
-	require.NoError(t, err)
-	api.AssertExpectations(t)
-}
-
-func TestClient_IsDeletingFlagSet_True(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVGet", "crossguard-deleting-post1").Return(marshalJSON(t, true), nil)
-	kv := newTestClient(api)
-
-	set, err := kv.IsDeletingFlagSet("post1")
-	require.NoError(t, err)
-	assert.True(t, set)
-}
-
-func TestClient_IsDeletingFlagSet_False(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVGet", "crossguard-deleting-post1").Return(nil, nil)
-	kv := newTestClient(api)
-
-	set, err := kv.IsDeletingFlagSet("post1")
-	require.NoError(t, err)
-	assert.False(t, set)
-}
-
-func TestClient_ClearDeletingFlag(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "crossguard-deleting-post1", []byte(nil), kvSetOpts()).Return(true, nil)
-	kv := newTestClient(api)
-
-	err := kv.ClearDeletingFlag("post1")
-	require.NoError(t, err)
-	api.AssertExpectations(t)
-}
-
-// ---------------------------------------------------------------------------
 // Connection prompts (team level)
 // ---------------------------------------------------------------------------
 
@@ -866,28 +778,6 @@ func TestClient_DeleteChannelConnections_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to delete channel connections")
 }
 
-func TestClient_DeletePostMapping_Error(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "pm-conn1-remote1", []byte(nil), kvSetOpts()).
-		Return(false, &model.AppError{Message: "del fail"})
-	kv := newTestClient(api)
-
-	err := kv.DeletePostMapping("conn1", "remote1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to delete post mapping")
-}
-
-func TestClient_ClearDeletingFlag_Error(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", "crossguard-deleting-post1", []byte(nil), kvSetOpts()).
-		Return(false, &model.AppError{Message: "del fail"})
-	kv := newTestClient(api)
-
-	err := kv.ClearDeletingFlag("post1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to clear deleting flag")
-}
-
 func TestClient_DeleteConnectionPrompt_Error(t *testing.T) {
 	api := &plugintest.API{}
 	api.On("KVSetWithOptions", "test-plugin-connprompt-team1-conn1", []byte(nil), kvSetOpts()).
@@ -934,28 +824,6 @@ func TestClient_SetChannelConnections_Error(t *testing.T) {
 	err := kv.SetChannelConnections("ch1", []TeamConnection{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to set channel connections")
-}
-
-func TestClient_SetPostMapping_Error(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).
-		Return(false, &model.AppError{Message: "write fail"})
-	kv := newTestClient(api)
-
-	err := kv.SetPostMapping("conn1", "remote1", "local1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to set post mapping")
-}
-
-func TestClient_SetDeletingFlag_Error(t *testing.T) {
-	api := &plugintest.API{}
-	api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).
-		Return(false, &model.AppError{Message: "write fail"})
-	kv := newTestClient(api)
-
-	err := kv.SetDeletingFlag("post1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to set deleting flag")
 }
 
 func TestClient_SetConnectionPrompt_Error(t *testing.T) {

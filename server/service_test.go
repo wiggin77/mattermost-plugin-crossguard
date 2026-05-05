@@ -141,7 +141,6 @@ func TestBuildRequestDMMessage(t *testing.T) {
 			"outbound:high": {
 				Name:                "high",
 				Provider:            "nats",
-				MessageFormat:       "xml",
 				FileTransferEnabled: true,
 				FileFilterMode:      "allow",
 				FileFilterTypes:     ".pdf,.docx",
@@ -165,7 +164,7 @@ func TestBuildRequestDMMessage(t *testing.T) {
 		out := buildRequestDMMessage("@bob", "[**T**](/t/channels/town-square)", "inbound:low", m, "")
 		assert.Contains(t, out, "| **Direction** | inbound |")
 		assert.Contains(t, out, "| **Provider** | nats |")
-		assert.Contains(t, out, "| **Message format** | json |")
+		assert.Contains(t, out, "| **Message format** | xml |")
 		assert.Contains(t, out, "| **File transfer** | Disabled |")
 	})
 
@@ -307,7 +306,6 @@ func TestRedactConnections(t *testing.T) {
 				FileTransferEnabled: true,
 				FileFilterMode:      "allow",
 				FileFilterTypes:     ".pdf",
-				MessageFormat:       "json",
 				NATS: &NATSProviderConfig{
 					Address:  "nats://localhost:4222",
 					Subject:  "crossguard.high",
@@ -343,7 +341,6 @@ func TestRedactConnections(t *testing.T) {
 		assert.True(t, result[0].FileTransferEnabled)
 		assert.Equal(t, "allow", result[0].FileFilterMode)
 		assert.Equal(t, ".pdf", result[0].FileFilterTypes)
-		assert.Equal(t, "json", result[0].MessageFormat)
 
 		// Inbound
 		assert.Equal(t, "low", result[1].Name)
@@ -381,7 +378,6 @@ func TestRedactConnections(t *testing.T) {
 				Name:                "sb-conn",
 				Provider:            ProviderAzureServiceBus,
 				FileTransferEnabled: true,
-				MessageFormat:       "json",
 				AzureServiceBus: &AzureServiceBusProviderConfig{
 					ConnectionString:  "Endpoint=sb://foo.servicebus.windows.net/;SharedAccessKey=super-secret-abc123",
 					QueueName:         "sb-queue",
@@ -420,15 +416,13 @@ func TestRedactConnections(t *testing.T) {
 	t.Run("preserves safe fields without NATS or Azure config", func(t *testing.T) {
 		outbound := []ConnectionConfig{
 			{
-				Name:          "plain",
-				Provider:      ProviderNATS,
-				MessageFormat: "xml",
+				Name:     "plain",
+				Provider: ProviderNATS,
 			},
 		}
 		result := redactConnections(outbound, nil)
 		require.Len(t, result, 1)
 		assert.Equal(t, "plain", result[0].Name)
-		assert.Equal(t, "xml", result[0].MessageFormat)
 		assert.Empty(t, result[0].Address)
 		assert.Empty(t, result[0].QueueName)
 	})

@@ -55,6 +55,9 @@ const (
 	// AzureBlobProviderConfig.BlobLockMaxAgeSeconds.
 	blobLockMaxAge = 5 * time.Minute
 
+	// defaultAzureBlobFlushIntervalSec is the default WAL flush interval.
+	defaultAzureBlobFlushIntervalSec = 60
+
 	// blobLockMaxAgeCap is the hard upper bound for the configurable
 	// BlobLockMaxAgeSeconds to prevent time.Duration overflow and sanity-cap
 	// operator mistakes.
@@ -69,6 +72,13 @@ const (
 	// whose delete has not yet been confirmed. Prevents duplicate delivery on
 	// DeleteBlob failure (next acquirer skips the handler and retries delete).
 	blobProcessedKeyPrefix = "blob-processed-"
+)
+
+// azureBlobBatchPollInterval is the poll interval for the azure-blob batch
+// provider. Declared as var (not const) so tests can override it.
+var azureBlobBatchPollInterval = 30 * time.Second
+
+const (
 
 	// blobProcessedMarkerTTLSeconds is the TTL of the processed marker. It
 	// must outlive the longest plausible DeleteBlob retry window.

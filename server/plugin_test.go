@@ -17,15 +17,21 @@ import (
 )
 
 func TestOnDeactivate_NilCancel(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("UnregisterPluginForSharedChannels", mock.Anything).Return(nil).Maybe()
 	p := &Plugin{}
+	p.SetAPI(api)
 	// cancel is nil, should not panic
 	err := p.OnDeactivate()
 	assert.NoError(t, err)
 }
 
 func TestOnDeactivate_CancelsContext(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("UnregisterPluginForSharedChannels", mock.Anything).Return(nil).Maybe()
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{}
+	p.SetAPI(api)
 	p.ctx = ctx
 	p.cancel = cancel
 
@@ -69,12 +75,14 @@ func TestOnPluginClusterEvent_NonCachingStore(t *testing.T) {
 }
 
 func TestOnDeactivate_WithConnections(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("UnregisterPluginForSharedChannels", mock.Anything).Return(nil).Maybe()
 	p := &Plugin{}
+	p.SetAPI(api)
 	ctx, cancel := context.WithCancel(context.Background())
 	p.ctx = ctx
 	p.cancel = cancel
 	p.relaySem = make(chan struct{}, 50)
-	p.fileSem = make(chan struct{}, 32)
 
 	outboundClosed := false
 	inboundClosed := false
@@ -220,6 +228,12 @@ func TestOnActivate(t *testing.T) {
 		api.On("SetProfileImage", botID, mock.Anything).Return((*model.AppError)(nil))
 		api.On("RegisterPluginForClusterEvents").Return((*model.AppError)(nil)).Maybe()
 		api.On("RegisterCommand", mock.Anything).Return(nil)
+		api.On("UnregisterPluginForSharedChannels", mock.Anything).Return(nil).Maybe()
+
+		// Upgrade migration KV calls.
+		api.On("KVGet", mock.Anything).Return(nil, (*model.AppError)(nil)).Maybe()
+		api.On("KVList", mock.Anything, mock.Anything).Return([]string{}, (*model.AppError)(nil)).Maybe()
+		api.On("KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything).Return(true, (*model.AppError)(nil)).Maybe()
 
 		p := &Plugin{}
 		p.SetAPI(api)

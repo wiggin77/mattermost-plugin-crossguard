@@ -64,16 +64,16 @@ func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string)
 	return certPath, keyPath
 }
 
-func TestIsOutboundLinked(t *testing.T) {
+func TestHasInboundConnection(t *testing.T) {
 	tests := []struct {
-		name         string
-		outboundName string
-		connNames    []store.TeamConnection
-		expected     bool
+		name        string
+		inboundName string
+		connNames   []store.TeamConnection
+		expected    bool
 	}{
 		{
-			name:         "linked outbound connection",
-			outboundName: "high",
+			name:        "linked inbound connection",
+			inboundName: "high",
 			connNames: []store.TeamConnection{
 				{Direction: "outbound", Connection: "high"},
 				{Direction: "inbound", Connection: "high"},
@@ -81,8 +81,8 @@ func TestIsOutboundLinked(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:         "not linked outbound connection",
-			outboundName: "other",
+			name:        "not linked inbound connection",
+			inboundName: "other",
 			connNames: []store.TeamConnection{
 				{Direction: "outbound", Connection: "high"},
 				{Direction: "inbound", Connection: "high"},
@@ -90,32 +90,24 @@ func TestIsOutboundLinked(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:         "inbound name does not match outbound check",
-			outboundName: "high",
-			connNames: []store.TeamConnection{
-				{Direction: "inbound", Connection: "high"},
-			},
-			expected: false,
-		},
-		{
-			name:         "empty connection list",
-			outboundName: "high",
-			connNames:    nil,
-			expected:     false,
-		},
-		{
-			name:         "partial name match does not count",
-			outboundName: "hig",
+			name:        "outbound name does not match inbound check",
+			inboundName: "high",
 			connNames: []store.TeamConnection{
 				{Direction: "outbound", Connection: "high"},
 			},
 			expected: false,
+		},
+		{
+			name:        "empty connection list",
+			inboundName: "high",
+			connNames:   nil,
+			expected:    false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := isOutboundLinked(tc.outboundName, tc.connNames)
+			result := hasInboundConnection(tc.connNames, tc.inboundName)
 			assert.Equal(t, tc.expected, result)
 		})
 	}
@@ -413,7 +405,7 @@ func TestNewNATSProvider_Success(t *testing.T) {
 		Subject: "crossguard.test",
 	}
 
-	provider, err := newNATSProvider(cfg, api, "Outbound")
+	provider, err := newNATSProvider(cfg, api, "Outbound", "test-queue")
 	require.NoError(t, err)
 	require.NotNil(t, provider)
 	defer func() { _ = provider.Close() }()
@@ -422,6 +414,7 @@ func TestNewNATSProvider_Success(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, np.IsConnected())
 	assert.Equal(t, "crossguard.test", np.subject)
+	assert.Equal(t, "test-queue", np.queueGroup)
 }
 
 func TestNewNATSProvider_InvalidAddress(t *testing.T) {
@@ -433,7 +426,7 @@ func TestNewNATSProvider_InvalidAddress(t *testing.T) {
 		Subject: "crossguard.bad",
 	}
 
-	provider, err := newNATSProvider(cfg, api, "Outbound")
+	provider, err := newNATSProvider(cfg, api, "Outbound", "")
 	assert.Error(t, err)
 	assert.Nil(t, provider)
 }

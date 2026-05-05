@@ -4,7 +4,7 @@
     "description": "Cross Guard plugin for Mattermost Federal.",
     "homepage_url": "https://github.com/MattermostFederal/mattermost-plugin-crossguard",
     "support_url": "https://github.com/MattermostFederal/mattermost-plugin-crossguard/issues",
-    "min_server_version": "6.2.1",
+    "min_server_version": "11.7.0",
     "server": {
         "executables": {
             "linux-amd64": "server/dist/plugin-linux-amd64",

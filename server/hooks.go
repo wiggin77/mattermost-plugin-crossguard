@@ -1,211 +1,140 @@
 package main
 
 import (
+	"fmt"
+
 	mmModel "github.com/mattermost/mattermost/server/public/model"
-	"github.com/mattermost/mattermost/server/public/plugin"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
-	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/model"
-	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/store"
 )
 
-// isChannelRelayEnabled checks if a channel's relay is active and returns
-// the channel, team, and the team's linked connection names.
-func (p *Plugin) isChannelRelayEnabled(channelID string) (*mmModel.Channel, *mmModel.Team, []store.TeamConnection) {
-	channelConns, err := p.kvstore.GetChannelConnections(channelID)
-	if err != nil {
-		p.API.LogError("Failed to check channel connections",
-			"error_code", errcode.HooksChannelConnCheckFailed,
-			"channel_id", channelID, "error", err.Error())
-		return nil, nil, nil
+// OnSharedChannelsSyncMsg receives content changes from the server's Shared
+// Channels Service and forwards them to the matching outbound provider as an
+// XML TransportEnvelope.
+//
+// rc identifies which remote triggered this sync. Each outbound connection
+// is registered with a distinct SiteURL and therefore a distinct remoteID,
+// so this hook fires once per remote per batch. Returning a non-nil error
+// keeps the server's per-remote cursor in place so the batch is retried;
+// the SyncMsg payload is idempotent on the receiving side.
+func (p *Plugin) OnSharedChannelsSyncMsg(
+	msg *mmModel.SyncMsg,
+	rc *mmModel.RemoteCluster,
+) (mmModel.SyncResponse, error) {
+	if msg == nil {
+		return mmModel.SyncResponse{}, nil
 	}
-	if len(channelConns) == 0 {
-		return nil, nil, nil
+	if rc == nil {
+		return mmModel.SyncResponse{}, nil
 	}
 
-	channel, appErr := p.API.GetChannel(channelID)
+	connName := p.connNameForRemote(rc.RemoteId)
+	if connName == "" {
+		p.API.LogWarn("No connection found for remote",
+			"error_code", errcode.OutboundSyncMsgNoRemoteMatch,
+			"remote_id", rc.RemoteId)
+		return mmModel.SyncResponse{}, nil
+	}
+
+	// Inbound-only connections register a remote (so ReceiveSharedChannelSyncMsg
+	// has a valid remoteID) but do not have an outbound provider. Acknowledge
+	// the sync message so the cursor advances; do not attempt to publish.
+	if !p.hasOutboundProvider(connName) {
+		return buildSyncResponse(msg), nil
+	}
+
+	channel, appErr := p.API.GetChannel(msg.ChannelId)
 	if appErr != nil {
-		p.API.LogError("Failed to get channel for relay",
-			"error_code", errcode.HooksGetChannelFailed,
-			"channel_id", channelID, "error", appErr.Error())
-		return nil, nil, nil
-	}
-
-	teamConns, err := p.kvstore.GetTeamConnections(channel.TeamId)
-	if err != nil {
-		p.API.LogError("Failed to check team connections",
-			"error_code", errcode.HooksTeamConnCheckFailed,
-			"team_id", channel.TeamId, "error", err.Error())
-		return nil, nil, nil
-	}
-	if len(teamConns) == 0 {
-		return nil, nil, nil
+		p.API.LogError("Failed to get channel for outbound sync",
+			"error_code", errcode.OutboundSyncMsgChannelLookupFailed,
+			"channel_id", msg.ChannelId, "error", appErr.Error())
+		return mmModel.SyncResponse{}, fmt.Errorf("channel lookup failed: %s", appErr.Error())
 	}
 
 	team, appErr := p.API.GetTeam(channel.TeamId)
 	if appErr != nil {
-		p.API.LogError("Failed to get team for relay",
-			"error_code", errcode.HooksGetTeamFailed,
-			"team_id", channel.TeamId, "error", appErr.Error())
-		return nil, nil, nil
+		return mmModel.SyncResponse{}, fmt.Errorf("team lookup failed: %s", appErr.Error())
 	}
 
-	return channel, team, channelConns
+	env := &TransportEnvelope{
+		Version:     1,
+		Type:        TransportTypeSyncMsg,
+		ConnName:    connName,
+		TeamName:    team.Name,
+		ChannelName: channel.Name,
+		SyncMsg:     msg,
+	}
+
+	if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
+		p.API.LogError("Failed to publish outbound sync envelope",
+			"error_code", errcode.OutboundSyncMsgPublishFailed,
+			"conn_name", connName, "channel_id", msg.ChannelId, "error", err.Error())
+		return mmModel.SyncResponse{}, fmt.Errorf("publish failed for %s: %w", connName, err)
+	}
+
+	return buildSyncResponse(msg), nil
 }
 
-func (p *Plugin) relayToOutbound(env *model.Envelope, connNames []store.TeamConnection, logContext string) {
-	select {
-	case p.relaySem <- struct{}{}:
-	default:
-		p.API.LogWarn("Relay semaphore full, dropping event",
-			"error_code", errcode.HooksRelaySemaphoreFull,
-			"context", logContext)
-		return
+// OnSharedChannelsAttachmentSyncMsg is a stub. File attachment sync is a
+// follow-up plan; here we acknowledge the call so the server advances its
+// cursor and does not retry indefinitely.
+func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(
+	fi *mmModel.FileInfo,
+	post *mmModel.Post,
+	_ *mmModel.RemoteCluster,
+) error {
+	fileID, postID := "", ""
+	if fi != nil {
+		fileID = fi.Id
 	}
-
-	p.wg.Go(func() {
-		defer func() { <-p.relaySem }()
-		p.publishToOutbound(p.ctx, env, connNames)
-	})
+	if post != nil {
+		postID = post.Id
+	}
+	p.API.LogDebug("Outbound attachment sync not yet implemented",
+		"error_code", errcode.OutboundAttachmentStubbed,
+		"file_id", fileID, "post_id", postID)
+	return nil
 }
 
-func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *mmModel.Post) {
-	if post.IsSystemMessage() || post.UserId == p.botUserID || post.GetProp("crossguard_relayed") != nil {
-		return
+// OnSharedChannelsProfileImageSyncMsg is a stub. Profile image sync is a
+// follow-up plan.
+func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(
+	user *mmModel.User,
+	_ *mmModel.RemoteCluster,
+) error {
+	userID := ""
+	if user != nil {
+		userID = user.Id
 	}
-
-	channel, team, connNames := p.isChannelRelayEnabled(post.ChannelId)
-	if connNames == nil {
-		return
-	}
-
-	user, appErr := p.API.GetUser(post.UserId)
-	if appErr != nil {
-		p.API.LogError("Failed to get user for relay",
-			"error_code", errcode.HooksGetUserForPostFailed,
-			"user_id", post.UserId, "error", appErr.Error())
-		return
-	}
-
-	env := buildPostEnvelope(model.MessageTypePost, post, channel, team.Name, user.Username)
-	p.relayToOutbound(env, connNames, "post:"+post.Id)
-
-	if len(post.FileIds) > 0 {
-		p.uploadPostFiles(post, connNames)
-	}
+	p.API.LogDebug("Outbound profile image sync not yet implemented",
+		"error_code", errcode.OutboundProfileImageStubbed,
+		"user_id", userID)
+	return nil
 }
 
-func (p *Plugin) MessageHasBeenUpdated(_ *plugin.Context, newPost *mmModel.Post, _ *mmModel.Post) {
-	if newPost.IsSystemMessage() || newPost.UserId == p.botUserID || newPost.GetProp("crossguard_relayed") != nil {
-		return
+// OnSharedChannelsPing reports the health of the remote's outbound provider.
+// Returning false would cause the server to mark the remote as offline and
+// stop sync delivery, so inbound-only connections (which have no outbound
+// provider to check) report healthy.
+func (p *Plugin) OnSharedChannelsPing(rc *mmModel.RemoteCluster) bool {
+	if rc == nil {
+		return false
+	}
+	connName := p.connNameForRemote(rc.RemoteId)
+	if connName == "" {
+		return false
 	}
 
-	channel, team, connNames := p.isChannelRelayEnabled(newPost.ChannelId)
-	if connNames == nil {
-		return
+	if !p.hasOutboundProvider(connName) {
+		return true
 	}
 
-	user, appErr := p.API.GetUser(newPost.UserId)
-	if appErr != nil {
-		p.API.LogError("Failed to get user for relay",
-			"error_code", errcode.HooksGetUserForUpdateFailed,
-			"user_id", newPost.UserId, "error", appErr.Error())
-		return
+	p.outboundMu.RLock()
+	defer p.outboundMu.RUnlock()
+	for _, oc := range p.outboundConns {
+		if oc.name == connName {
+			return oc.healthy
+		}
 	}
-
-	env := buildPostEnvelope(model.MessageTypeUpdate, newPost, channel, team.Name, user.Username)
-	p.relayToOutbound(env, connNames, "update:"+newPost.Id)
-}
-
-func (p *Plugin) MessageHasBeenDeleted(_ *plugin.Context, post *mmModel.Post) {
-	if post.UserId == p.botUserID {
-		return
-	}
-
-	isDeletingFlag, err := p.kvstore.IsDeletingFlagSet(post.Id)
-	if err != nil {
-		p.API.LogError("Failed to check delete flag, skipping relay to avoid loop",
-			"error_code", errcode.HooksDeleteFlagCheckFailed,
-			"post_id", post.Id, "error", err.Error())
-		return
-	}
-	if isDeletingFlag {
-		return
-	}
-
-	channel, team, connNames := p.isChannelRelayEnabled(post.ChannelId)
-	if connNames == nil {
-		return
-	}
-
-	env := buildDeleteEnvelope(post, channel, team.Name)
-	p.relayToOutbound(env, connNames, "delete:"+post.Id)
-}
-
-func (p *Plugin) ReactionHasBeenAdded(_ *plugin.Context, reaction *mmModel.Reaction) {
-	post, appErr := p.API.GetPost(reaction.PostId)
-	if appErr != nil {
-		p.API.LogError("Failed to get post for reaction relay",
-			"error_code", errcode.HooksGetPostForReactAddFailed,
-			"post_id", reaction.PostId, "error", appErr.Error())
-		return
-	}
-
-	if post.IsSystemMessage() || post.UserId == p.botUserID {
-		return
-	}
-
-	user, appErr := p.API.GetUser(reaction.UserId)
-	if appErr != nil {
-		p.API.LogError("Failed to get user for reaction relay",
-			"error_code", errcode.HooksGetUserForReactAddFailed,
-			"user_id", reaction.UserId, "error", appErr.Error())
-		return
-	}
-
-	if user.Position == "crossguard-sync" {
-		return
-	}
-
-	channel, team, connNames := p.isChannelRelayEnabled(post.ChannelId)
-	if connNames == nil {
-		return
-	}
-
-	env := buildReactionEnvelope(model.MessageTypeReactionAdd, reaction, channel, team.Name, user.Username)
-	p.relayToOutbound(env, connNames, "reaction_add:"+reaction.PostId)
-}
-
-func (p *Plugin) ReactionHasBeenRemoved(_ *plugin.Context, reaction *mmModel.Reaction) {
-	post, appErr := p.API.GetPost(reaction.PostId)
-	if appErr != nil {
-		p.API.LogError("Failed to get post for reaction relay",
-			"error_code", errcode.HooksGetPostForReactRemFailed,
-			"post_id", reaction.PostId, "error", appErr.Error())
-		return
-	}
-
-	if post.IsSystemMessage() || post.UserId == p.botUserID {
-		return
-	}
-
-	user, appErr := p.API.GetUser(reaction.UserId)
-	if appErr != nil {
-		p.API.LogError("Failed to get user for reaction relay",
-			"error_code", errcode.HooksGetUserForReactRemFailed,
-			"user_id", reaction.UserId, "error", appErr.Error())
-		return
-	}
-
-	if user.Position == "crossguard-sync" {
-		return
-	}
-
-	channel, team, connNames := p.isChannelRelayEnabled(post.ChannelId)
-	if connNames == nil {
-		return
-	}
-
-	env := buildReactionEnvelope(model.MessageTypeReactionRemove, reaction, channel, team.Name, user.Username)
-	p.relayToOutbound(env, connNames, "reaction_remove:"+reaction.PostId)
+	return false
 }
