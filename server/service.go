@@ -893,10 +893,13 @@ func (p *Plugin) getConnectionMap() map[string]ConnectionConfig {
 	return m
 }
 
-// resolveConnectionName resolves the connection name from the given name and available list.
-// If connName is empty and there is exactly one connection, it auto-selects it.
-// Returns (resolved connection, available list, error message). A non-empty error message
-// means the caller should report it to the user.
+// resolveConnectionName resolves the connection name from the given name and
+// available list. If connName is empty and there is exactly one connection,
+// it auto-selects it. The user-supplied name may be a full key
+// ("outbound:high") or just the bare connection name ("high"); the bare form
+// resolves only when unambiguous (exactly one matching direction).
+// Returns (resolved connection, available list, error message). A non-empty
+// error message means the caller should report it to the user.
 func (p *Plugin) resolveConnectionName(connName string, available []store.TeamConnection) (store.TeamConnection, []store.TeamConnection, string) {
 	if len(available) == 0 {
 		return store.TeamConnection{}, nil, "no connections configured"
@@ -915,7 +918,23 @@ func (p *Plugin) resolveConnectionName(connName string, available []store.TeamCo
 		}
 	}
 
-	return store.TeamConnection{}, available, fmt.Sprintf("connection not found: %s", connName)
+	// Fall back to a bare-name match. Accept it when exactly one entry has
+	// this Connection name; ambiguous bare names report a clear error so
+	// the user picks the direction explicitly.
+	var matches []store.TeamConnection
+	for _, tc := range available {
+		if tc.Connection == connName {
+			matches = append(matches, tc)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], available, ""
+	case 0:
+		return store.TeamConnection{}, available, fmt.Sprintf("connection not found: %s", connName)
+	default:
+		return store.TeamConnection{}, available, fmt.Sprintf("connection name %q is ambiguous, specify direction (e.g. %s)", connName, connKey(matches[0]))
+	}
 }
 
 // redactConnections strips sensitive fields from connections for the status response.

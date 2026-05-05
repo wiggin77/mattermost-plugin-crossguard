@@ -2545,3 +2545,165 @@ func TestHandleTestAzureServiceBusConnection(t *testing.T) {
 		assert.Equal(t, "ok", decodeJSONResponse(t, w)["status"])
 	})
 }
+
+// --------------------------------------------------------------------------
+// handleAutocompleteConnections tests
+// --------------------------------------------------------------------------
+
+func TestHandleAutocompleteConnections(t *testing.T) {
+	teamID := mmModel.NewId()
+	chanID := mmModel.NewId()
+	adminUser := &mmModel.User{Id: "admin-id", Roles: mmModel.SystemAdminRoleId}
+	regularUser := &mmModel.User{Id: "user-id", Roles: ""}
+
+	doRequest := func(t *testing.T, p *Plugin, action, qs, userID string) *httptest.ResponseRecorder {
+		t.Helper()
+		path := "/api/v1/autocomplete/connections/" + action + "?" + qs
+		r := makeAuthRequest(t, http.MethodGet, path, nil, userID)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(nil, w, r)
+		return w
+	}
+
+	decodeList := func(t *testing.T, w *httptest.ResponseRecorder) []mmModel.AutocompleteListItem {
+		t.Helper()
+		var items []mmModel.AutocompleteListItem
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &items))
+		return items
+	}
+
+	t.Run("unauthenticated returns empty list (200)", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		p, _ := setupTestPluginWithRouter(api)
+
+		w := doRequest(t, p, actionInitTeam, "team_id="+teamID, "")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+
+	t.Run("unknown action returns empty list", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+
+		w := doRequest(t, p, "bogus", "team_id="+teamID, "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+
+	t.Run("init-team returns all configured connections to system admin", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			OutboundConnections: `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+			InboundConnections:  `[{"name":"low","nats":{"address":"nats://localhost:4222","subject":"crossguard.low"}}]`,
+		}
+
+		w := doRequest(t, p, actionInitTeam, "team_id="+teamID, "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+
+		items := decodeList(t, w)
+		require.Len(t, items, 2)
+		seen := map[string]bool{items[0].Item: true, items[1].Item: true}
+		assert.True(t, seen["outbound:high"])
+		assert.True(t, seen["inbound:low"])
+	})
+
+	t.Run("init-team without team_id returns empty", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+
+		w := doRequest(t, p, actionInitTeam, "", "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+
+	t.Run("non-admin gets empty list for init-team (no info leak)", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "user-id").Return(regularUser, nil)
+		api.On("GetTeamMember", teamID, "user-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		p, _ := setupTestPluginWithRouter(api)
+		p.configuration = &configuration{
+			OutboundConnections: `[{"name":"high","nats":{"address":"nats://localhost:4222","subject":"crossguard.high"}}]`,
+		}
+
+		w := doRequest(t, p, actionInitTeam, "team_id="+teamID, "user-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+
+	t.Run("teardown-channel returns linked connections to channel admin", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		// isChannelAdminOrHigher consults GetChannelMember even for system
+		// admins; SchemeAdmin=true makes it return true at that point.
+		api.On("GetChannelMember", chanID, "admin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+		p, kvs := setupTestPluginWithRouter(api)
+		linked := []store.TeamConnection{
+			{Direction: "outbound", Connection: "high"},
+		}
+		kvs.getChannelConnectionsFn = func(id string) ([]store.TeamConnection, error) {
+			assert.Equal(t, chanID, id)
+			return linked, nil
+		}
+
+		w := doRequest(t, p, actionTeardownChannel, "team_id="+teamID+"&channel_id="+chanID, "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		items := decodeList(t, w)
+		require.Len(t, items, 1)
+		assert.Equal(t, "outbound:high", items[0].Item)
+	})
+
+	t.Run("init-channel returns team connections to team admin", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		api.On("GetChannelMember", chanID, "admin-id").Return(&mmModel.ChannelMember{SchemeAdmin: true}, nil)
+		p, kvs := setupTestPluginWithRouter(api)
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{{Direction: "outbound", Connection: "high"}}, nil
+		}
+
+		w := doRequest(t, p, actionInitChannel, "team_id="+teamID+"&channel_id="+chanID, "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		items := decodeList(t, w)
+		require.Len(t, items, 1)
+		assert.Equal(t, "outbound:high", items[0].Item)
+	})
+
+	t.Run("init-channel without channel_id returns empty", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "admin-id").Return(adminUser, nil)
+		p, _ := setupTestPluginWithRouter(api)
+
+		w := doRequest(t, p, actionInitChannel, "team_id="+teamID, "admin-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+
+	t.Run("non-admin gets empty list for teardown-channel", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLog(api)
+		api.On("GetUser", "user-id").Return(regularUser, nil)
+		api.On("GetChannelMember", chanID, "user-id").Return(&mmModel.ChannelMember{SchemeAdmin: false}, nil)
+		api.On("GetTeamMember", teamID, "user-id").Return(&mmModel.TeamMember{SchemeAdmin: false}, nil)
+		p, kvs := setupTestPluginWithRouter(api)
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			t.Fatal("kvstore should not be queried for unauthorized user")
+			return nil, nil
+		}
+
+		w := doRequest(t, p, actionTeardownChannel, "team_id="+teamID+"&channel_id="+chanID, "user-id")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, decodeList(t, w))
+	})
+}

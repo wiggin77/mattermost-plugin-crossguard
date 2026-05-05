@@ -59,6 +59,25 @@ func TestResolveConnectionName(t *testing.T) {
 		assert.Equal(t, store.TeamConnection{}, conn)
 		assert.Contains(t, errMsg, "no connections configured")
 	})
+
+	t.Run("bare name resolves when one direction matches", func(t *testing.T) {
+		conn, _, errMsg := p.resolveConnectionName("high", []store.TeamConnection{
+			{Direction: "outbound", Connection: "high"},
+			{Direction: "inbound", Connection: "low"},
+		})
+		assert.Empty(t, errMsg)
+		assert.Equal(t, "outbound:high", connKey(conn))
+	})
+
+	t.Run("bare name is ambiguous when both directions match", func(t *testing.T) {
+		conn, _, errMsg := p.resolveConnectionName("high", []store.TeamConnection{
+			{Direction: "outbound", Connection: "high"},
+			{Direction: "inbound", Connection: "high"},
+		})
+		assert.Equal(t, store.TeamConnection{}, conn)
+		assert.Contains(t, errMsg, "ambiguous")
+		assert.Contains(t, errMsg, "specify direction")
+	})
 }
 
 // mockLogCalls registers permissive log and WebSocket mocks on the API.

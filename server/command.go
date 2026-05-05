@@ -108,16 +108,24 @@ func (p *Plugin) registerCommand() error {
 func getAutocompleteData() *model.AutocompleteData {
 	cmd := model.NewAutocompleteData(commandTrigger, "[command]", "Cross Guard commands")
 
+	connectionURL := func(action string) string {
+		return "/plugins/" + manifest.Id + "/api/v1/autocomplete/connections/" + action
+	}
+
 	initTeam := model.NewAutocompleteData("init-team", "[connection-name]", "Link a connection to this team (requires team admin or system admin)")
+	initTeam.AddDynamicListArgument("Configured connections from System Console", connectionURL(actionInitTeam), false)
 	cmd.AddCommand(initTeam)
 
 	initChannel := model.NewAutocompleteData("init-channel", "[connection-name]", "Link a connection to this channel (requires channel admin or higher)")
+	initChannel.AddDynamicListArgument("Connections linked to this team", connectionURL(actionInitChannel), false)
 	cmd.AddCommand(initChannel)
 
 	teardownTeam := model.NewAutocompleteData("teardown-team", "[connection-name]", "Unlink a connection from this team (requires team admin or system admin)")
+	teardownTeam.AddDynamicListArgument("Connections linked to this team", connectionURL(actionTeardownTeam), false)
 	cmd.AddCommand(teardownTeam)
 
 	teardownChannel := model.NewAutocompleteData("teardown-channel", "[connection-name]", "Unlink a connection from this channel (requires channel admin or higher)")
+	teardownChannel.AddDynamicListArgument("Connections linked to this channel", connectionURL(actionTeardownChannel), false)
 	cmd.AddCommand(teardownChannel)
 
 	resetPrompt := model.NewAutocompleteData("reset-prompt", "<connection-name>", "Clear a blocked or pending connection prompt for this team")

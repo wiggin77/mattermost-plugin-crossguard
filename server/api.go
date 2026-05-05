@@ -48,6 +48,7 @@ func (p *Plugin) initAPI() {
 	router.HandleFunc("/api/v1/channels/connections", p.handleBulkChannelConnections).Methods(http.MethodGet)
 	router.HandleFunc("/api/v1/teams/{team_id}/rewrite", p.handleSetTeamRewrite).Methods(http.MethodPost)
 	router.HandleFunc("/api/v1/teams/{team_id}/rewrite", p.handleDeleteTeamRewrite).Methods(http.MethodDelete)
+	router.HandleFunc("/api/v1/autocomplete/connections/{action}", p.handleAutocompleteConnections).Methods(http.MethodGet)
 	p.router = router
 }
 
@@ -1052,4 +1053,96 @@ func (p *Plugin) handleDeleteTeamRewrite(w http.ResponseWriter, r *http.Request)
 		"team_id":    teamID,
 		"connection": connParam,
 	})
+}
+
+// handleAutocompleteConnections returns a list of connection names suitable
+// for slash command tab-completion. The action path segment selects which
+// list to return:
+//
+//	init-team        all configured connections
+//	init-channel     connections linked to the current team
+//	teardown-team    connections linked to the current team
+//	teardown-channel connections linked to the current channel
+//
+// The caller must have the same permission required to actually execute the
+// corresponding slash command (team admin / system admin for team actions;
+// channel admin or higher for channel actions, including the request-mode
+// fallbacks). When the caller is not authorized, an empty list is returned
+// rather than a 403 so the autocomplete UI does not surface a permission
+// error mid-typing. Mattermost passes channel_id, team_id, user_id, and
+// user_input as query parameters when invoking the dynamic-list URL.
+func (p *Plugin) handleAutocompleteConnections(w http.ResponseWriter, r *http.Request) {
+	emptyResponse := func() { writeJSON(w, http.StatusOK, []mmModel.AutocompleteListItem{}) }
+
+	userID := r.Header.Get("Mattermost-User-Id")
+	if userID == "" {
+		emptyResponse()
+		return
+	}
+
+	action := mux.Vars(r)["action"]
+	teamID := r.URL.Query().Get("team_id")
+	channelID := r.URL.Query().Get("channel_id")
+
+	var conns []store.TeamConnection
+	switch action {
+	case actionInitTeam:
+		if teamID == "" || !p.canSuggestTeamAction(userID, teamID) {
+			emptyResponse()
+			return
+		}
+		conns = p.getAllConnectionNames()
+	case actionTeardownTeam:
+		if teamID == "" || !p.canSuggestTeamAction(userID, teamID) {
+			emptyResponse()
+			return
+		}
+		conns, _ = p.kvstore.GetTeamConnections(teamID)
+	case actionInitChannel:
+		if teamID == "" || channelID == "" || !p.canSuggestChannelAction(userID, channelID, teamID) {
+			emptyResponse()
+			return
+		}
+		conns, _ = p.kvstore.GetTeamConnections(teamID)
+	case actionTeardownChannel:
+		if teamID == "" || channelID == "" || !p.canSuggestChannelAction(userID, channelID, teamID) {
+			emptyResponse()
+			return
+		}
+		conns, _ = p.kvstore.GetChannelConnections(channelID)
+	default:
+		emptyResponse()
+		return
+	}
+
+	items := make([]mmModel.AutocompleteListItem, 0, len(conns))
+	for _, tc := range conns {
+		items = append(items, mmModel.AutocompleteListItem{
+			Item:     connKey(tc),
+			HelpText: tc.Direction + " connection",
+		})
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// canSuggestTeamAction mirrors the permission gate used by executeInitTeam
+// and executeTeardownTeam so autocomplete only suggests connections to users
+// who can actually run the command.
+func (p *Plugin) canSuggestTeamAction(userID, teamID string) bool {
+	if p.isTeamAdminOrSystemAdmin(userID, teamID) {
+		return true
+	}
+	return p.isTeamAdminInRequestMode(userID, teamID)
+}
+
+// canSuggestChannelAction mirrors the permission gate used by
+// executeInitChannel and executeTeardownChannel.
+func (p *Plugin) canSuggestChannelAction(userID, channelID, teamID string) bool {
+	if p.isChannelAdminOrHigher(userID, channelID, teamID) {
+		return true
+	}
+	if p.canDirectlyManageChannelConns(userID, teamID) {
+		return true
+	}
+	return p.isChannelAdminInRequestMode(userID, channelID, teamID)
 }
