@@ -1145,6 +1145,53 @@ func TestInitChannelForCrossGuard(t *testing.T) {
 		require.NotNil(t, svcErr)
 		assert.Equal(t, 500, svcErr.Status)
 	})
+
+	t.Run("InviteRemoteToChannel failure rolls back the connection", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = defaultTestConfig()
+		p.remoteIDs = map[string]string{"outbound:high": "remote-1"}
+
+		channel := testChannel()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("ShareChannel", mock.AnythingOfType("*model.SharedChannel")).Return(
+			&model.SharedChannel{ChannelId: channel.Id}, nil,
+		)
+		api.On("InviteRemoteToChannel", "chan-id", "remote-1", testUser().Id, true).Return(
+			&model.AppError{Id: "api.command_share.service_disabled", Message: "Shared Channels Service is disabled."},
+		)
+
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+
+		chanCallCount := 0
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			chanCallCount++
+			if chanCallCount == 1 {
+				return []store.TeamConnection{}, nil
+			}
+			return []store.TeamConnection{conn}, nil
+		}
+		kvs.addChannelConnectionFn = func(string, store.TeamConnection) error { return nil }
+
+		rollbackCalled := false
+		kvs.removeChannelConnectionFn = func(channelID string, c store.TeamConnection) error {
+			rollbackCalled = true
+			assert.Equal(t, "chan-id", channelID)
+			assert.True(t, c.Matches(conn))
+			return nil
+		}
+
+		ch, alreadyLinked, svcErr := p.initChannelForCrossGuard(testUser(), "chan-id", conn)
+		assert.Nil(t, ch)
+		assert.False(t, alreadyLinked)
+		require.NotNil(t, svcErr)
+		assert.Equal(t, 500, svcErr.Status)
+		assert.Contains(t, svcErr.Message, "rolled back")
+		assert.True(t, rollbackCalled, "RemoveChannelConnection should have been called for rollback")
+	})
 }
 
 // -------------------------------------------------------------------

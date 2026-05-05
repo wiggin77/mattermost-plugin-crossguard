@@ -87,30 +87,31 @@ func (kv Client) AddTeamConnection(teamID string, conn TeamConnection) error {
 	})
 }
 
-// RemoveTeamConnection atomically removes a connection from a team's connection list.
-// It also cleans up the reverse index if the removed connection had a RemoteTeamName.
+// RemoveTeamConnection atomically removes every entry that matches conn from
+// a team's connection list. Removing all matches (rather than the first)
+// cleans up duplicate rows left behind by older plugin versions in a single
+// call. It also cleans up the reverse index if any removed entry had a
+// RemoteTeamName.
 func (kv Client) RemoveTeamConnection(teamID string, conn TeamConnection) error {
 	var removedConn *TeamConnection
 	err := kv.casModifyConnectionList(kv.teamInitPrefix+teamID, func(conns []TeamConnection) ([]TeamConnection, bool) {
-		idx := -1
-		for i, existing := range conns {
+		result := make([]TeamConnection, 0, len(conns))
+		found := false
+		for _, existing := range conns {
 			if existing.Matches(conn) {
-				idx = i
-				removedConn = &TeamConnection{
-					Direction:      existing.Direction,
-					Connection:     existing.Connection,
-					RemoteTeamName: existing.RemoteTeamName,
+				found = true
+				if removedConn == nil && existing.RemoteTeamName != "" {
+					removedConn = &TeamConnection{
+						Direction:      existing.Direction,
+						Connection:     existing.Connection,
+						RemoteTeamName: existing.RemoteTeamName,
+					}
 				}
-				break
+				continue
 			}
+			result = append(result, existing)
 		}
-		if idx < 0 {
-			return conns, false
-		}
-		result := make([]TeamConnection, 0, len(conns)-1)
-		result = append(result, conns[:idx]...)
-		result = append(result, conns[idx+1:]...)
-		return result, true
+		return result, found
 	})
 	if err != nil {
 		return err
@@ -209,23 +210,22 @@ func (kv Client) AddChannelConnection(channelID string, conn TeamConnection) err
 	})
 }
 
-// RemoveChannelConnection atomically removes a connection from a channel's connection list.
+// RemoveChannelConnection atomically removes every entry that matches conn
+// from a channel's connection list. Removing all matches (rather than the
+// first) cleans up duplicate rows left behind by older plugin versions in a
+// single call.
 func (kv Client) RemoveChannelConnection(channelID string, conn TeamConnection) error {
 	return kv.casModifyConnectionList(kv.channelInitPrefix+channelID, func(conns []TeamConnection) ([]TeamConnection, bool) {
-		idx := -1
-		for i, existing := range conns {
+		result := make([]TeamConnection, 0, len(conns))
+		found := false
+		for _, existing := range conns {
 			if existing.Matches(conn) {
-				idx = i
-				break
+				found = true
+				continue
 			}
+			result = append(result, existing)
 		}
-		if idx < 0 {
-			return conns, false
-		}
-		result := make([]TeamConnection, 0, len(conns)-1)
-		result = append(result, conns[:idx]...)
-		result = append(result, conns[idx+1:]...)
-		return result, true
+		return result, found
 	})
 }
 

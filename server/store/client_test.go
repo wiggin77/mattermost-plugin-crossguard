@@ -275,6 +275,29 @@ func TestClient_RemoveTeamConnection_CleansUpRewriteIndex(t *testing.T) {
 	api.AssertExpectations(t)
 }
 
+// Old plugin versions could write multiple rows with the same direction and
+// connection. Verify all of them are removed in a single call.
+func TestClient_RemoveTeamConnection_RemovesAllDuplicates(t *testing.T) {
+	api := &plugintest.API{}
+	conn := TeamConnection{Direction: "outbound", Connection: "high"}
+	existing := []TeamConnection{
+		{Direction: "inbound", Connection: "low"},
+		conn,
+		conn,
+		conn,
+	}
+
+	api.On("KVGet", "test-plugin-teaminit-team1").Return(marshalJSON(t, existing), nil).Once()
+	api.On("KVSetWithOptions", "test-plugin-teaminit-team1",
+		marshalJSON(t, []TeamConnection{{Direction: "inbound", Connection: "low"}}),
+		kvCASOpts(t, existing)).Return(true, nil).Once()
+
+	kv := newTestClient(api)
+	err := kv.RemoveTeamConnection("team1", conn)
+	require.NoError(t, err)
+	api.AssertExpectations(t)
+}
+
 // ---------------------------------------------------------------------------
 // Initialized team IDs (CAS string list)
 // ---------------------------------------------------------------------------
@@ -471,6 +494,29 @@ func TestClient_RemoveChannelConnection_NotFound(t *testing.T) {
 	err := kv.RemoveChannelConnection("ch1", TeamConnection{Direction: "inbound", Connection: "low"})
 	require.NoError(t, err)
 	api.AssertNotCalled(t, "KVSetWithOptions", mock.Anything, mock.Anything, mock.Anything)
+}
+
+// Old plugin versions could write multiple rows with the same direction and
+// connection. Verify all of them are removed in a single call.
+func TestClient_RemoveChannelConnection_RemovesAllDuplicates(t *testing.T) {
+	api := &plugintest.API{}
+	conn := TeamConnection{Direction: "outbound", Connection: "high"}
+	existing := []TeamConnection{
+		conn,
+		{Direction: "inbound", Connection: "low"},
+		conn,
+		conn,
+	}
+
+	api.On("KVGet", "test-plugin-channelinit-ch1").Return(marshalJSON(t, existing), nil).Once()
+	api.On("KVSetWithOptions", "test-plugin-channelinit-ch1",
+		marshalJSON(t, []TeamConnection{{Direction: "inbound", Connection: "low"}}),
+		kvCASOpts(t, existing)).Return(true, nil).Once()
+
+	kv := newTestClient(api)
+	err := kv.RemoveChannelConnection("ch1", conn)
+	require.NoError(t, err)
+	api.AssertExpectations(t)
 }
 
 func TestClient_IsChannelInitialized(t *testing.T) {

@@ -68,10 +68,11 @@ const (
 	ServiceMapParseOutConnFailed         = 14032
 	ServiceMapParseInConnFailed          = 14033
 
-	ServiceShareChannelFailed   = 14100
-	ServiceInviteRemoteFailed   = 14101
-	ServiceUninviteRemoteFailed = 14102
-	ServiceUnshareFailed        = 14103
+	ServiceShareChannelFailed     = 14100
+	ServiceInviteRemoteFailed     = 14101
+	ServiceUninviteRemoteFailed   = 14102
+	ServiceUnshareFailed          = 14103
+	ServiceShareForRemoteRollback = 14104
 )
 
 // inbound.go (15000-15999)
@@ -368,6 +369,7 @@ var AllCodes = []int{
 	ServiceInviteRemoteFailed,
 	ServiceUninviteRemoteFailed,
 	ServiceUnshareFailed,
+	ServiceShareForRemoteRollback,
 
 	InboundParseConnsFailed,
 	InboundConnectFailed,

@@ -609,7 +609,21 @@ func (p *Plugin) initChannelForCrossGuard(user *model.User, channelID string, co
 		return nil, false, &apiError{Message: "failed to save channel connection state", Status: 500}
 	}
 
-	p.shareChannelForRemote(channel, conn, user.Id)
+	if shareErr := p.shareChannelForRemote(channel, conn, user.Id); shareErr != nil {
+		// Roll back the channel connection we just added so the user can
+		// retry init-channel cleanly once the underlying problem is
+		// resolved. ShareChannel is left in place because it is idempotent
+		// and may already be shared by another connection.
+		if rmErr := p.kvstore.RemoveChannelConnection(channelID, conn); rmErr != nil {
+			p.API.LogError("Failed to roll back channel connection after share failure",
+				"error_code", errcode.ServiceShareForRemoteRollback,
+				"channel_id", channelID, "conn", connKey(conn), "error", rmErr.Error())
+		}
+		return nil, false, &apiError{
+			Message: fmt.Sprintf("Channel connection setup failed: %s. The connection has been rolled back; retry once the issue is resolved.", shareErr.Error()),
+			Status:  500,
+		}
+	}
 
 	p.publishChannelConnectionUpdate(channelID, updated)
 
@@ -917,12 +931,14 @@ func redactConnections(outbound, inbound []ConnectionConfig) []RedactedConnectio
 }
 
 // shareChannelForRemote ensures the channel is registered as shared and the
-// remote for the linked connection is invited. Both steps are idempotent at
-// the server side. Errors are logged but do not block the link operation.
-func (p *Plugin) shareChannelForRemote(channel *model.Channel, conn store.TeamConnection, userID string) {
+// remote for the linked connection is invited. ShareChannel errors are
+// treated as idempotent (the channel may already be shared). An
+// InviteRemoteToChannel failure is returned so the caller can roll back the
+// channel connection rather than leaving it half-initialized.
+func (p *Plugin) shareChannelForRemote(channel *model.Channel, conn store.TeamConnection, userID string) error {
 	remoteID := p.remoteIDs[connKey(conn)]
 	if remoteID == "" {
-		return
+		return nil
 	}
 
 	if _, err := p.API.ShareChannel(&model.SharedChannel{
@@ -942,7 +958,9 @@ func (p *Plugin) shareChannelForRemote(channel *model.Channel, conn store.TeamCo
 		p.API.LogError("Failed to invite remote to channel",
 			"error_code", errcode.ServiceInviteRemoteFailed,
 			"channel_id", channel.Id, "remote_id", remoteID, "error", err.Error())
+		return fmt.Errorf("failed to invite remote to channel: %w", err)
 	}
+	return nil
 }
 
 // uninviteRemoteFromChannel uninvites the remote associated with the given
