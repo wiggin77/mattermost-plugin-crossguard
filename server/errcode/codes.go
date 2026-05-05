@@ -291,6 +291,7 @@ const (
 	PluginMigrateShareFailed      = 27104
 	PluginMigrateInviteFailed     = 27105
 	PluginMigrateSummary          = 27106
+	PluginMigrateDeferred         = 27107
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -529,4 +530,5 @@ var AllCodes = []int{
 	PluginMigrateShareFailed,
 	PluginMigrateInviteFailed,
 	PluginMigrateSummary,
+	PluginMigrateDeferred,
 }

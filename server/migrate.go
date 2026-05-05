@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -8,6 +9,29 @@ import (
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
 )
+
+// AppError IDs that mean the shared channels service itself is unavailable
+// (as opposed to a per-channel problem). These are i18n keys defined in the
+// Mattermost server and are part of the AppError stable contract; substring
+// matching on the translated message would be fragile across locales.
+const (
+	appErrSharedChannelsServiceDisabled = "api.command_share.service_disabled"
+	appErrSharedChannelsServiceInactive = "api.command_share.service_inactive"
+)
+
+// isSharedChannelsServiceUnavailable reports whether err is a server-side
+// AppError indicating the shared channels service is disabled or inactive.
+// Used by migrations to distinguish a transient systemic failure (defer the
+// migration so it retries on next activation) from a per-channel problem
+// (skip that channel and keep going).
+func isSharedChannelsServiceUnavailable(err error) bool {
+	var appErr *model.AppError
+	if !errors.As(err, &appErr) {
+		return false
+	}
+	return appErr.Id == appErrSharedChannelsServiceDisabled ||
+		appErr.Id == appErrSharedChannelsServiceInactive
+}
 
 // One-shot upgrade markers. These keys live in the plugin's KV namespace and
 // gate the migrations so they run exactly once per cluster, regardless of
@@ -121,15 +145,16 @@ func (p *Plugin) shareExistingChannels() bool {
 		return false
 	}
 	if len(p.remoteIDs) == 0 {
-		// Nothing to invite. Marker is still set so we do not rescan on
-		// every activation while the cluster has no connections configured.
-		return true
+		// No remotes registered yet. Don't set the marker so the migration
+		// retries once remotes are configured.
+		return false
 	}
 
 	channelInitPrefix := manifest.Id + "-channelinit-"
 
 	shared := 0
 	invited := 0
+	systemicFailure := false
 	for page := 0; ; page++ {
 		keys, err := p.client.KV.ListKeys(page, migrateListKeysPerPage,
 			pluginapi.WithPrefix(channelInitPrefix),
@@ -146,14 +171,24 @@ func (p *Plugin) shareExistingChannels() bool {
 			if !model.IsValidId(channelID) {
 				continue
 			}
-			s, i := p.shareChannelOnUpgrade(channelID)
+			s, i, sys := p.shareChannelOnUpgrade(channelID)
 			shared += s
 			invited += i
+			if sys {
+				systemicFailure = true
+			}
 		}
 
 		if len(keys) < migrateListKeysPerPage {
 			break
 		}
+	}
+
+	if systemicFailure {
+		p.API.LogWarn("Channel share migration deferred: shared channels service unavailable",
+			"error_code", errcode.PluginMigrateDeferred,
+			"channels_shared", shared, "remotes_invited", invited)
+		return false
 	}
 
 	p.API.LogInfo("Channel share migration completed",
@@ -163,13 +198,14 @@ func (p *Plugin) shareExistingChannels() bool {
 }
 
 // shareChannelOnUpgrade runs ShareChannel and InviteRemoteToChannel for a
-// single channel with existing Cross Guard connections. Returns
-// (sharedDelta, invitedDelta) for the migration summary log. Errors are
+// single channel with existing Cross Guard connections. Returns the count of
+// shares and invites performed plus a systemic flag indicating the shared
+// channels service was unavailable for this attempt. Per-channel errors are
 // swallowed (logged) so a single bad channel does not abort the run.
-func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
+func (p *Plugin) shareChannelOnUpgrade(channelID string) (sharedDelta, invitedDelta int, systemic bool) {
 	conns, err := p.kvstore.GetChannelConnections(channelID)
 	if err != nil || len(conns) == 0 {
-		return 0, 0
+		return 0, 0, false
 	}
 
 	channel, appErr := p.API.GetChannel(channelID)
@@ -177,12 +213,14 @@ func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
 		p.API.LogWarn("Channel share migration: GetChannel failed; skipping",
 			"error_code", errcode.PluginMigrateGetChannelFailed,
 			"channel_id", channelID, "error", appErr.Error())
-		return 0, 0
+		return 0, 0, false
 	}
 
 	// ShareChannel is idempotent on the server. Treat any error as a
-	// "may already be shared" signal and continue with the invites.
-	sharedDelta := 0
+	// "may already be shared" signal and continue with the invites,
+	// unless the error is the shared channels service being unavailable
+	// (in which case the invite calls will fail too and the caller should
+	// defer the migration).
 	if _, err := p.API.ShareChannel(&model.SharedChannel{
 		ChannelId:        channel.Id,
 		TeamId:           channel.TeamId,
@@ -191,6 +229,9 @@ func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
 		ShareDisplayName: channel.DisplayName,
 		CreatorId:        p.botUserID,
 	}); err != nil {
+		if isSharedChannelsServiceUnavailable(err) {
+			systemic = true
+		}
 		p.API.LogDebug("Channel share migration: ShareChannel returned error (may already be shared)",
 			"error_code", errcode.PluginMigrateShareFailed,
 			"channel_id", channelID, "error", err.Error())
@@ -198,7 +239,6 @@ func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
 		sharedDelta = 1
 	}
 
-	invitedDelta := 0
 	seenRemotes := make(map[string]bool, len(conns))
 	for _, conn := range conns {
 		remoteID := p.remoteIDs[connKey(conn)]
@@ -207,6 +247,9 @@ func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
 		}
 		seenRemotes[remoteID] = true
 		if err := p.API.InviteRemoteToChannel(channel.Id, remoteID, p.botUserID, true); err != nil {
+			if isSharedChannelsServiceUnavailable(err) {
+				systemic = true
+			}
 			p.API.LogWarn("Channel share migration: InviteRemoteToChannel failed",
 				"error_code", errcode.PluginMigrateInviteFailed,
 				"channel_id", channelID, "remote_id", remoteID, "error", err.Error())
@@ -215,5 +258,5 @@ func (p *Plugin) shareChannelOnUpgrade(channelID string) (int, int) {
 		invitedDelta++
 	}
 
-	return sharedDelta, invitedDelta
+	return sharedDelta, invitedDelta, systemic
 }
