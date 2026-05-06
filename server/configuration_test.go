@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -968,12 +969,12 @@ func TestOnConfigurationChange_NoReconnectBeforeActivation(t *testing.T) {
 
 	p := &Plugin{}
 	p.SetAPI(api)
-	// relaySem is nil (plugin not yet activated), so reconnect methods must not be called.
+	// p.ctx is nil (plugin not yet activated), so reconnect methods must not be called.
 
 	err := p.OnConfigurationChange()
 	require.NoError(t, err)
 
-	// Verify configuration was set despite relaySem being nil.
+	// Verify configuration was set despite p.ctx being nil.
 	cfg := p.getConfiguration()
 	require.NotNil(t, cfg)
 }
@@ -1012,7 +1013,8 @@ func TestOnConfigurationChange_WithReconnect(t *testing.T) {
 	p, _ := setupTestPluginWithRouter(api)
 
 	// Simulate post-activation state.
-	p.relaySem = make(chan struct{}, 50)
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+	t.Cleanup(p.cancel)
 	p.inboundCancel = func() {}
 	p.configuration = &configuration{}
 

@@ -153,7 +153,6 @@ func setupTestPlugin(api *plugintest.API) (*Plugin, *testKVStore) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.ctx = ctx
 	p.cancel = cancel
-	p.relaySem = make(chan struct{}, 50)
 	return p, kvs
 }
 
@@ -421,7 +420,6 @@ func setupTestPluginWithRouter(api *plugintest.API) (*Plugin, *flexibleKVStore) 
 	ctx, cancel := context.WithCancel(context.Background())
 	p.ctx = ctx
 	p.cancel = cancel
-	p.relaySem = make(chan struct{}, 50)
 	p.initAPI()
 	return p, kvs
 }

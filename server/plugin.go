@@ -38,7 +38,6 @@ type Plugin struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
-	relaySem      chan struct{}
 	inboundCtx    context.Context
 	inboundCancel context.CancelFunc
 	outboundMu    sync.RWMutex
@@ -94,7 +93,6 @@ func (p *Plugin) OnActivate() error {
 	p.initAPI()
 
 	p.ctx, p.cancel = context.WithCancel(context.Background())
-	p.relaySem = make(chan struct{}, relaySemaphoreSize)
 	p.nodeID = model.NewId()
 
 	if err := p.registerRemotes(); err != nil {

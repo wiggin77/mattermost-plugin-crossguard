@@ -82,7 +82,6 @@ func TestOnDeactivate_WithConnections(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.ctx = ctx
 	p.cancel = cancel
-	p.relaySem = make(chan struct{}, 50)
 
 	outboundClosed := false
 	inboundClosed := false

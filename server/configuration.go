@@ -609,7 +609,11 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.setConfiguration(cfg)
 
-	if p.relaySem != nil {
+	// p.ctx is set in OnActivate, so a non-nil ctx means activation has run
+	// and it is safe to reconnect providers and reconcile remotes. Calls to
+	// OnConfigurationChange that arrive before activation must skip these
+	// steps because the providers have not been built yet.
+	if p.ctx != nil {
 		p.reconnectOutbound()
 		p.reconnectInbound()
 		p.reconcileRemotes()

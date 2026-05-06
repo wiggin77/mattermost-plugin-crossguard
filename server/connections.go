@@ -9,8 +9,6 @@ import (
 )
 
 const (
-	relaySemaphoreSize = 256
-
 	headerPostID   = "X-Post-Id"
 	headerConnName = "X-Conn-Name"
 	headerFilename = "X-Filename"

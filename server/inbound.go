@@ -82,21 +82,13 @@ func (p *Plugin) reconnectInbound() {
 	p.connectInbound()
 }
 
-// handleInboundMessage returns a synchronous Subscribe handler. The handler
-// blocks on the relay semaphore (rather than dropping when full) so we
-// apply backpressure to ack-based providers (Azure Queue, Service Bus,
-// future NATS JetStream) instead of acknowledging messages we never
-// processed. The handler's return value is the delivery acknowledgement
-// signal: nil means "processed", non-nil means "not processed, redeliver
-// if you can".
+// handleInboundMessage returns a synchronous Subscribe handler. The handler's
+// return value is the delivery acknowledgement signal: nil means "processed",
+// non-nil means "not processed, redeliver if you can". Each provider's
+// Subscribe callback is invoked from a single dispatcher goroutine and
+// processes messages serially, so no per-handler concurrency limit is needed.
 func (p *Plugin) handleInboundMessage(connName string) func(data []byte) error {
 	return func(data []byte) error {
-		select {
-		case p.relaySem <- struct{}{}:
-			defer func() { <-p.relaySem }()
-		case <-p.ctx.Done():
-			return p.ctx.Err()
-		}
 		return p.processInboundMessage(connName, data)
 	}
 }
