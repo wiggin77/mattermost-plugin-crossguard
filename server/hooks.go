@@ -21,6 +21,19 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 	msg *mmModel.SyncMsg,
 	rc *mmModel.RemoteCluster,
 ) (mmModel.SyncResponse, error) {
+	channelID := ""
+	postCount := 0
+	remoteID := ""
+	if msg != nil {
+		channelID = msg.ChannelId
+		postCount = len(msg.Posts)
+	}
+	if rc != nil {
+		remoteID = rc.RemoteId
+	}
+	p.API.LogDebug("OnSharedChannelsSyncMsg invoked",
+		"channel_id", channelID, "post_count", postCount, "remote_id", remoteID)
+
 	if msg == nil {
 		return mmModel.SyncResponse{}, nil
 	}

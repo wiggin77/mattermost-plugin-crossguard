@@ -146,6 +146,8 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 	}
 
 	p.updateOutboundHealth(connName, true)
+	p.API.LogDebug("Outbound publish completed",
+		"connection", connName, "type", env.Type, "parts", len(parts))
 	return nil
 }
 

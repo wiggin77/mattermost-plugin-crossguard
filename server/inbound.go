@@ -102,6 +102,9 @@ func (p *Plugin) handleInboundMessage(connName string) func(data []byte) error {
 }
 
 func (p *Plugin) processInboundMessage(connName string, data []byte) error {
+	p.API.LogDebug("Inbound message received from provider",
+		"conn_name", connName, "bytes", len(data))
+
 	env, err := UnmarshalEnvelope(data)
 	if err != nil {
 		p.API.LogError("Failed to unmarshal transport envelope",
@@ -185,6 +188,13 @@ func (p *Plugin) handleInboundSyncMsg(connName string, env *TransportEnvelope) e
 			"conn_name", connName, "channel_id", channel.Id, "error", err.Error())
 		return fmt.Errorf("ReceiveSharedChannelSyncMsg failed: %w", err)
 	}
+
+	postCount := 0
+	if env.SyncMsg != nil {
+		postCount = len(env.SyncMsg.Posts)
+	}
+	p.API.LogDebug("ReceiveSharedChannelSyncMsg accepted",
+		"conn_name", connName, "channel_id", channel.Id, "post_count", postCount)
 
 	if errs := joinSyncErrors(resp); errs != "" {
 		p.API.LogWarn("Some entities failed to sync",

@@ -197,9 +197,13 @@ All under `/plugins/crossguard/api/v1/`:
 
 After editing Go files, run `make check-style` to fix import formatting. The golangci-lint config (`.golangci.yml`) auto-rewrites `interface{}` to `any` and sorts imports with local prefix `github.com/MattermostFederal/mattermost-plugin-crossguard`.
 
+## Logging
+
+**Never log sensitive data.** Log calls at any level must not include message content (post bodies, file contents, attachment data), authentication material (tokens, passwords, API keys), or anything else that would compromise privacy or security if it appeared in operator log aggregation. Log identifiers (channel ID, user ID, post ID, remote ID), counts, sizes, and configuration names instead. This applies to error context too: when wrapping a downstream error, prefer the error type/code over its full message if the message could include user input.
+
 ## Log Error Codes
 
-Every `p.API.Log*` call (`LogDebug`, `LogInfo`, `LogWarn`, `LogError`) in non-test code must include a unique numeric error code as the first key-value pair, sourced from `server/errcode/codes.go`.
+Every `p.API.LogInfo`, `LogWarn`, and `LogError` call in non-test code must include a unique numeric error code as the first key-value pair, sourced from `server/errcode/codes.go`. `LogDebug` calls are exempt: debug logs are development aids, not part of the operator-facing contract, and their content can change freely without breaking anything operators depend on.
 
 ```go
 p.API.LogError("Failed to check channel connections",
@@ -207,7 +211,7 @@ p.API.LogError("Failed to check channel connections",
     "channel_id", channelID, "error", err.Error())
 ```
 
-When adding a new log call:
+When adding a new info/warn/error log call:
 
 1. Open `server/errcode/codes.go` and find the block for the file you are editing (each file owns a 1000-range, e.g. `hooks.go` uses 10000-10999, `inbound.go` uses 15000-15999).
 2. Append a new constant at the next unused integer in that block. Name it `<FilePrefix><CamelCaseSummary>` describing the event, not the log level.
