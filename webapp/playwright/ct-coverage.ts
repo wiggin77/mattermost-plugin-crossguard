@@ -50,7 +50,11 @@ function lineLengths(source: string): number[] {
     return source.split('\n').map((line) => line.length);
 }
 
-const COLLECT_COVERAGE = !process.env.CI;
+// Coverage collection is opt-in: it adds an HTTP source-map fetch and a
+// disk write per test, which under default Playwright parallelism contends
+// heavily and produces flaky timeouts. The dedicated test:pw-ct-coverage
+// script in package.json sets COVERAGE=1; regular test:pw-ct runs do not.
+const COLLECT_COVERAGE = process.env.COVERAGE === '1';
 
 export const test = ctBase.extend({
     page: async ({page}, use) => {
