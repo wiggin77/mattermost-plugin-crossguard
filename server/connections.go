@@ -12,6 +12,26 @@ const (
 	headerPostID   = "X-Post-Id"
 	headerConnName = "X-Conn-Name"
 	headerFilename = "X-Filename"
+	// headerKind discriminates the file payload type carried over the
+	// QueueProvider file path. Values: "attachment", "profile_image".
+	headerKind = "X-Crossguard-Kind"
+	// headerTeamName and headerChanName carry the sender's team and channel
+	// names so the inbound side can resolve the local channel via the same
+	// rewrite-then-by-name path the message envelope uses.
+	headerTeamName = "X-Team-Name"
+	headerChanName = "X-Channel-Name"
+	// headerFileInfo carries a base64-encoded JSON FileInfo for attachments.
+	// Base64 wraps the JSON so newlines and quotes survive every provider's
+	// metadata-encoding rules (Azure Blob metadata is HTTP-header-grade,
+	// NATS object store uses nats.Header).
+	headerFileInfo = "X-File-Info"
+	// headerUserID carries the remote user id for profile_image payloads.
+	// User ids are globally unique UUIDs so no translation is needed.
+	headerUserID = "X-User-Id"
+
+	// kindAttachment and kindProfileImage are the values for headerKind.
+	kindAttachment   = "attachment"
+	kindProfileImage = "profile_image"
 )
 
 func buildTestEnvelope() (*TransportEnvelope, []byte, string, error) {
@@ -147,6 +167,54 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 	p.API.LogDebug("Outbound publish completed",
 		"connection", connName, "type", env.Type, "parts", len(parts))
 	return nil
+}
+
+// uploadToOutboundConn uploads file bytes via the named outbound connection's
+// QueueProvider file path. Headers are passed through to the provider verbatim.
+// Returns an error when the provider is missing, unhealthy, or the upload
+// itself fails.
+func (p *Plugin) uploadToOutboundConn(ctx context.Context, connName, key string, data []byte, headers map[string]string) error {
+	p.outboundMu.RLock()
+	var oc *outboundConn
+	for i := range p.outboundConns {
+		if p.outboundConns[i].name == connName {
+			candidate := p.outboundConns[i]
+			oc = &candidate
+			break
+		}
+	}
+	p.outboundMu.RUnlock()
+
+	if oc == nil {
+		return fmt.Errorf("no outbound provider for connection %q", connName)
+	}
+
+	if !oc.healthy && time.Since(oc.lastCheckTime) < healthRecheckInterval {
+		return fmt.Errorf("outbound connection %q is unhealthy, skipping upload", connName)
+	}
+
+	if err := oc.provider.UploadFile(ctx, key, data, headers); err != nil {
+		p.updateOutboundHealth(connName, false)
+		return err
+	}
+	p.updateOutboundHealth(connName, true)
+	return nil
+}
+
+// outboundConnConfigByName returns the outbound connection config for the
+// given name, or false if it is not present in the current configuration.
+func (p *Plugin) outboundConnConfigByName(connName string) (ConnectionConfig, bool) {
+	cfg := p.getConfiguration()
+	conns, err := cfg.GetOutboundConnections()
+	if err != nil {
+		return ConnectionConfig{}, false
+	}
+	for _, c := range conns {
+		if c.Name == connName {
+			return c, true
+		}
+	}
+	return ConnectionConfig{}, false
 }
 
 // updateOutboundHealth marks the outbound connection with the given name as

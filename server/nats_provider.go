@@ -125,7 +125,12 @@ func (n *natsProvider) WatchFiles(ctx context.Context, handler func(key string, 
 		return fmt.Errorf("failed to open object store for watcher: %w", err)
 	}
 
-	watcher, err := objectStore.Watch(ctx, jetstream.UpdatesOnly())
+	// Watch without UpdatesOnly so the receiver sees entries already present
+	// in the bucket when the watcher starts. The bucket's TTL bounds how far
+	// back the snapshot can reach. JetStream Watch emits a nil entry to mark
+	// the boundary between the initial snapshot and live updates; we skip
+	// that sentinel below.
+	watcher, err := objectStore.Watch(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to start object store watcher: %w", err)
 	}
@@ -157,9 +162,21 @@ func (n *natsProvider) WatchFiles(ctx context.Context, handler func(key string, 
 			}
 
 			if err := handler(info.Name, fileData, headers); err != nil {
+				// Leave the object in place so the next watcher session
+				// (or another node) can retry. TTL still bounds retention.
 				n.api.LogWarn("File handler returned error",
 					"error_code", errcode.NATSFileHandlerError,
 					"key", info.Name, "error", err.Error())
+				continue
+			}
+
+			// Handler accepted: delete the object so we do not re-deliver it
+			// on the next watcher startup. Best-effort; the bucket TTL is the
+			// safety net.
+			if delErr := objectStore.Delete(ctx, info.Name); delErr != nil {
+				n.api.LogWarn("Failed to delete processed object",
+					"error_code", errcode.NATSDeleteFileFailed,
+					"key", info.Name, "error", delErr.Error())
 			}
 		}
 	}

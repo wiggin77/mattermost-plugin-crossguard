@@ -20,6 +20,23 @@ const (
 	PingInboundUnhealthy               = 10107
 	OutboundSyncMsgUserLookupFailed    = 10108
 	OutboundSyncMsgUsersAugmented      = 10109
+
+	OutboundAttachmentNoOutboundProvider  = 10110
+	OutboundAttachmentConfigParseFailed   = 10111
+	OutboundAttachmentDisabled            = 10112
+	OutboundAttachmentFiltered            = 10113
+	OutboundAttachmentSizeExceeded        = 10114
+	OutboundAttachmentFileFetchFailed     = 10115
+	OutboundAttachmentChannelLookupFailed = 10116
+	OutboundAttachmentTeamLookupFailed    = 10117
+	OutboundAttachmentFileInfoEncodeFail  = 10118
+	OutboundAttachmentUploadFailed        = 10119
+
+	OutboundProfileImageNoOutboundProvider = 10130
+	OutboundProfileImageConfigParseFailed  = 10131
+	OutboundProfileImageDisabled           = 10132
+	OutboundProfileImageFetchFailed        = 10133
+	OutboundProfileImageUploadFailed       = 10134
 )
 
 // configuration.go (12000-12999)
@@ -199,6 +216,7 @@ const (
 	NATSFileHandlerError   = 20001
 	NATSDisconnected       = 20002
 	NATSReconnected        = 20003
+	NATSDeleteFileFailed   = 20004
 )
 
 // prompt.go (21000-21999)
@@ -297,6 +315,21 @@ const (
 	PluginMigrateDeferred         = 27107
 )
 
+// inbound_files.go (28000-28999)
+const (
+	InboundFileUnknownKind                = 28000
+	InboundAttachmentMissingHeader        = 28001
+	InboundAttachmentFileInfoDecodeFailed = 28002
+	InboundAttachmentTeamLookupFailed     = 28003
+	InboundAttachmentChannelLookupFailed  = 28004
+	InboundAttachmentChannelUnlinked      = 28005
+	InboundAttachmentNoRemoteForConn      = 28006
+	InboundAttachmentReceiveFailed        = 28007
+	InboundProfileImageMissingHeader      = 28008
+	InboundProfileImageNoRemoteForConn    = 28009
+	InboundProfileImageReceiveFailed      = 28010
+)
+
 // AllCodes lists every code declared in this package. Used by
 // TestCodesUnique to assert that no two call sites share a value.
 // Keep in sync when adding new constants.
@@ -311,6 +344,21 @@ var AllCodes = []int{
 	PingInboundUnhealthy,
 	OutboundSyncMsgUserLookupFailed,
 	OutboundSyncMsgUsersAugmented,
+	OutboundAttachmentNoOutboundProvider,
+	OutboundAttachmentConfigParseFailed,
+	OutboundAttachmentDisabled,
+	OutboundAttachmentFiltered,
+	OutboundAttachmentSizeExceeded,
+	OutboundAttachmentFileFetchFailed,
+	OutboundAttachmentChannelLookupFailed,
+	OutboundAttachmentTeamLookupFailed,
+	OutboundAttachmentFileInfoEncodeFail,
+	OutboundAttachmentUploadFailed,
+	OutboundProfileImageNoOutboundProvider,
+	OutboundProfileImageConfigParseFailed,
+	OutboundProfileImageDisabled,
+	OutboundProfileImageFetchFailed,
+	OutboundProfileImageUploadFailed,
 
 	APINATSTestConnectFailed,
 	APIBuildTestMessageFailed,
@@ -461,6 +509,7 @@ var AllCodes = []int{
 	NATSFileHandlerError,
 	NATSDisconnected,
 	NATSReconnected,
+	NATSDeleteFileFailed,
 
 	PromptGetConnPromptFailed,
 	PromptGetTownSquareFailed,
@@ -537,4 +586,16 @@ var AllCodes = []int{
 	PluginMigrateInviteFailed,
 	PluginMigrateSummary,
 	PluginMigrateDeferred,
+
+	InboundFileUnknownKind,
+	InboundAttachmentMissingHeader,
+	InboundAttachmentFileInfoDecodeFailed,
+	InboundAttachmentTeamLookupFailed,
+	InboundAttachmentChannelLookupFailed,
+	InboundAttachmentChannelUnlinked,
+	InboundAttachmentNoRemoteForConn,
+	InboundAttachmentReceiveFailed,
+	InboundProfileImageMissingHeader,
+	InboundProfileImageNoRemoteForConn,
+	InboundProfileImageReceiveFailed,
 }

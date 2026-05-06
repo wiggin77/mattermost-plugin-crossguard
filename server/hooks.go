@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"maps"
 
@@ -188,41 +190,202 @@ func (p *Plugin) augmentSyncMsgUsers(msg *mmModel.SyncMsg) *mmModel.SyncMsg {
 	return &augmented
 }
 
-// OnSharedChannelsAttachmentSyncMsg is a stub. File attachment sync is a
-// follow-up plan; here we acknowledge the call so the server advances its
-// cursor and does not retry indefinitely.
+// OnSharedChannelsAttachmentSyncMsg uploads a file attachment to the matching
+// outbound connection's file path. Returning a non-nil error causes the
+// framework to skip saveSharedAttachment, so the next sync cycle will retry
+// (shouldSyncAttachment returns true while no record exists).
 func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(
 	fi *mmModel.FileInfo,
 	post *mmModel.Post,
-	_ *mmModel.RemoteCluster,
+	rc *mmModel.RemoteCluster,
 ) error {
-	fileID, postID := "", ""
-	if fi != nil {
-		fileID = fi.Id
+	if fi == nil || post == nil || rc == nil {
+		return nil
 	}
-	if post != nil {
-		postID = post.Id
+
+	connName := p.connNameForRemote(rc.RemoteId)
+	if connName == "" {
+		p.API.LogWarn("No connection found for remote",
+			"error_code", errcode.OutboundSyncMsgNoRemoteMatch,
+			"remote_id", rc.RemoteId)
+		return nil
 	}
-	p.API.LogDebug("Outbound attachment sync not yet implemented",
-		"error_code", errcode.OutboundAttachmentStubbed,
-		"file_id", fileID, "post_id", postID)
+
+	if !p.hasOutboundProvider(connName) {
+		p.API.LogDebug("Outbound attachment: connection has no outbound provider",
+			"error_code", errcode.OutboundAttachmentNoOutboundProvider,
+			"conn_name", connName)
+		return nil
+	}
+
+	conn, ok := p.outboundConnConfigByName(connName)
+	if !ok {
+		p.API.LogWarn("Outbound attachment: connection config not found",
+			"error_code", errcode.OutboundAttachmentConfigParseFailed,
+			"conn_name", connName)
+		return nil
+	}
+
+	if !conn.FileTransferEnabled {
+		p.API.LogDebug("Outbound attachment: file transfer disabled",
+			"error_code", errcode.OutboundAttachmentDisabled,
+			"conn_name", connName)
+		return nil
+	}
+
+	if !isFileAllowed(fi.Name, conn.FileFilterMode, conn.FileFilterTypes) {
+		p.API.LogInfo("Outbound attachment: file rejected by filter",
+			"error_code", errcode.OutboundAttachmentFiltered,
+			"conn_name", connName, "post_id", post.Id, "file_id", fi.Id)
+		return nil
+	}
+
+	if maxSize := p.maxFileSize(); maxSize > 0 && fi.Size > maxSize {
+		p.API.LogWarn("Outbound attachment: file exceeds MaxFileSize",
+			"error_code", errcode.OutboundAttachmentSizeExceeded,
+			"conn_name", connName, "file_id", fi.Id,
+			"size", fi.Size, "max_size", maxSize)
+		// No retry: the file will not get smaller. Returning nil lets the
+		// framework save the attachment record so it stops re-attempting.
+		return nil
+	}
+
+	data, appErr := p.API.GetFile(fi.Id)
+	if appErr != nil {
+		p.API.LogError("Outbound attachment: GetFile failed",
+			"error_code", errcode.OutboundAttachmentFileFetchFailed,
+			"conn_name", connName, "file_id", fi.Id, "error", appErr.Error())
+		return fmt.Errorf("get file %s: %w", fi.Id, appErr)
+	}
+
+	channel, appErr := p.API.GetChannel(post.ChannelId)
+	if appErr != nil {
+		p.API.LogError("Outbound attachment: channel lookup failed",
+			"error_code", errcode.OutboundAttachmentChannelLookupFailed,
+			"conn_name", connName, "channel_id", post.ChannelId, "error", appErr.Error())
+		return fmt.Errorf("channel lookup: %w", appErr)
+	}
+
+	team, appErr := p.API.GetTeam(channel.TeamId)
+	if appErr != nil {
+		p.API.LogError("Outbound attachment: team lookup failed",
+			"error_code", errcode.OutboundAttachmentTeamLookupFailed,
+			"conn_name", connName, "team_id", channel.TeamId, "error", appErr.Error())
+		return fmt.Errorf("team lookup: %w", appErr)
+	}
+
+	fileInfoJSON, err := json.Marshal(fi)
+	if err != nil {
+		p.API.LogError("Outbound attachment: FileInfo marshal failed",
+			"error_code", errcode.OutboundAttachmentFileInfoEncodeFail,
+			"conn_name", connName, "file_id", fi.Id, "error", err.Error())
+		return fmt.Errorf("marshal FileInfo: %w", err)
+	}
+
+	headers := map[string]string{
+		headerKind:     kindAttachment,
+		headerConnName: connName,
+		headerTeamName: team.Name,
+		headerChanName: channel.Name,
+		headerPostID:   post.Id,
+		headerFilename: fi.Name,
+		headerFileInfo: base64.StdEncoding.EncodeToString(fileInfoJSON),
+	}
+
+	key := "attachment/" + post.Id + "/" + fi.Id
+	if err := p.uploadToOutboundConn(p.ctx, connName, key, data, headers); err != nil {
+		p.API.LogError("Outbound attachment: upload failed",
+			"error_code", errcode.OutboundAttachmentUploadFailed,
+			"conn_name", connName, "post_id", post.Id, "file_id", fi.Id,
+			"size", len(data), "error", err.Error())
+		return fmt.Errorf("upload attachment: %w", err)
+	}
+
+	p.API.LogDebug("Outbound attachment: upload succeeded",
+		"conn_name", connName, "post_id", post.Id, "file_id", fi.Id, "size", len(data))
 	return nil
 }
 
-// OnSharedChannelsProfileImageSyncMsg is a stub. Profile image sync is a
-// follow-up plan.
+// OnSharedChannelsProfileImageSyncMsg uploads a user's profile image to the
+// matching outbound connection's file path. The framework's
+// sendProfileImageToPlugin advances the per-user LastSyncAt cursor
+// unconditionally after this returns, so a non-nil error here is purely
+// diagnostic. The next opportunity to retry is the user's next image change.
 func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(
 	user *mmModel.User,
-	_ *mmModel.RemoteCluster,
+	rc *mmModel.RemoteCluster,
 ) error {
-	userID := ""
-	if user != nil {
-		userID = user.Id
+	if user == nil || rc == nil {
+		return nil
 	}
-	p.API.LogDebug("Outbound profile image sync not yet implemented",
-		"error_code", errcode.OutboundProfileImageStubbed,
-		"user_id", userID)
+
+	connName := p.connNameForRemote(rc.RemoteId)
+	if connName == "" {
+		p.API.LogWarn("No connection found for remote",
+			"error_code", errcode.OutboundSyncMsgNoRemoteMatch,
+			"remote_id", rc.RemoteId)
+		return nil
+	}
+
+	if !p.hasOutboundProvider(connName) {
+		p.API.LogDebug("Outbound profile image: connection has no outbound provider",
+			"error_code", errcode.OutboundProfileImageNoOutboundProvider,
+			"conn_name", connName)
+		return nil
+	}
+
+	conn, ok := p.outboundConnConfigByName(connName)
+	if !ok {
+		p.API.LogWarn("Outbound profile image: connection config not found",
+			"error_code", errcode.OutboundProfileImageConfigParseFailed,
+			"conn_name", connName)
+		return nil
+	}
+
+	if !conn.FileTransferEnabled {
+		p.API.LogDebug("Outbound profile image: file transfer disabled",
+			"error_code", errcode.OutboundProfileImageDisabled,
+			"conn_name", connName)
+		return nil
+	}
+
+	data, appErr := p.API.GetProfileImage(user.Id)
+	if appErr != nil {
+		p.API.LogError("Outbound profile image: GetProfileImage failed",
+			"error_code", errcode.OutboundProfileImageFetchFailed,
+			"conn_name", connName, "user_id", user.Id, "error", appErr.Error())
+		return fmt.Errorf("get profile image: %w", appErr)
+	}
+
+	headers := map[string]string{
+		headerKind:     kindProfileImage,
+		headerConnName: connName,
+		headerUserID:   user.Id,
+		headerFilename: "profile.png",
+	}
+
+	key := "profile_image/" + user.Id
+	if err := p.uploadToOutboundConn(p.ctx, connName, key, data, headers); err != nil {
+		p.API.LogError("Outbound profile image: upload failed",
+			"error_code", errcode.OutboundProfileImageUploadFailed,
+			"conn_name", connName, "user_id", user.Id,
+			"size", len(data), "error", err.Error())
+		return fmt.Errorf("upload profile image: %w", err)
+	}
+
+	p.API.LogDebug("Outbound profile image: upload succeeded",
+		"conn_name", connName, "user_id", user.Id, "size", len(data))
 	return nil
+}
+
+// maxFileSize returns the server's configured FileSettings.MaxFileSize, or
+// 0 when the setting is unavailable (skip the size check in that case).
+func (p *Plugin) maxFileSize() int64 {
+	cfg := p.API.GetConfig()
+	if cfg == nil || cfg.FileSettings.MaxFileSize == nil {
+		return 0
+	}
+	return *cfg.FileSettings.MaxFileSize
 }
 
 // OnSharedChannelsPing reports whether the plugin can handle messages for the

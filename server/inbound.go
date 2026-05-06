@@ -48,10 +48,12 @@ func (p *Plugin) connectInbound() {
 			continue
 		}
 
-		pool = append(pool, inboundConn{
+		ic := inboundConn{
 			provider: provider,
 			name:     conn.Name,
-		})
+		}
+		pool = append(pool, ic)
+		p.startInboundFileWatchers(ctx, ic)
 		p.API.LogInfo("Inbound subscription established",
 			"error_code", errcode.InboundSubscriptionEstablished,
 			"name", conn.Name, "provider", conn.Provider)
