@@ -1043,6 +1043,73 @@ func TestInitChannelForCrossGuard(t *testing.T) {
 		assert.Nil(t, svcErr)
 	})
 
+	t.Run("already linked re-runs share and invite to self-heal", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = defaultTestConfig()
+		p.remoteIDs = map[string]string{"outbound:high": "remote-1"}
+
+		channel := testChannel()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("ShareChannel", mock.AnythingOfType("*model.SharedChannel")).Return(
+			&model.SharedChannel{ChannelId: channel.Id}, nil,
+		).Once()
+		api.On("InviteRemoteToChannel", "chan-id", "remote-1", testUser().Id, true).Return(nil).Once()
+
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+
+		ch, alreadyLinked, svcErr := p.initChannelForCrossGuard(testUser(), "chan-id", conn)
+		assert.NotNil(t, ch)
+		assert.True(t, alreadyLinked)
+		assert.Nil(t, svcErr)
+		api.AssertExpectations(t)
+	})
+
+	t.Run("already linked returns 500 when invite fails to heal", func(t *testing.T) {
+		api := &plugintest.API{}
+		mockLogCalls(api)
+		p, kvs := setupTestPluginWithRouter(api)
+		p.configuration = defaultTestConfig()
+		p.remoteIDs = map[string]string{"outbound:high": "remote-1"}
+
+		channel := testChannel()
+		api.On("GetChannel", "chan-id").Return(channel, nil)
+		api.On("ShareChannel", mock.AnythingOfType("*model.SharedChannel")).Return(
+			&model.SharedChannel{ChannelId: channel.Id}, nil,
+		).Once()
+		api.On("InviteRemoteToChannel", "chan-id", "remote-1", testUser().Id, true).Return(
+			&model.AppError{Id: "api.command_share.service_disabled", Message: "Shared Channels Service is disabled."},
+		).Once()
+
+		kvs.getTeamConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+		kvs.getChannelConnectionsFn = func(string) ([]store.TeamConnection, error) {
+			return []store.TeamConnection{conn}, nil
+		}
+
+		rollbackCalled := false
+		kvs.removeChannelConnectionFn = func(string, store.TeamConnection) error {
+			rollbackCalled = true
+			return nil
+		}
+
+		ch, alreadyLinked, svcErr := p.initChannelForCrossGuard(testUser(), "chan-id", conn)
+		assert.Nil(t, ch)
+		assert.False(t, alreadyLinked)
+		require.NotNil(t, svcErr)
+		assert.Equal(t, 500, svcErr.Status)
+		assert.Contains(t, svcErr.Message, "framework state could not be ensured")
+		assert.False(t, rollbackCalled, "no rollback because nothing was added")
+		api.AssertExpectations(t)
+	})
+
 	t.Run("GetChannelConnections error returns 500", func(t *testing.T) {
 		api := &plugintest.API{}
 		mockLogCalls(api)

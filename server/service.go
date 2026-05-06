@@ -590,6 +590,19 @@ func (p *Plugin) initChannelForCrossGuard(user *model.User, channelID string, co
 
 	for _, tc := range existing {
 		if tc.Matches(conn) {
+			// Already linked in Cross Guard's KV. Re-run shareChannelForRemote
+			// so any framework state that was removed externally (e.g. via
+			// /share-channel unshare or uninvite) is recreated. Both
+			// ShareChannel and InviteRemoteToChannel are idempotent on the
+			// server: the framework checks HasRemote and returns nil if the
+			// remote is already invited, and ShareChannel errors are treated
+			// as "may already be shared".
+			if shareErr := p.shareChannelForRemote(channel, conn, user.Id); shareErr != nil {
+				return nil, false, &apiError{
+					Message: fmt.Sprintf("Channel is linked but framework state could not be ensured: %s", shareErr.Error()),
+					Status:  500,
+				}
+			}
 			return channel, true, nil
 		}
 	}
