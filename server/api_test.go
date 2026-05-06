@@ -307,7 +307,6 @@ func TestHandleTestConnection(t *testing.T) {
 		resp := decodeJSONResponse(t, w)
 		assert.Contains(t, resp["error"], "queue_name is required")
 	})
-
 }
 
 // --------------------------------------------------------------------------
@@ -1381,7 +1380,6 @@ func TestHandleTestNATSOutbound(t *testing.T) {
 
 		require.Equal(t, http.StatusBadGateway, w.Code)
 	})
-
 }
 
 // TestHandleTestNATSConnection_EndToEnd drives handleTestNATSConnection via the
@@ -2055,9 +2053,11 @@ func TestHandleInitChannel_Additional(t *testing.T) {
 		api.On("GetChannelByName", teamID, "town-square", false).Return(&mmModel.Channel{Id: "ts-id"}, nil)
 		teamAdmin := &mmModel.User{Id: "ta-id", Username: "teamadmin"}
 		api.On("GetTeamMembers", teamID, mock.Anything, mock.Anything).Return(
-			[]*mmModel.TeamMember{{UserId: "ta-id", SchemeAdmin: true}}, nil).Once()
+			[]*mmModel.TeamMember{{UserId: "ta-id", SchemeAdmin: true}}, nil,
+		).Once()
 		api.On("GetTeamMembers", teamID, mock.Anything, mock.Anything).Return(
-			[]*mmModel.TeamMember{}, nil).Once()
+			[]*mmModel.TeamMember{}, nil,
+		).Once()
 		api.On("GetUser", "ta-id").Return(teamAdmin, nil)
 		api.On("GetDirectChannel", mock.Anything, mock.Anything).Return(&mmModel.Channel{Id: "dm-id"}, nil)
 		api.On("CreatePost", mock.Anything).Return(&mmModel.Post{Id: "post-id"}, nil)

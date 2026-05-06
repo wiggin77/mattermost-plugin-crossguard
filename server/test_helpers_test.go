@@ -97,6 +97,7 @@ func (s *testKVStore) RemoveChannelConnection(string, store.TeamConnection) erro
 func (s *testKVStore) GetConnectionPrompt(string, string) (*store.ConnectionPrompt, error) {
 	return nil, nil
 }
+
 func (s *testKVStore) SetConnectionPrompt(string, string, *store.ConnectionPrompt) error {
 	return nil
 }
@@ -104,9 +105,11 @@ func (s *testKVStore) DeleteConnectionPrompt(string, string) error { return nil 
 func (s *testKVStore) CreateConnectionPrompt(string, string, *store.ConnectionPrompt) (bool, error) {
 	return true, nil
 }
+
 func (s *testKVStore) GetChannelConnectionPrompt(string, string) (*store.ConnectionPrompt, error) {
 	return nil, nil
 }
+
 func (s *testKVStore) SetChannelConnectionPrompt(string, string, *store.ConnectionPrompt) error {
 	return nil
 }
@@ -120,6 +123,7 @@ func (s *testKVStore) DeleteTeamRewriteIndex(string, string) error        { retu
 func (s *testKVStore) GetConnectionRequest(string, string) (*store.ConnectionRequest, error) {
 	return nil, nil
 }
+
 func (s *testKVStore) CreateConnectionRequest(string, string, *store.ConnectionRequest) (bool, error) {
 	return true, nil
 }
@@ -127,9 +131,11 @@ func (s *testKVStore) DeleteConnectionRequest(string, string) error { return nil
 func (s *testKVStore) GetChannelConnectionRequest(string, string) (*store.ConnectionRequest, error) {
 	return nil, nil
 }
+
 func (s *testKVStore) CreateChannelConnectionRequest(string, string, *store.ConnectionRequest) (bool, error) {
 	return true, nil
 }
+
 func (s *testKVStore) UpdateChannelConnectionRequest(string, string, *store.ConnectionRequest) error {
 	return nil
 }

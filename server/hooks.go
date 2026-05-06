@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 
@@ -69,13 +70,15 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 		return mmModel.SyncResponse{}, fmt.Errorf("team lookup failed: %s", appErr.Error())
 	}
 
+	augmented := p.augmentSyncMsgUsers(msg)
+
 	env := &TransportEnvelope{
 		Version:     1,
 		Type:        TransportTypeSyncMsg,
 		ConnName:    connName,
 		TeamName:    team.Name,
 		ChannelName: channel.Name,
-		SyncMsg:     msg,
+		SyncMsg:     augmented,
 	}
 
 	if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
@@ -86,6 +89,103 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 	}
 
 	return buildSyncResponse(msg), nil
+}
+
+// augmentSyncMsgUsers ensures every locally-resident user referenced by the
+// SyncMsg's Posts, Reactions, Acknowledgements, MembershipChanges, or Statuses
+// is present in msg.Users. The shared-channels framework records "synced"
+// against an optimistic per-user cursor as soon as OnSharedChannelsSyncMsg
+// returns nil; over a fire-and-forget transport (NATS, Azure Queue, etc.) the
+// receiver may have silently dropped a previous user upsert, leaving the
+// receiver without the user record while the sender's cursor has advanced.
+// Inlining the user record on every referencing message defeats that skew.
+//
+// The receiver's upsertSyncUser is idempotent (patches existing users when
+// RemoteId matches, creates them when missing), so always-include is safe.
+//
+// The framework's SyncMsg is never mutated in place; on augmentation a new
+// SyncMsg is returned with a freshly allocated Users map.
+func (p *Plugin) augmentSyncMsgUsers(msg *mmModel.SyncMsg) *mmModel.SyncMsg {
+	if msg == nil {
+		return msg
+	}
+
+	referenced := make(map[string]struct{})
+	collect := func(uid string) {
+		if uid == "" {
+			return
+		}
+		referenced[uid] = struct{}{}
+	}
+	for _, post := range msg.Posts {
+		if post != nil {
+			collect(post.UserId)
+		}
+	}
+	for _, r := range msg.Reactions {
+		if r != nil {
+			collect(r.UserId)
+		}
+	}
+	for _, a := range msg.Acknowledgements {
+		if a != nil {
+			collect(a.UserId)
+		}
+	}
+	for _, m := range msg.MembershipChanges {
+		if m != nil {
+			collect(m.UserId)
+		}
+	}
+	for _, s := range msg.Statuses {
+		if s != nil {
+			collect(s.UserId)
+		}
+	}
+
+	for uid := range msg.Users {
+		delete(referenced, uid)
+	}
+
+	if len(referenced) == 0 {
+		return msg
+	}
+
+	augmentedUsers := make(map[string]*mmModel.User, len(msg.Users)+len(referenced))
+	maps.Copy(augmentedUsers, msg.Users)
+
+	added := 0
+	for uid := range referenced {
+		user, appErr := p.API.GetUser(uid)
+		if appErr != nil || user == nil {
+			p.API.LogWarn("Cannot fetch local user for outbound sync augmentation",
+				"error_code", errcode.OutboundSyncMsgUserLookupFailed,
+				"user_id", uid)
+			continue
+		}
+		// Skip users that originated from a remote (synthetic remote users
+		// created by a previous inbound sync). The framework's shouldUserSync
+		// applies the same filter; we re-apply it defensively because we
+		// bypass the cursor.
+		if user.RemoteId != nil && *user.RemoteId != "" {
+			continue
+		}
+		augmentedUsers[uid] = user
+		added++
+	}
+
+	if added == 0 {
+		return msg
+	}
+
+	p.API.LogInfo("Augmented outbound SyncMsg with referenced users",
+		"error_code", errcode.OutboundSyncMsgUsersAugmented,
+		"channel_id", msg.ChannelId, "added", added,
+		"total_users", len(augmentedUsers))
+
+	augmented := *msg
+	augmented.Users = augmentedUsers
+	return &augmented
 }
 
 // OnSharedChannelsAttachmentSyncMsg is a stub. File attachment sync is a

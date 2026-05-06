@@ -18,6 +18,8 @@ const (
 	PingNoRemoteMatch                  = 10105
 	PingOutboundUnhealthy              = 10106
 	PingInboundUnhealthy               = 10107
+	OutboundSyncMsgUserLookupFailed    = 10108
+	OutboundSyncMsgUsersAugmented      = 10109
 )
 
 // configuration.go (12000-12999)
@@ -307,6 +309,8 @@ var AllCodes = []int{
 	PingNoRemoteMatch,
 	PingOutboundUnhealthy,
 	PingInboundUnhealthy,
+	OutboundSyncMsgUserLookupFailed,
+	OutboundSyncMsgUsersAugmented,
 
 	APINATSTestConnectFailed,
 	APIBuildTestMessageFailed,
