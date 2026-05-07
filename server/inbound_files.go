@@ -6,19 +6,55 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
 )
 
+// fileWatcherInitialBackoff is the wait between the first WatchFiles return
+// and the next attempt. Doubles up to fileWatcherMaxBackoff so a persistently
+// broken provider does not log-spam. Declared as var so tests can shrink them.
+var (
+	fileWatcherInitialBackoff = time.Second
+	fileWatcherMaxBackoff     = time.Minute
+)
+
 // startInboundFileWatchers runs WatchFiles on the connection's provider in
-// its own goroutine. The watcher is bound to p.inboundCtx, so closeInbound's
-// cancel tears it down. The wg ensures OnDeactivate waits for the goroutine
-// to exit.
+// its own goroutine and restarts it on return until the context is cancelled.
+// WatchFiles is expected to block until ctx.Done; an early return (NATS
+// JetStream consumer torn down by a reconnect, transport-level error, etc.)
+// would otherwise leave the receiver permanently deaf to file payloads. The
+// loop logs each restart so operators can correlate watcher gaps with
+// upstream incidents.
 func (p *Plugin) startInboundFileWatchers(ctx context.Context, ic inboundConn) {
 	p.wg.Go(func() {
-		_ = ic.provider.WatchFiles(ctx, p.handleInboundFile(ic.name))
+		backoff := fileWatcherInitialBackoff
+		for {
+			err := ic.provider.WatchFiles(ctx, p.handleInboundFile(ic.name))
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				p.API.LogWarn("Inbound file watcher exited with error, will restart",
+					"error_code", errcode.InboundFileWatcherRestart,
+					"conn_name", ic.name, "backoff", backoff.String(), "error", err.Error())
+			} else {
+				p.API.LogInfo("Inbound file watcher returned without error, will restart",
+					"error_code", errcode.InboundFileWatcherRestart,
+					"conn_name", ic.name, "backoff", backoff.String())
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > fileWatcherMaxBackoff {
+				backoff = fileWatcherMaxBackoff
+			}
+		}
 	})
 }
 

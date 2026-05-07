@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -344,4 +345,51 @@ func TestStartInboundFileWatchers_CtxCancellation(t *testing.T) {
 	p.startInboundFileWatchers(ctx, ic)
 	cancel()
 	p.wg.Wait() // returns when goroutine exits
+}
+
+// TestStartInboundFileWatchers_RestartsOnError pins the contract that an
+// errored WatchFiles is retried until ctx is cancelled. Without this loop a
+// single transient JetStream/NATS hiccup at activation would leave the
+// receiver permanently deaf to file payloads.
+func TestStartInboundFileWatchers_RestartsOnError(t *testing.T) {
+	api := &plugintest.API{}
+	defaultLogMocks(api)
+	p, _, _ := inboundFileTestSetup(t, api)
+
+	calls := make(chan struct{}, 8)
+	provider := &mockQueueProvider{
+		watchFilesFn: func(ctx context.Context, _ func(string, []byte, map[string]string) error) error {
+			select {
+			case calls <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return errors.New("transient")
+		},
+	}
+
+	// Shrink the backoff so the test does not sleep for a real second.
+	prevInitial, prevMax := fileWatcherInitialBackoff, fileWatcherMaxBackoff
+	t.Cleanup(func() {
+		fileWatcherInitialBackoff = prevInitial
+		fileWatcherMaxBackoff = prevMax
+	})
+	fileWatcherInitialBackoff = time.Millisecond
+	fileWatcherMaxBackoff = time.Millisecond
+
+	ic := inboundConn{provider: provider, name: "high"}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.startInboundFileWatchers(ctx, ic)
+
+	// Receive at least three calls to prove the loop restarted twice.
+	for range 3 {
+		select {
+		case <-calls:
+		case <-time.After(time.Second):
+			t.Fatal("watcher did not restart")
+		}
+	}
+
+	cancel()
+	p.wg.Wait()
 }
