@@ -375,6 +375,15 @@ func TestOnSharedChannelsAttachmentSyncMsg_UploadError(t *testing.T) {
 
 	err := p.OnSharedChannelsAttachmentSyncMsg(fi, post, rc)
 	require.Error(t, err, "upload error must propagate so framework retries")
+
+	// Message publish (publishToOutboundConn) and file upload run on
+	// independent transports (e.g., NATS core pub/sub vs. JetStream Object
+	// Store) and failures in one must not block the other.
+	p.outboundMu.RLock()
+	defer p.outboundMu.RUnlock()
+	require.Len(t, p.outboundConns, 1)
+	assert.True(t, p.outboundConns[0].healthy,
+		"upload error must not poison message-publish health state")
 }
 
 func TestOnSharedChannelsAttachmentSyncMsg_SizeExceeded(t *testing.T) {

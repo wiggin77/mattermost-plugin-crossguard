@@ -175,28 +175,6 @@ func TestAzureBlobProvider_MaxMessageSize(t *testing.T) {
 	assert.Equal(t, 0, a.MaxMessageSize())
 }
 
-func TestPendingFileRef_JSONRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "batch.files.json")
-
-	refs := []pendingFileRef{
-		{PostID: "p1", FileID: "f1", Filename: "report.pdf"},
-		{PostID: "p2", FileID: "f2", Filename: "spec.txt"},
-	}
-
-	data, err := json.Marshal(refs)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, data, 0o600))
-
-	raw, err := os.ReadFile(path) //nolint:gosec // path built from t.TempDir
-
-	require.NoError(t, err)
-
-	var got []pendingFileRef
-	require.NoError(t, json.Unmarshal(raw, &got))
-	assert.Equal(t, refs, got)
-}
-
 func TestAzureBlobProvider_OpenWALFileLocked(t *testing.T) {
 	a, _, _ := newTestBlobProvider(t)
 	a.walMu.Lock()
@@ -295,63 +273,6 @@ func TestAzureBlobProvider_Publish(t *testing.T) {
 		err := a.Publish(t.Context(), []byte("x"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "WAL")
-	})
-}
-
-func TestAzureBlobProvider_QueueFileRef_WriteError(t *testing.T) {
-	a, _, _ := newTestBlobProvider(t)
-	a.walMu.Lock()
-	require.NoError(t, a.openWALFileLocked())
-	a.walMu.Unlock()
-
-	// Block the companion path by making it a directory.
-	companion := a.walPath[:len(a.walPath)-len(walFileExt)] + walFilesExt
-	require.NoError(t, os.MkdirAll(companion, 0o750))
-
-	// Should not panic; LogWarn is invoked on WriteFile error.
-	assert.NotPanics(t, func() {
-		a.QueueFileRef("p1", "f1", "x.pdf")
-	})
-
-	_ = a.walFile.Close()
-}
-
-func TestAzureBlobProvider_QueueFileRef(t *testing.T) {
-	t.Run("no WAL yet appends pending, no companion", func(t *testing.T) {
-		a, _, _ := newTestBlobProvider(t)
-		a.QueueFileRef("p1", "f1", "report.pdf")
-
-		a.pendingFilesMu.Lock()
-		defer a.pendingFilesMu.Unlock()
-		require.Len(t, a.pendingFiles, 1)
-		assert.Equal(t, "p1", a.pendingFiles[0].PostID)
-
-		// No companion file created (walPath was empty).
-		entries, _ := os.ReadDir(a.walDir)
-		for _, e := range entries {
-			assert.False(t, strings.HasSuffix(e.Name(), walFilesExt))
-		}
-	})
-
-	t.Run("with WAL path writes companion", func(t *testing.T) {
-		a, _, _ := newTestBlobProvider(t)
-		a.walMu.Lock()
-		require.NoError(t, a.openWALFileLocked())
-		a.walMu.Unlock()
-
-		a.QueueFileRef("p1", "f1", "a.pdf")
-		a.QueueFileRef("p2", "f2", "b.pdf")
-
-		companion := a.walPath[:len(a.walPath)-len(walFileExt)] + walFilesExt
-		assert.FileExists(t, companion)
-
-		raw, err := os.ReadFile(companion) //nolint:gosec // test-owned path under t.TempDir via provider walDir
-		require.NoError(t, err)
-		var refs []pendingFileRef
-		require.NoError(t, json.Unmarshal(raw, &refs))
-		assert.Len(t, refs, 2)
-
-		_ = a.walFile.Close()
 	})
 }
 
@@ -473,33 +394,6 @@ func TestAzureBlobProvider_Close_NilFields(t *testing.T) {
 	assert.NoError(t, a.Close())
 }
 
-func TestAzureBlobProvider_RecoverCompanionFiles(t *testing.T) {
-	t.Run("unreadable path logs and returns", func(t *testing.T) {
-		a, _, _ := newTestBlobProvider(t)
-		a.recoverCompanionFiles(t.Context(), filepath.Join(a.walDir, "nonexistent.files.json"))
-		// No panic, no pending refs added.
-		assert.Empty(t, a.pendingFiles)
-	})
-
-	t.Run("malformed JSON removes file", func(t *testing.T) {
-		a, _, _ := newTestBlobProvider(t)
-		p := filepath.Join(a.walDir, "bad.files.json")
-		require.NoError(t, os.WriteFile(p, []byte("not json"), 0o600))
-		a.recoverCompanionFiles(t.Context(), p)
-		_, err := os.Stat(p)
-		assert.True(t, os.IsNotExist(err))
-	})
-
-	t.Run("empty refs removes file", func(t *testing.T) {
-		a, _, _ := newTestBlobProvider(t)
-		p := filepath.Join(a.walDir, "empty.files.json")
-		require.NoError(t, os.WriteFile(p, []byte("[]"), 0o600))
-		a.recoverCompanionFiles(t.Context(), p)
-		_, err := os.Stat(p)
-		assert.True(t, os.IsNotExist(err))
-	})
-}
-
 func TestAzureBlobProvider_RecoverWALOnStartup_NoRoot(t *testing.T) {
 	a, _, _ := newTestBlobProvider(t)
 	// Force walDir root that does not exist - should be a no-op.
@@ -583,46 +477,6 @@ func TestAzureBlobProvider_Flush_WithUpload(t *testing.T) {
 
 		_, err := os.Stat(walPath)
 		assert.NoError(t, err, "WAL file must persist for recovery")
-	})
-}
-
-func TestAzureBlobProvider_FlushPendingFilesList(t *testing.T) {
-	t.Run("happy path uploads with files prefix and headers", func(t *testing.T) {
-		a, _, _, ops := newTestBlobProviderWithOps(t)
-		a.getFile = func(id string) ([]byte, error) { return []byte("filedata"), nil }
-
-		refs := []pendingFileRef{
-			{PostID: "p1", FileID: "f1", Filename: "report.pdf"},
-		}
-		a.flushPendingFilesList(t.Context(), refs)
-
-		require.Len(t, ops.uploads, 1)
-		up := ops.uploads[0]
-		assert.Equal(t, "files/p1/f1", up.name)
-		require.NotNil(t, up.metadata[blobMetadataHeadersKey])
-		assert.Empty(t, a.pendingFiles)
-	})
-
-	t.Run("getFile error skips ref without re-enqueueing", func(t *testing.T) {
-		a, _, _, ops := newTestBlobProviderWithOps(t)
-		a.getFile = func(id string) ([]byte, error) { return nil, errors.New("missing") }
-
-		a.flushPendingFilesList(t.Context(), []pendingFileRef{{PostID: "p1", FileID: "f1"}})
-		assert.Empty(t, ops.uploads)
-		assert.Empty(t, a.pendingFiles)
-	})
-
-	t.Run("upload error re-enqueues failed refs", func(t *testing.T) {
-		a, _, _, ops := newTestBlobProviderWithOps(t)
-		a.getFile = func(id string) ([]byte, error) { return []byte("d"), nil }
-		ops.uploadFn = func(ctx context.Context, name string, data []byte, metadata map[string]*string) error {
-			return errors.New("upload failed")
-		}
-
-		a.flushPendingFilesList(t.Context(), []pendingFileRef{
-			{PostID: "p1", FileID: "f1", Filename: "a.pdf"},
-		})
-		assert.Len(t, a.pendingFiles, 1)
 	})
 }
 
@@ -1039,15 +893,11 @@ func TestAzureBlobProvider_RecoverDirectory(t *testing.T) {
 		dir := t.TempDir()
 		walName := "conn-1-0.jsonl"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, walName), []byte("x"), 0o600))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "b.files.json"), []byte("[]"), 0o600))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "misc.txt"), []byte("x"), 0o600))
 
 		a.recoverDirectory(t.Context(), dir, false)
 		require.Len(t, ops.uploads, 1)
 		assert.Contains(t, ops.uploads[0].name, "messages/high/"+walName)
-		// companion .files.json is removed by recoverCompanionFiles.
-		_, err := os.Stat(filepath.Join(dir, "b.files.json"))
-		assert.True(t, os.IsNotExist(err))
 	})
 
 	t.Run("upload error keeps wal file", func(t *testing.T) {
@@ -1287,7 +1137,6 @@ func TestNewAzureBlobProviderFromOps(t *testing.T) {
 		cfg := AzureBlobProviderConfig{BlobContainerName: "c1"}
 		a, err := newAzureBlobProviderFromOps(t.Context(), cfg, api, kv,
 			"node-new-"+t.Name(), "conn-new-"+t.Name(),
-			func(string) ([]byte, error) { return nil, nil },
 			false, ops)
 		require.NoError(t, err)
 		require.NotNil(t, a)
@@ -1306,7 +1155,6 @@ func TestNewAzureBlobProviderFromOps(t *testing.T) {
 		cfg := AzureBlobProviderConfig{BlobContainerName: "c1", FlushIntervalSeconds: 0}
 		a, err := newAzureBlobProviderFromOps(t.Context(), cfg, api, kv,
 			"node-out-"+t.Name(), "conn-out-"+t.Name(),
-			func(string) ([]byte, error) { return nil, nil },
 			true, ops)
 		require.NoError(t, err)
 		require.NotNil(t, a.outCtx, "outbound must have outbound context")
@@ -1330,30 +1178,10 @@ func TestNewAzureBlobProviderFromOps(t *testing.T) {
 
 		_, err := newAzureBlobProviderFromOps(t.Context(), AzureBlobProviderConfig{},
 			api, &fakeKV{}, badNode, "conn-mkdir",
-			func(string) ([]byte, error) { return nil, nil },
 			false, &fakeBlobOps{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "WAL directory")
 	})
-}
-
-// TestAzureBlobProvider_Flush_PendingOnly covers flushing just deferred file refs
-// when the WAL is idle.
-func TestAzureBlobProvider_Flush_PendingOnly(t *testing.T) {
-	a, _, _, ops := newTestBlobProviderWithOps(t)
-	a.getFile = func(id string) ([]byte, error) { return []byte("filedata"), nil }
-	a.pendingFilesMu.Lock()
-	a.pendingFiles = []pendingFileRef{
-		{PostID: "p1", FileID: "f1", Filename: "a.txt"},
-	}
-	a.pendingFilesMu.Unlock()
-
-	a.flush(t.Context())
-
-	ops.mu.Lock()
-	defer ops.mu.Unlock()
-	require.Len(t, ops.uploads, 1)
-	assert.True(t, strings.HasPrefix(ops.uploads[0].name, blobFilesPrefix))
 }
 
 func TestNewAzureBlobProvider_InvalidURL(t *testing.T) {
@@ -1365,8 +1193,7 @@ func TestNewAzureBlobProvider_InvalidURL(t *testing.T) {
 		ServiceURL:        "://bad-url",
 		BlobContainerName: "c1",
 	}
-	_, err := newAzureBlobProvider(t.Context(), cfg, api, kv, "node", "conn",
-		func(string) ([]byte, error) { return nil, nil }, false)
+	_, err := newAzureBlobProvider(t.Context(), cfg, api, kv, "node", "conn", false)
 	require.Error(t, err)
 }
 
@@ -1379,8 +1206,7 @@ func TestNewAzureBlobProvider_InvalidCredential(t *testing.T) {
 		ServiceURL:        "https://acct.blob.core.windows.net",
 		BlobContainerName: "c1",
 	}
-	_, err := newAzureBlobProvider(t.Context(), cfg, api, kv, "node", "conn",
-		func(string) ([]byte, error) { return nil, nil }, false)
+	_, err := newAzureBlobProvider(t.Context(), cfg, api, kv, "node", "conn", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared key credential")
 }
@@ -1647,54 +1473,6 @@ func TestAzureBlobProvider_ReleaseBlobLock_CachedToken(t *testing.T) {
 	})
 }
 
-func TestAzureBlobProvider_RecoverCompanionFiles_UploadPaths(t *testing.T) {
-	t.Run("all refs upload removes file", func(t *testing.T) {
-		a, _, _, ops := newTestBlobProviderWithOps(t)
-		a.getFile = func(string) ([]byte, error) { return []byte("data"), nil }
-		path := filepath.Join(a.walDir, "ok.files.json")
-		refs := []pendingFileRef{{PostID: "p1", FileID: "f1", Filename: "r.pdf"}}
-		data, err := json.Marshal(refs)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(path, data, 0o600))
-
-		a.recoverCompanionFiles(t.Context(), path)
-		_, err = os.Stat(path)
-		assert.True(t, os.IsNotExist(err))
-		ops.mu.Lock()
-		defer ops.mu.Unlock()
-		assert.Len(t, ops.uploads, 1)
-	})
-
-	t.Run("partial failure rewrites file with failed refs", func(t *testing.T) {
-		a, _, _, ops := newTestBlobProviderWithOps(t)
-		a.getFile = func(string) ([]byte, error) { return []byte("ok"), nil }
-		ops.uploadFn = func(_ context.Context, name string, _ []byte, _ map[string]*string) error {
-			if strings.Contains(name, "failup") {
-				return errors.New("upload failed")
-			}
-			return nil
-		}
-
-		path := filepath.Join(a.walDir, "mix.files.json")
-		refs := []pendingFileRef{
-			{PostID: "p1", FileID: "good", Filename: "a.pdf"},
-			{PostID: "p2", FileID: "failup", Filename: "b.pdf"},
-		}
-		data, err := json.Marshal(refs)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(path, data, 0o600))
-
-		a.recoverCompanionFiles(t.Context(), path)
-
-		rewritten, err := os.ReadFile(path) //nolint:gosec // test path
-		require.NoError(t, err)
-		var got []pendingFileRef
-		require.NoError(t, json.Unmarshal(rewritten, &got))
-		require.Len(t, got, 1)
-		assert.Equal(t, "failup", got[0].FileID)
-	})
-}
-
 func TestNextListBackoff(t *testing.T) {
 	base := 5 * time.Second
 	tests := []struct {
@@ -1713,63 +1491,6 @@ func TestNextListBackoff(t *testing.T) {
 			assert.Equal(t, tt.want, nextListBackoff(tt.current, base))
 		})
 	}
-}
-
-// ---------------------------------------------------------------------------
-// persistShutdownResidue
-// ---------------------------------------------------------------------------
-
-func TestPersistShutdownResidue_EmptyRefs(t *testing.T) {
-	a, _, _ := newTestBlobProvider(t)
-	// pendingFiles is nil by default; should return immediately with no file written.
-	a.persistShutdownResidue()
-
-	entries, err := os.ReadDir(a.walDir)
-	require.NoError(t, err)
-	assert.Empty(t, entries, "no file should be written when pendingFiles is empty")
-}
-
-func TestPersistShutdownResidue_Success(t *testing.T) {
-	a, _, _ := newTestBlobProvider(t)
-	a.pendingFiles = []pendingFileRef{
-		{PostID: "p1", FileID: "f1", Filename: "file.txt"},
-		{PostID: "p2", FileID: "f2", Filename: "image.png"},
-	}
-
-	a.persistShutdownResidue()
-
-	// pendingFiles should be cleared.
-	assert.Nil(t, a.pendingFiles)
-
-	// A companion file should have been written under walDir.
-	entries, err := os.ReadDir(a.walDir)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	assert.True(t, strings.HasSuffix(entries[0].Name(), walFilesExt))
-
-	data, err := os.ReadFile(filepath.Join(a.walDir, entries[0].Name()))
-	require.NoError(t, err)
-
-	var recovered []pendingFileRef
-	require.NoError(t, json.Unmarshal(data, &recovered))
-	assert.Len(t, recovered, 2)
-	assert.Equal(t, "p1", recovered[0].PostID)
-	assert.Equal(t, "f2", recovered[1].FileID)
-}
-
-func TestPersistShutdownResidue_WriteFileError(t *testing.T) {
-	a, api, _ := newTestBlobProvider(t)
-	a.pendingFiles = []pendingFileRef{
-		{PostID: "p1", FileID: "f1", Filename: "file.txt"},
-	}
-	// Point walDir to a path that does not exist so os.WriteFile fails.
-	a.walDir = filepath.Join(t.TempDir(), "nonexistent", "deep", "path")
-
-	a.persistShutdownResidue()
-
-	// pendingFiles was drained even though write failed.
-	assert.Nil(t, a.pendingFiles)
-	api.AssertExpectations(t)
 }
 
 func TestEnsureContainerWithRetry(t *testing.T) {

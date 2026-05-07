@@ -38,9 +38,6 @@ const (
 	// walFileExt is the extension for WAL message batch files.
 	walFileExt = ".jsonl"
 
-	// walFilesExt is the extension for the companion deferred file manifest.
-	walFilesExt = ".files.json"
-
 	// blobMessagePrefix is the prefix for message batch blobs.
 	blobMessagePrefix = "messages/"
 
@@ -98,9 +95,8 @@ const (
 )
 
 // walFileNameRe validates WAL filenames during recovery and captures the
-// embedded unix-millis timestamp. Filenames are produced by openWALFileLocked as
-// "<nodeID>-<unixMilli>-<seq>.jsonl"; we also accept the shutdown-residue
-// companion name "<nodeID>-shutdown-<unixMilli>.files.json" elsewhere.
+// embedded unix-millis timestamp. Filenames are produced by openWALFileLocked
+// as "<nodeID>-<unixMilli>-<seq>.jsonl".
 var walFileNameRe = regexp.MustCompile(`^(?:[A-Za-z0-9-]+)-(\d+)-\d+\.jsonl$`)
 
 // walFileTimestampMs extracts the embedded unix-millis timestamp from a WAL
@@ -224,20 +220,6 @@ type blobLock struct {
 	Token    string `json:"token"`
 }
 
-// pendingFileRef captures file metadata to upload after WAL flush confirms.
-// Historically included ConnName, but the provider is always scoped to a
-// single connection and the field was redundant. Removed fields are safely
-// ignored by JSON unmarshal of older companion files.
-type pendingFileRef struct {
-	PostID   string `json:"post_id"`
-	FileID   string `json:"file_id"`
-	Filename string `json:"filename"`
-}
-
-// getFileFunc loads a file's bytes by file ID. It is injected to avoid a
-// direct dependency on plugin.API and to simplify testing.
-type getFileFunc func(fileID string) ([]byte, error)
-
 // azureBlobProvider implements QueueProvider using Azure Blob Storage for
 // batched message relay via .jsonl files.
 type azureBlobProvider struct {
@@ -249,7 +231,6 @@ type azureBlobProvider struct {
 	connName        string
 	flushInterval   time.Duration
 	batchPoll       time.Duration
-	getFile         getFileFunc
 	isOutbound      bool
 
 	// Lifetime context (provided by the plugin) used for outbound flush loop.
@@ -262,16 +243,6 @@ type azureBlobProvider struct {
 	walPath string
 	walSeq  int64
 	walDir  string
-
-	// Pending file refs (outbound only)
-	pendingFilesMu sync.Mutex
-	pendingFiles   []pendingFileRef
-
-	// companionMu serializes companion .files.json writes (QueueFileRef and
-	// flush) so concurrent writers cannot interleave bytes on disk. Taken
-	// after dropping walMu / pendingFilesMu and held only during the actual
-	// file write, so publish callers do not stall on disk IO.
-	companionMu sync.Mutex
 
 	// Flush control (outbound only)
 	flushTicker *time.Ticker
@@ -310,7 +281,7 @@ type azureBlobProvider struct {
 // newAzureBlobProvider constructs an azure-blob provider. If isOutbound is
 // true, the provider immediately runs WAL crash recovery and starts the flush
 // loop using the supplied ctx (which should be the plugin lifetime context).
-func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, getFile getFileFunc, isOutbound bool) (*azureBlobProvider, error) {
+func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, isOutbound bool) (*azureBlobProvider, error) {
 	cred, err := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure Blob shared key credential: %w", err)
@@ -329,7 +300,7 @@ func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api 
 		return nil, err
 	}
 
-	return newAzureBlobProviderFromOps(ctx, cfg, api, kv, nodeID, connName, getFile, isOutbound, ops)
+	return newAzureBlobProviderFromOps(ctx, cfg, api, kv, nodeID, connName, isOutbound, ops)
 }
 
 // ensureContainerWithRetry tries to create the blob container, tolerating
@@ -390,7 +361,7 @@ func isTransientAzureError(err error) bool {
 // newAzureBlobProviderFromOps constructs a provider from a pre-built
 // azureBlobOps. Used by both the public constructor (after wrapping the SDK
 // client in an adapter) and tests, which can pass a fake ops implementation.
-func newAzureBlobProviderFromOps(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, getFile getFileFunc, isOutbound bool, ops azureBlobOps) (*azureBlobProvider, error) {
+func newAzureBlobProviderFromOps(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, isOutbound bool, ops azureBlobOps) (*azureBlobProvider, error) {
 	flushSec := cfg.FlushIntervalSeconds
 	if flushSec <= 0 {
 		flushSec = defaultAzureBlobFlushIntervalSec
@@ -421,7 +392,6 @@ func newAzureBlobProviderFromOps(ctx context.Context, cfg AzureBlobProviderConfi
 		connName:        connName,
 		flushInterval:   time.Duration(flushSec) * time.Second,
 		batchPoll:       batchPoll,
-		getFile:         getFile,
 		walDir:          walDir,
 		isOutbound:      isOutbound,
 		recoveryStartMs: time.Now().UnixMilli(),
@@ -512,51 +482,9 @@ func (a *azureBlobProvider) countWALFiles() int {
 	return n
 }
 
-// QueueFileRef records a pending file upload to be performed after the next
-// WAL flush. The file ref is also persisted to a companion .files.json file
-// so it can be recovered on crash. The companion file is written outside
-// walMu / pendingFilesMu so Publish callers do not stall on disk IO;
-// companionMu serializes the actual disk write against flush().
-func (a *azureBlobProvider) QueueFileRef(postID, fileID, filename string) {
-	a.pendingFilesMu.Lock()
-	a.pendingFiles = append(a.pendingFiles, pendingFileRef{
-		PostID:   postID,
-		FileID:   fileID,
-		Filename: filename,
-	})
-	snapshot := append([]pendingFileRef(nil), a.pendingFiles...)
-	a.pendingFilesMu.Unlock()
-
-	a.walMu.Lock()
-	walPath := a.walPath
-	a.walMu.Unlock()
-
-	// No open WAL file yet: skip the companion write. The next Publish will
-	// open a WAL file and the next flush will observe the in-memory refs.
-	if walPath == "" {
-		return
-	}
-
-	companion := walPath[:len(walPath)-len(walFileExt)] + walFilesExt
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		a.api.LogWarn("Azure Blob: failed to marshal pending files",
-			"error_code", errcode.AzureBlobMarshalPendingFailed,
-			"error", err.Error())
-		return
-	}
-	a.companionMu.Lock()
-	defer a.companionMu.Unlock()
-	if err := os.WriteFile(companion, data, 0o600); err != nil {
-		a.api.LogError("Azure Blob: failed to write companion files.json",
-			"error_code", errcode.AzureBlobWriteCompanionFailed,
-			"path", companion, "error", err.Error())
-	}
-}
-
 // startFlushLoop kicks off the flush ticker goroutine. Shutdown is driven
 // solely by ctx cancellation: on ctx.Done the loop runs a bounded final
-// flush and persists any residual refs before exiting.
+// flush before exiting.
 func (a *azureBlobProvider) startFlushLoop(ctx context.Context) {
 	a.flushTicker = time.NewTicker(a.flushInterval)
 	a.flushDone = make(chan struct{})
@@ -572,10 +500,6 @@ func (a *azureBlobProvider) startFlushLoop(ctx context.Context) {
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				a.flush(shutdownCtx)
 				cancel()
-				// Persist any refs that bounced back into pendingFiles so
-				// they are not silently lost. Also surface any WAL residue
-				// for operator visibility.
-				a.persistShutdownResidue()
 				if n := a.countWALFiles(); n > 0 {
 					a.api.LogWarn("Azure Blob: shutdown left WAL files for recovery",
 						"error_code", errcode.AzureBlobShutdownLeftWALFiles,
@@ -589,102 +513,51 @@ func (a *azureBlobProvider) startFlushLoop(ctx context.Context) {
 	}()
 }
 
-// flush rotates the WAL, uploads the closed file, and then uploads deferred
-// file refs. On upload failure, the WAL file is left on disk for recovery.
+// flush rotates the WAL and uploads the closed file. On upload failure, the
+// WAL file is left on disk for recovery.
 //
 // Sync/Close of the old handle are performed *after* dropping walMu so
 // concurrent Publish calls are not blocked on disk I/O; the file handle is
 // only detached (a.walFile = nil, a.walPath = "") inside the lock.
 func (a *azureBlobProvider) flush(ctx context.Context) {
 	a.walMu.Lock()
-	a.pendingFilesMu.Lock()
 
-	if a.walFile == nil && len(a.pendingFiles) == 0 {
-		a.pendingFilesMu.Unlock()
+	if a.walFile == nil {
 		a.walMu.Unlock()
 		return
 	}
 
-	var oldFile *os.File
-	var oldWALPath string
-	if a.walFile != nil {
-		oldFile = a.walFile
-		oldWALPath = a.walPath
-		a.walFile = nil
-		a.walPath = ""
-	}
+	oldFile := a.walFile
+	oldWALPath := a.walPath
+	a.walFile = nil
+	a.walPath = ""
 
-	oldPending := a.pendingFiles
-	a.pendingFiles = nil
-
-	a.pendingFilesMu.Unlock()
 	a.walMu.Unlock()
 
 	// Sync + Close outside the lock so Publish callers can immediately open
 	// a new WAL file without waiting on disk I/O.
-	if oldFile != nil {
-		if err := oldFile.Sync(); err != nil {
-			a.api.LogWarn("Azure Blob: WAL fsync failed during rotation",
-				"error_code", errcode.AzureBlobWALFsyncRotationFailed,
-				"path", oldWALPath, "error", err.Error())
-		}
-		if err := oldFile.Close(); err != nil {
-			a.api.LogError("Azure Blob: WAL close failed during rotation, skipping upload",
-				"error_code", errcode.AzureBlobWALCloseRotationFailed,
-				"path", oldWALPath, "error", err.Error())
-			oldWALPath = ""
-		}
+	if err := oldFile.Sync(); err != nil {
+		a.api.LogWarn("Azure Blob: WAL fsync failed during rotation",
+			"error_code", errcode.AzureBlobWALFsyncRotationFailed,
+			"path", oldWALPath, "error", err.Error())
+	}
+	if err := oldFile.Close(); err != nil {
+		a.api.LogError("Azure Blob: WAL close failed during rotation, skipping upload",
+			"error_code", errcode.AzureBlobWALCloseRotationFailed,
+			"path", oldWALPath, "error", err.Error())
+		return
 	}
 
-	// Step 5: Upload the old WAL file.
-	if oldWALPath != "" {
-		if err := a.uploadWALFile(ctx, oldWALPath); err != nil {
-			a.api.LogError("Azure Blob: WAL upload failed, leaving for recovery",
-				"error_code", errcode.AzureBlobWALUploadFailed,
-				"path", oldWALPath, "error", err.Error())
-			return
-		}
-		if err := os.Remove(oldWALPath); err != nil && !os.IsNotExist(err) {
-			a.api.LogWarn("Azure Blob: failed to delete WAL after upload",
-				"error_code", errcode.AzureBlobDeleteWALFailed,
-				"path", oldWALPath, "error", err.Error())
-		}
+	if err := a.uploadWALFile(ctx, oldWALPath); err != nil {
+		a.api.LogError("Azure Blob: WAL upload failed, leaving for recovery",
+			"error_code", errcode.AzureBlobWALUploadFailed,
+			"path", oldWALPath, "error", err.Error())
+		return
 	}
-
-	// Step 6: Upload deferred file refs. Capture failures so the companion
-	// file can be rewritten with just the failed refs (instead of deleted),
-	// preserving them across a crash before the next flush cycle.
-	var failed []pendingFileRef
-	if len(oldPending) > 0 {
-		failed = a.flushPendingFilesList(ctx, oldPending)
-	}
-
-	// Rewrite or remove the companion .files.json for the flushed batch.
-	// We rewrite under companionMu so we don't race QueueFileRef on the same
-	// path (it writes to the *current* companion, which only matches oldWAL
-	// if a new WAL hasn't rotated in).
-	if oldWALPath != "" {
-		companion := oldWALPath[:len(oldWALPath)-len(walFileExt)] + walFilesExt
-		a.companionMu.Lock()
-		if len(failed) > 0 {
-			data, mErr := json.Marshal(failed)
-			if mErr != nil {
-				a.api.LogError("Azure Blob: failed to marshal failed refs for companion rewrite",
-					"error_code", errcode.AzureBlobMarshalFailedRefsFailed,
-					"path", companion, "count", len(failed), "error", mErr.Error())
-			} else if wErr := os.WriteFile(companion, data, 0o600); wErr != nil {
-				a.api.LogError("Azure Blob: failed to rewrite companion files.json with failed refs",
-					"error_code", errcode.AzureBlobRewriteCompanionFailed,
-					"path", companion, "count", len(failed), "error", wErr.Error())
-			}
-		} else {
-			if err := os.Remove(companion); err != nil && !os.IsNotExist(err) {
-				a.api.LogWarn("Azure Blob: failed to delete companion files.json",
-					"error_code", errcode.AzureBlobDeleteCompanionFailed,
-					"path", companion, "error", err.Error())
-			}
-		}
-		a.companionMu.Unlock()
+	if err := os.Remove(oldWALPath); err != nil && !os.IsNotExist(err) {
+		a.api.LogWarn("Azure Blob: failed to delete WAL after upload",
+			"error_code", errcode.AzureBlobDeleteWALFailed,
+			"path", oldWALPath, "error", err.Error())
 	}
 }
 
@@ -705,79 +578,6 @@ func (a *azureBlobProvider) uploadWALFile(ctx context.Context, path string) erro
 		return fmt.Errorf("upload blob %q: %w", blobName, err)
 	}
 	return nil
-}
-
-// flushPendingFilesList uploads each pending file ref. Failures are re-enqueued
-// so they are retried on the next flush cycle. Returns the refs that failed
-// so callers (e.g. recovery) can persist them rather than rely on the in-memory
-// re-enqueue.
-func (a *azureBlobProvider) flushPendingFilesList(ctx context.Context, refs []pendingFileRef) []pendingFileRef {
-	var failed []pendingFileRef
-	for i, ref := range refs {
-		// Respect shutdown: re-enqueue the rest rather than keep uploading.
-		if ctx.Err() != nil {
-			failed = append(failed, refs[i:]...)
-			break
-		}
-		data, err := a.getFile(ref.FileID)
-		if err != nil {
-			a.api.LogError("Azure Blob: deferred file fetch failed",
-				"error_code", errcode.AzureBlobDeferredFileFetchFailed,
-				"file_id", ref.FileID, "post_id", ref.PostID, "error", err.Error())
-			continue
-		}
-		key := ref.PostID + "/" + ref.FileID
-		headers := map[string]string{
-			headerPostID:   ref.PostID,
-			headerConnName: a.connName,
-			headerFilename: ref.Filename,
-		}
-		if err := a.UploadFile(ctx, key, data, headers); err != nil {
-			a.api.LogError("Azure Blob: deferred file upload failed",
-				"error_code", errcode.AzureBlobDeferredFileUploadFailed,
-				"file_id", ref.FileID, "post_id", ref.PostID, "error", err.Error())
-			failed = append(failed, ref)
-		}
-	}
-	if len(failed) > 0 {
-		a.pendingFilesMu.Lock()
-		a.pendingFiles = append(failed, a.pendingFiles...)
-		a.pendingFilesMu.Unlock()
-	}
-	return failed
-}
-
-// persistShutdownResidue writes any in-memory pendingFiles to a dedicated
-// companion file inside walDir so they are recoverable on next startup. Must
-// be called after the final flush, before returning from the flush loop.
-func (a *azureBlobProvider) persistShutdownResidue() {
-	a.pendingFilesMu.Lock()
-	refs := a.pendingFiles
-	a.pendingFiles = nil
-	a.pendingFilesMu.Unlock()
-
-	if len(refs) == 0 {
-		return
-	}
-
-	name := fmt.Sprintf("%s-shutdown-%d%s", a.nodeID, time.Now().UnixMilli(), walFilesExt)
-	path := filepath.Join(a.walDir, name)
-	data, err := json.Marshal(refs)
-	if err != nil {
-		a.api.LogError("Azure Blob: shutdown: failed to marshal residual pending files",
-			"error_code", errcode.AzureBlobShutdownMarshalResidualFailed,
-			"count", len(refs), "error", err.Error())
-		return
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		a.api.LogError("Azure Blob: shutdown: failed to persist residual pending files",
-			"error_code", errcode.AzureBlobShutdownPersistResidualFailed,
-			"count", len(refs), "path", path, "error", err.Error())
-		return
-	}
-	a.api.LogWarn("Azure Blob: shutdown persisted residual pending files for recovery",
-		"error_code", errcode.AzureBlobShutdownPersistedResidual,
-		"count", len(refs), "path", path)
 }
 
 // Subscribe starts the inbound poll loop. The outbound flush loop is started
@@ -1169,12 +969,11 @@ func (a *azureBlobProvider) recoverWALOnStartup(ctx context.Context) {
 	}
 }
 
-// recoverDirectory uploads WAL files and processes companion .files.json in a
-// WAL directory. If isCurrent is false, the directory is removed after
-// recovery (it belongs to a previous nodeID). For the current node's
-// directory, any WAL file whose embedded timestamp is at or after the
-// provider start time is skipped: such a file was created by a live Publish
-// call and must not be raced against.
+// recoverDirectory uploads WAL files in a WAL directory. If isCurrent is
+// false, the directory is removed after recovery (it belongs to a previous
+// nodeID). For the current node's directory, any WAL file whose embedded
+// timestamp is at or after the provider start time is skipped: such a file
+// was created by a live Publish call and must not be raced against.
 func (a *azureBlobProvider) recoverDirectory(ctx context.Context, dir string, isCurrent bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1194,84 +993,36 @@ func (a *azureBlobProvider) recoverDirectory(ctx context.Context, dir string, is
 		name := e.Name()
 		path := filepath.Join(dir, name)
 
-		switch {
-		case strings.HasSuffix(name, walFileExt):
-			if !walFileNameRe.MatchString(name) {
-				a.api.LogWarn("Azure Blob: WAL recovery: skipping unrecognized file",
-					"error_code", errcode.AzureBlobWALRecoverySkipUnrecognized,
-					"path", path)
+		if !strings.HasSuffix(name, walFileExt) {
+			continue
+		}
+		if !walFileNameRe.MatchString(name) {
+			a.api.LogWarn("Azure Blob: WAL recovery: skipping unrecognized file",
+				"error_code", errcode.AzureBlobWALRecoverySkipUnrecognized,
+				"path", path)
+			continue
+		}
+		if isCurrent {
+			if ts, ok := walFileTimestampMs(name); ok && ts >= a.recoveryStartMs {
 				continue
 			}
-			if isCurrent {
-				if ts, ok := walFileTimestampMs(name); ok && ts >= a.recoveryStartMs {
-					continue
-				}
-			}
-			if err := a.uploadWALFile(ctx, path); err != nil {
-				a.api.LogError("Azure Blob: WAL recovery upload failed",
-					"error_code", errcode.AzureBlobWALRecoveryUploadFailed,
-					"path", path, "error", err.Error())
-				continue
-			}
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				a.api.LogWarn("Azure Blob: WAL recovery delete failed",
-					"error_code", errcode.AzureBlobWALRecoveryDeleteFailed,
-					"path", path, "error", err.Error())
-			}
-		case strings.HasSuffix(name, walFilesExt):
-			a.recoverCompanionFiles(ctx, path)
+		}
+		if err := a.uploadWALFile(ctx, path); err != nil {
+			a.api.LogError("Azure Blob: WAL recovery upload failed",
+				"error_code", errcode.AzureBlobWALRecoveryUploadFailed,
+				"path", path, "error", err.Error())
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			a.api.LogWarn("Azure Blob: WAL recovery delete failed",
+				"error_code", errcode.AzureBlobWALRecoveryDeleteFailed,
+				"path", path, "error", err.Error())
 		}
 	}
 
 	if !isCurrent {
 		// Remove the old nodeID directory if empty.
 		_ = os.Remove(dir)
-	}
-}
-
-// recoverCompanionFiles reads a companion .files.json and uploads the listed
-// files. Refs that fail to upload are persisted back to the same companion
-// file so they are retried on the next startup; the file is only removed when
-// all refs succeed (or when the file is malformed / empty).
-func (a *azureBlobProvider) recoverCompanionFiles(ctx context.Context, path string) {
-	raw, err := os.ReadFile(path) //nolint:gosec // path from walDir scan
-	if err != nil {
-		a.api.LogWarn("Azure Blob: WAL recovery: failed to read companion file",
-			"error_code", errcode.AzureBlobWALRecoveryReadCompanionFail,
-			"path", path, "error", err.Error())
-		return
-	}
-	var refs []pendingFileRef
-	if unmarshalErr := json.Unmarshal(raw, &refs); unmarshalErr != nil {
-		a.api.LogWarn("Azure Blob: WAL recovery: malformed companion file",
-			"error_code", errcode.AzureBlobWALRecoveryMalformedCompanion,
-			"path", path, "error", unmarshalErr.Error())
-		_ = os.Remove(path)
-		return
-	}
-	if len(refs) == 0 {
-		_ = os.Remove(path)
-		return
-	}
-	failed := a.flushPendingFilesList(ctx, refs)
-	if len(failed) == 0 {
-		_ = os.Remove(path)
-		return
-	}
-	// Rewrite the companion with only the failed refs so the next startup
-	// retries them. On write failure, keep the original file untouched so the
-	// data is not lost.
-	data, err := json.Marshal(failed)
-	if err != nil {
-		a.api.LogWarn("Azure Blob: WAL recovery: failed to marshal remaining refs",
-			"error_code", errcode.AzureBlobWALRecoveryMarshalRemaining,
-			"path", path, "count", len(failed), "error", err.Error())
-		return
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		a.api.LogWarn("Azure Blob: WAL recovery: failed to rewrite companion file",
-			"error_code", errcode.AzureBlobWALRecoveryRewriteCompanion,
-			"path", path, "count", len(failed), "error", err.Error())
 	}
 }
 

@@ -171,34 +171,30 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 
 // uploadToOutboundConn uploads file bytes via the named outbound connection's
 // QueueProvider file path. Headers are passed through to the provider verbatim.
-// Returns an error when the provider is missing, unhealthy, or the upload
-// itself fails.
+// Returns an error when the provider is missing or the upload itself fails.
+//
+// Health tracking is intentionally not shared with publishToOutboundConn: the
+// message-publish and file-upload paths are independent on every transport
+// (e.g., NATS uses core pub/sub for messages but JetStream Object Store for
+// files), so a JetStream Object Store outage must not block message delivery
+// and a broken core-NATS connection must not block uploads. Each path manages
+// its own retries via the framework's hook-error semantics.
 func (p *Plugin) uploadToOutboundConn(ctx context.Context, connName, key string, data []byte, headers map[string]string) error {
 	p.outboundMu.RLock()
-	var oc *outboundConn
+	var provider QueueProvider
 	for i := range p.outboundConns {
 		if p.outboundConns[i].name == connName {
-			candidate := p.outboundConns[i]
-			oc = &candidate
+			provider = p.outboundConns[i].provider
 			break
 		}
 	}
 	p.outboundMu.RUnlock()
 
-	if oc == nil {
+	if provider == nil {
 		return fmt.Errorf("no outbound provider for connection %q", connName)
 	}
 
-	if !oc.healthy && time.Since(oc.lastCheckTime) < healthRecheckInterval {
-		return fmt.Errorf("outbound connection %q is unhealthy, skipping upload", connName)
-	}
-
-	if err := oc.provider.UploadFile(ctx, key, data, headers); err != nil {
-		p.updateOutboundHealth(connName, false)
-		return err
-	}
-	p.updateOutboundHealth(connName, true)
-	return nil
+	return provider.UploadFile(ctx, key, data, headers)
 }
 
 // outboundConnConfigByName returns the outbound connection config for the
@@ -252,15 +248,8 @@ func (p *Plugin) createProvider(cfg ConnectionConfig, direction string) (QueuePr
 		if cfg.AzureBlob == nil {
 			return nil, errMissingAzureBlobConfig
 		}
-		getFile := func(fileID string) ([]byte, error) {
-			data, appErr := p.API.GetFile(fileID)
-			if appErr != nil {
-				return nil, appErr
-			}
-			return data, nil
-		}
 		isOutbound := direction == "Outbound"
-		return newAzureBlobProvider(p.ctx, *cfg.AzureBlob, p.API, &p.client.KV, p.nodeID, cfg.Name, getFile, isOutbound)
+		return newAzureBlobProvider(p.ctx, *cfg.AzureBlob, p.API, &p.client.KV, p.nodeID, cfg.Name, isOutbound)
 	case ProviderAzureServiceBus:
 		if cfg.AzureServiceBus == nil {
 			return nil, errMissingAzureServiceBusConfig
