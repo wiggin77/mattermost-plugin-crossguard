@@ -213,6 +213,22 @@ func (p *Plugin) outboundConnConfigByName(connName string) (ConnectionConfig, bo
 	return ConnectionConfig{}, false
 }
 
+// inboundConnConfigByName returns the inbound connection config for the
+// given name, or false if it is not present in the current configuration.
+func (p *Plugin) inboundConnConfigByName(connName string) (ConnectionConfig, bool) {
+	cfg := p.getConfiguration()
+	conns, err := cfg.GetInboundConnections()
+	if err != nil {
+		return ConnectionConfig{}, false
+	}
+	for _, c := range conns {
+		if c.Name == connName {
+			return c, true
+		}
+	}
+	return ConnectionConfig{}, false
+}
+
 // updateOutboundHealth marks the outbound connection with the given name as
 // healthy or unhealthy.
 func (p *Plugin) updateOutboundHealth(name string, healthy bool) {

@@ -102,6 +102,26 @@ func (p *Plugin) handleInboundAttachment(connName, key string, data []byte, head
 		return nil
 	}
 
+	// Defense in depth: enforce the receiver's own per-connection file
+	// transfer policy. The sender already gates on its outbound config,
+	// but a misconfigured or compromised sender must not be able to push
+	// files the receiver has disabled or denied. Drop early so disabled /
+	// filtered files do not pay the cost of team and channel lookups.
+	if conn, ok := p.inboundConnConfigByName(connName); ok {
+		if !conn.FileTransferEnabled {
+			p.API.LogInfo("Inbound attachment: file transfer disabled on receiver",
+				"error_code", errcode.InboundAttachmentDisabled,
+				"conn_name", connName, "post_id", postID, "filename", fi.Name)
+			return nil
+		}
+		if !isFileAllowed(fi.Name, conn.FileFilterMode, conn.FileFilterTypes) {
+			p.API.LogInfo("Inbound attachment: file rejected by receiver filter",
+				"error_code", errcode.InboundAttachmentFiltered,
+				"conn_name", connName, "post_id", postID, "filename", fi.Name)
+			return nil
+		}
+	}
+
 	team, err := p.findTeamByRewrite(connName, teamName)
 	if err != nil {
 		p.API.LogWarn("Inbound attachment: team rewrite lookup failed",
@@ -168,6 +188,18 @@ func (p *Plugin) handleInboundProfileImage(connName, _ string, data []byte, head
 		p.API.LogWarn("Inbound profile image: missing user_id header",
 			"error_code", errcode.InboundProfileImageMissingHeader,
 			"conn_name", connName)
+		return nil
+	}
+
+	// Defense in depth: profile images use the same per-connection toggle
+	// as attachments. Filter mode does not apply (the filename is always
+	// "profile.png"). A receiver that turned file transfer off must not be
+	// flooded with profile images regardless of what the sender's config
+	// says.
+	if conn, ok := p.inboundConnConfigByName(connName); ok && !conn.FileTransferEnabled {
+		p.API.LogInfo("Inbound profile image: file transfer disabled on receiver",
+			"error_code", errcode.InboundProfileImageDisabled,
+			"conn_name", connName, "user_id", userID)
 		return nil
 	}
 

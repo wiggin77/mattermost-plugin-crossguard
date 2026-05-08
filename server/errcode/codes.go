@@ -329,6 +329,9 @@ const (
 	InboundProfileImageNoRemoteForConn    = 28009
 	InboundProfileImageReceiveFailed      = 28010
 	InboundFileWatcherRestart             = 28011
+	InboundAttachmentDisabled             = 28012
+	InboundAttachmentFiltered             = 28013
+	InboundProfileImageDisabled           = 28014
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -600,4 +603,7 @@ var AllCodes = []int{
 	InboundProfileImageNoRemoteForConn,
 	InboundProfileImageReceiveFailed,
 	InboundFileWatcherRestart,
+	InboundAttachmentDisabled,
+	InboundAttachmentFiltered,
+	InboundProfileImageDisabled,
 }

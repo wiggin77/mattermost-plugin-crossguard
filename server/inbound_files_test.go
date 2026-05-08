@@ -19,7 +19,9 @@ import (
 
 // inboundFileTestSetup wires a Plugin with a flexibleKVStore and a remoteID
 // mapping for "inbound:high". Returns the plugin, the kvstore, and the
-// connection name.
+// connection name. No connection configuration is installed, so the
+// inbound file-transfer gates are not exercised; use
+// inboundFileTestSetupWithConfig for tests that need them.
 func inboundFileTestSetup(t *testing.T, api *plugintest.API) (*Plugin, *flexibleKVStore, string) {
 	t.Helper()
 	p, kvs := setupTestPluginWithRouter(api)
@@ -28,6 +30,19 @@ func inboundFileTestSetup(t *testing.T, api *plugintest.API) (*Plugin, *flexible
 		"inbound:" + connName: mmModel.NewId(),
 	}
 	return p, kvs, connName
+}
+
+// inboundFileTestSetupWithConfig wires the same plugin as inboundFileTestSetup
+// and additionally installs a configuration containing the supplied inbound
+// connection. Use this when a test needs the inbound file-transfer gates
+// (FileTransferEnabled / FileFilterMode / FileFilterTypes) to fire.
+func inboundFileTestSetupWithConfig(t *testing.T, api *plugintest.API, conn ConnectionConfig) (*Plugin, *flexibleKVStore) {
+	t.Helper()
+	p, kvs, _ := inboundFileTestSetup(t, api)
+	connsJSON, err := json.Marshal([]ConnectionConfig{conn})
+	require.NoError(t, err)
+	p.configuration = &configuration{InboundConnections: string(connsJSON)}
+	return p, kvs
 }
 
 func encodedFileInfo(t *testing.T, fi *mmModel.FileInfo) string {
@@ -325,6 +340,75 @@ func TestDecodeFileInfoHeader_BadJSON(t *testing.T) {
 	enc := base64.StdEncoding.EncodeToString([]byte("not json"))
 	_, err := decodeFileInfoHeader(enc)
 	require.Error(t, err)
+}
+
+func TestHandleInboundAttachment_DisabledByReceiver(t *testing.T) {
+	api := &plugintest.API{}
+	defaultLogMocks(api)
+	conn := ConnectionConfig{
+		Name:                "high",
+		Provider:            ProviderNATS,
+		FileTransferEnabled: false,
+	}
+	p, _ := inboundFileTestSetupWithConfig(t, api, conn)
+
+	fi := &mmModel.FileInfo{Id: "f1", Name: "doc.pdf"}
+	headers := map[string]string{
+		headerKind:     kindAttachment,
+		headerTeamName: "team-a",
+		headerChanName: "general",
+		headerPostID:   "p1",
+		headerFileInfo: encodedFileInfo(t, fi),
+	}
+	require.NoError(t, p.handleInboundAttachment("high", "k", []byte("x"), headers))
+	api.AssertNotCalled(t, "GetTeamByName", mock.Anything)
+	api.AssertNotCalled(t, "ReceiveSharedChannelAttachmentSyncMsg",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestHandleInboundAttachment_FilteredByReceiver(t *testing.T) {
+	api := &plugintest.API{}
+	defaultLogMocks(api)
+	conn := ConnectionConfig{
+		Name:                "high",
+		Provider:            ProviderNATS,
+		FileTransferEnabled: true,
+		FileFilterMode:      fileFilterModeDeny,
+		FileFilterTypes:     ".exe",
+	}
+	p, _ := inboundFileTestSetupWithConfig(t, api, conn)
+
+	fi := &mmModel.FileInfo{Id: "f1", Name: "tool.exe"}
+	headers := map[string]string{
+		headerKind:     kindAttachment,
+		headerTeamName: "team-a",
+		headerChanName: "general",
+		headerPostID:   "p1",
+		headerFileInfo: encodedFileInfo(t, fi),
+	}
+	require.NoError(t, p.handleInboundAttachment("high", "k", []byte("x"), headers))
+	api.AssertNotCalled(t, "GetTeamByName", mock.Anything)
+	api.AssertNotCalled(t, "ReceiveSharedChannelAttachmentSyncMsg",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func TestHandleInboundProfileImage_DisabledByReceiver(t *testing.T) {
+	api := &plugintest.API{}
+	defaultLogMocks(api)
+	conn := ConnectionConfig{
+		Name:                "high",
+		Provider:            ProviderNATS,
+		FileTransferEnabled: false,
+	}
+	p, _ := inboundFileTestSetupWithConfig(t, api, conn)
+
+	headers := map[string]string{
+		headerKind:   kindProfileImage,
+		headerUserID: "u1",
+	}
+	require.NoError(t, p.handleInboundProfileImage("high", "profile_image/u1", []byte("png"), headers))
+	api.AssertNotCalled(t, "ReceiveSharedChannelProfileImageSyncMsg",
+		mock.Anything, mock.Anything, mock.Anything)
 }
 
 func TestStartInboundFileWatchers_CtxCancellation(t *testing.T) {
