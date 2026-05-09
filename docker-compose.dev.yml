@@ -125,7 +125,14 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-    image: mattermost/mattermost-enterprise-edition:${MATTERMOST_IMAGE_TAG:-latest}
+    # The plugin's min_server_version requires features only present in
+    # post-release builds of the server. Default to a CI image built from
+    # master at a known-good commit (mattermostdevelopment/mm-ee-test:<sha>).
+    # Override either part with MATTERMOST_IMAGE_REPO / MATTERMOST_IMAGE_TAG,
+    # for example to target an official release like
+    #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
+    #   MATTERMOST_IMAGE_TAG=11.7
+    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5504435}
     restart: unless-stopped
     ports:
       - "${MM_PORT_A:-8075}:8065"
@@ -144,6 +151,15 @@ services:
       MM_SERVICESETTINGS_LISTENADDRESS: :8065
       MM_PLUGINSETTINGS_ENABLEUPLOADS: "true"
       MM_PLUGINSETTINGS_AUTOMATICPREPACKAGEDPLUGINS: "false"
+      # Shared channels feature flags. The plugin's relay path calls the
+      # shared channels framework, which is off by default. Set both the
+      # new ConnectedWorkspacesSettings paths (authoritative on 11.x) and
+      # the legacy ExperimentalSettings paths so older builds still work.
+      MM_CONNECTEDWORKSPACESSETTINGS_ENABLESHAREDCHANNELS: "true"
+      MM_CONNECTEDWORKSPACESSETTINGS_ENABLEREMOTECLUSTERSERVICE: "true"
+      MM_EXPERIMENTALSETTINGS_ENABLESHAREDCHANNELS: "true"
+      MM_EXPERIMENTALSETTINGS_ENABLEREMOTECLUSTERSERVICE: "true"
+      MM_FEATUREFLAGS_ENABLEREMOTECLUSTERSERVICE: "true"
       MM_LOGSETTINGS_CONSOLELEVEL: DEBUG
       MM_LOGSETTINGS_ENABLEFILE: "false"
       MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
@@ -157,7 +173,14 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-    image: mattermost/mattermost-enterprise-edition:${MATTERMOST_IMAGE_TAG:-latest}
+    # The plugin's min_server_version requires features only present in
+    # post-release builds of the server. Default to a CI image built from
+    # master at a known-good commit (mattermostdevelopment/mm-ee-test:<sha>).
+    # Override either part with MATTERMOST_IMAGE_REPO / MATTERMOST_IMAGE_TAG,
+    # for example to target an official release like
+    #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
+    #   MATTERMOST_IMAGE_TAG=11.7
+    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5504435}
     restart: unless-stopped
     ports:
       - "${MM_PORT_B:-8076}:8065"
@@ -176,6 +199,15 @@ services:
       MM_SERVICESETTINGS_LISTENADDRESS: :8065
       MM_PLUGINSETTINGS_ENABLEUPLOADS: "true"
       MM_PLUGINSETTINGS_AUTOMATICPREPACKAGEDPLUGINS: "false"
+      # Shared channels feature flags. The plugin's relay path calls the
+      # shared channels framework, which is off by default. Set both the
+      # new ConnectedWorkspacesSettings paths (authoritative on 11.x) and
+      # the legacy ExperimentalSettings paths so older builds still work.
+      MM_CONNECTEDWORKSPACESSETTINGS_ENABLESHAREDCHANNELS: "true"
+      MM_CONNECTEDWORKSPACESSETTINGS_ENABLEREMOTECLUSTERSERVICE: "true"
+      MM_EXPERIMENTALSETTINGS_ENABLESHAREDCHANNELS: "true"
+      MM_EXPERIMENTALSETTINGS_ENABLEREMOTECLUSTERSERVICE: "true"
+      MM_FEATUREFLAGS_ENABLEREMOTECLUSTERSERVICE: "true"
       MM_LOGSETTINGS_CONSOLELEVEL: DEBUG
       MM_LOGSETTINGS_ENABLEFILE: "false"
       MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
@@ -187,3 +219,14 @@ volumes:
   # Docker-managed named volume so SQL Server Linux (UID 10001) can
   # write its data files without host-permission workarounds.
   servicebus-mssql-data:
+
+# Pin the bridge subnet to 192.168.77.0/24. Docker's default 172.16.0.0/12
+# pool overlaps subnet routes that Tailscale peers commonly advertise (the
+# AWS Mattermost dev hosts publish a 172.16.0.0/12 route), which makes the
+# host-side route to the bridge lose to Tailscale's policy table. 192.168.77
+# is not a typical home or office LAN range, so it stays out of the way.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 192.168.77.0/24

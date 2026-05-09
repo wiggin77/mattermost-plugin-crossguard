@@ -324,6 +324,12 @@ nuke: docker-kill-orphans
 # Docker Development Environment (Dual-Server)
 # ====================================================================================
 DOCKER_COMPOSE := docker compose -f docker-compose.dev.yml
+# MM_HOST is the host that curl uses to reach the dockerized Mattermost
+# servers. Defaults to 127.0.0.1 because some Linux setups (Docker IPv6
+# disabled while glibc returns ::1 for "localhost") cause curl's Happy
+# Eyeballs to pick a TCP path that connects but never receives data.
+# Override (e.g. MM_HOST=localhost) when running from another host.
+MM_HOST ?= 127.0.0.1
 MM_PORT_A ?= 8075
 MM_PORT_B ?= 8076
 
@@ -387,7 +393,7 @@ docker-setup: docker-start
 	fi
 	@echo "Waiting for Server A (mattermost-a) to be ready..."
 	@elapsed=0; \
-	while ! curl -sf http://localhost:$(MM_PORT_A)/api/v4/system/ping >/dev/null 2>&1; do \
+	while ! curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/system/ping >/dev/null 2>&1; do \
 		sleep 2; \
 		elapsed=$$((elapsed + 2)); \
 		if [ $$elapsed -ge 120 ]; then \
@@ -399,7 +405,7 @@ docker-setup: docker-start
 	done
 	@echo "Waiting for Server B (mattermost-b) to be ready..."
 	@elapsed=0; \
-	while ! curl -sf http://localhost:$(MM_PORT_B)/api/v4/system/ping >/dev/null 2>&1; do \
+	while ! curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/system/ping >/dev/null 2>&1; do \
 		sleep 2; \
 		elapsed=$$((elapsed + 2)); \
 		if [ $$elapsed -ge 120 ]; then \
@@ -447,18 +453,18 @@ docker-setup: docker-start
 	@$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local team users add test admin 2>/dev/null || echo "Admin already in Test B team"
 	@$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local team users add test userb 2>/dev/null || echo "userb already in Test B team"
 	@echo "Setting Onyx theme for Server B users..."
-	@TOKEN_B=$$(curl -sf -X POST http://localhost:$(MM_PORT_B)/api/v4/users/login \
+	@TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
-	ADMIN_ID=$$(curl -sf http://localhost:$(MM_PORT_B)/api/v4/users/username/admin \
+	ADMIN_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/username/admin \
 		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
-	USERB_ID=$$(curl -sf http://localhost:$(MM_PORT_B)/api/v4/users/username/userb \
+	USERB_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/username/userb \
 		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
 	ONYX_ESCAPED=$$(echo '{"sidebarBg":"#202228","sidebarText":"#ffffff","sidebarUnreadText":"#ffffff","sidebarTextHoverBg":"#25262a","sidebarTextActiveBorder":"#4a7ce8","sidebarTextActiveColor":"#ffffff","sidebarHeaderBg":"#24272d","sidebarHeaderTextColor":"#ffffff","sidebarTeamBarBg":"#292c33","onlineIndicator":"#3db887","awayIndicator":"#f5ab00","dndIndicator":"#d24b4e","mentionBg":"#4b7ce7","mentionColor":"#ffffff","centerChannelBg":"#191b1f","centerChannelColor":"#e3e4e8","newMessageSeparator":"#1adbdb","linkColor":"#5d89ea","buttonBg":"#4a7ce8","buttonColor":"#ffffff","errorTextColor":"#da6c6e","mentionHighlightBg":"#0d6e6e","mentionHighlightLink":"#a4f4f4","codeTheme":"monokai"}' | sed 's/"/\\"/g') && \
-	curl -sf -X PUT http://localhost:$(MM_PORT_B)/api/v4/users/$$ADMIN_ID/preferences \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/$$ADMIN_ID/preferences \
 		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
 		-d "[{\"user_id\":\"$$ADMIN_ID\",\"category\":\"theme\",\"name\":\"\",\"value\":\"$$ONYX_ESCAPED\"}]" >/dev/null && \
-	curl -sf -X PUT http://localhost:$(MM_PORT_B)/api/v4/users/$$USERB_ID/preferences \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/$$USERB_ID/preferences \
 		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
 		-d "[{\"user_id\":\"$$USERB_ID\",\"category\":\"theme\",\"name\":\"\",\"value\":\"$$ONYX_ESCAPED\"}]" >/dev/null && \
 	echo "  Onyx theme set for admin and userb on Server B"
@@ -475,12 +481,12 @@ docker-setup: docker-start
 	@echo "  Team:        Test B"
 	@echo ""
 	@echo "NATS: nats://localhost:$${NATS_PORT:-4222}"
-	@echo "NATS Monitor: http://localhost:$${NATS_MONITOR_PORT:-8222}"
+	@echo "NATS Monitor: http://$(MM_HOST):$${NATS_MONITOR_PORT:-8222}"
 	@echo "NATS (from plugins): nats://nats:4222"
 	@echo ""
 	@echo "Azurite (Azure Storage Emulator):"
-	@echo "  Queue: http://localhost:$${AZURITE_QUEUE_PORT:-10001}"
-	@echo "  Blob:  http://localhost:$${AZURITE_BLOB_PORT:-10000}"
+	@echo "  Queue: http://$(MM_HOST):$${AZURITE_QUEUE_PORT:-10001}"
+	@echo "  Blob:  http://$(MM_HOST):$${AZURITE_BLOB_PORT:-10000}"
 	@echo "=========================================="
 	@echo ""
 	@echo "Next: run 'make deploy' to build, deploy, and configure connections."
@@ -514,18 +520,18 @@ docker-deploy: docker-check dist
 	@echo "Plugin $(PLUGIN_ID) deployed and enabled on Server B"
 	@echo ""
 	@echo "Configuring connections..."
-	@TOKEN_A=$$(curl -sf -X POST http://localhost:$(MM_PORT_A)/api/v4/users/login \
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
-	curl -sf -X PUT http://localhost:$(MM_PORT_A)/api/v4/config/patch \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
 		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"loopback\",\"provider\":\"nats\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.loopback\",\"auth_type\":\"none\"}},{\"name\":\"xml-loopback\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.xml-loopback\",\"auth_type\":\"none\"}}]","inboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}},{\"name\":\"loopback\",\"provider\":\"nats\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.loopback\",\"auth_type\":\"none\"}},{\"name\":\"xml-loopback\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.xml-loopback\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
 	echo "Server A configured with outbound:low-to-high(files),loopback,xml-loopback(xml) + inbound:high-to-low(files),loopback,xml-loopback(xml)"
-	@TOKEN_B=$$(curl -sf -X POST http://localhost:$(MM_PORT_B)/api/v4/users/login \
+	@TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
-	curl -sf -X PUT http://localhost:$(MM_PORT_B)/api/v4/config/patch \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_B" \
 		-H "Content-Type: application/json" \
 		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}}]","outboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
