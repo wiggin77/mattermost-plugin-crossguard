@@ -526,16 +526,16 @@ docker-deploy: docker-check dist
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
-		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"loopback\",\"provider\":\"nats\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.loopback\",\"auth_type\":\"none\"}},{\"name\":\"xml-loopback\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.xml-loopback\",\"auth_type\":\"none\"}}]","inboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}},{\"name\":\"loopback\",\"provider\":\"nats\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.loopback\",\"auth_type\":\"none\"}},{\"name\":\"xml-loopback\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.xml-loopback\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
-	echo "Server A configured with outbound:low-to-high(files),loopback,xml-loopback(xml) + inbound:high-to-low(files),loopback,xml-loopback(xml)"
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"xml-low-to-high\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.xml\",\"auth_type\":\"none\"}}]","inboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
+	echo "Server A configured with outbound:low-to-high(files),xml-low-to-high(xml) + inbound:high-to-low(files)"
 	@TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_B" \
 		-H "Content-Type: application/json" \
-		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}}]","outboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
-	echo "Server B configured with inbound:low-to-high(files) + outbound:high-to-low(files)"
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"xml-low-to-high\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.xml\",\"auth_type\":\"none\"}}]","outboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
+	echo "Server B configured with inbound:low-to-high(files),xml-low-to-high(xml) + outbound:high-to-low(files)"
 
 ## Disable and re-enable plugin on both servers
 .PHONY: docker-reset
