@@ -113,7 +113,7 @@ Outbound: MM Post Hook -> buildEnvelope() -> publishToOutbound() -> QueueProvide
 Inbound:  QueueProvider.Subscribe() -> handleInboundMessage() -> resolve team/channel -> create post
 ```
 
-**Outbound path** (`hooks.go` -> `connections.go`): Mattermost hook methods (`MessageHasBeenPosted`, `MessageHasBeenUpdated`, `MessageHasBeenDeleted`, `ReactionHasBeenAdded/Removed`) check if the channel is relay-enabled, build an `Envelope`, and publish to all matching outbound providers. Backpressure is enforced via `relaySem` (256 slots) and `fileSem` (32 slots).
+**Outbound path** (`hooks.go` -> `connections.go`): Mattermost hook methods (`MessageHasBeenPosted`, `MessageHasBeenUpdated`, `MessageHasBeenDeleted`, `ReactionHasBeenAdded/Removed`) check if the channel is relay-enabled, build an `Envelope`, and publish to all matching outbound providers.
 
 **Inbound path** (`inbound.go`): Each inbound connection subscribes to its provider. Messages are unmarshaled from JSON or XML into `model.Envelope`, then dispatched by type to handlers that resolve team/channel, check idempotency via post mappings, resolve or create sync users, and create/update/delete local posts.
 

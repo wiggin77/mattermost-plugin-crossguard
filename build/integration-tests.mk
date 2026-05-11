@@ -372,6 +372,18 @@ docker-integration-test: docker-check
 	echo "XML test result: $$XML_FOUND" || \
 	{ echo "XML test FAILED: message xml-test:$$XML_ID not found on Server B test/xml-test"; exit 1; }
 	@echo ""
+	@echo "Running post lifecycle test..."
+	@$(MAKE) docker-post-lifecycle-test
+	@echo ""
+	@echo "Running profile image sync test..."
+	@$(MAKE) docker-profile-image-test
+	@echo ""
+	@echo "Running file filter test..."
+	@$(MAKE) docker-file-filter-test
+	@echo ""
+	@echo "Running prompt accept/block test..."
+	@$(MAKE) docker-prompt-test
+	@echo ""
 	@echo "Running Azure integration tests..."
 	@$(MAKE) docker-azure-smoke-test
 	@$(MAKE) docker-azure-blob-smoke-test
@@ -710,6 +722,7 @@ docker-azure-blob-smoke-test: docker-check
 
 SERVICEBUS_PORT_DEFAULT := 5672
 SERVICEBUS_QUEUE := crossguard-relay
+SERVICEBUS_BLOB := crossguard-servicebus-files
 SERVICEBUS_EMULATOR_CONNSTR := Endpoint=sb://servicebus-emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true
 SERVICEBUS_HOST_CONNSTR := Endpoint=sb://localhost:$(SERVICEBUS_PORT_DEFAULT);SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true
 
@@ -782,7 +795,7 @@ docker-servicebus-smoke-test: docker-check servicebus-probe-run
 	echo "Adding servicebus-low-to-high outbound to Server A config..." && \
 	EXISTING_OB_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
-	NEW_OB_A=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_OB_A'); existing=[c for c in existing if c.get('name')!='servicebus-low-to-high']; existing.append({\"name\":\"servicebus-low-to-high\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	NEW_OB_A=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_OB_A'); existing=[c for c in existing if c.get('name')!='servicebus-low-to-high']; existing.append({\"name\":\"servicebus-low-to-high\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"blob_account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"blob_account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(SERVICEBUS_BLOB)\",\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
@@ -791,7 +804,7 @@ docker-servicebus-smoke-test: docker-check servicebus-probe-run
 	echo "Adding servicebus-low-to-high inbound to Server B config..." && \
 	EXISTING_IB_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
-	NEW_IB_B=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB_B'); existing=[c for c in existing if c.get('name')!='servicebus-low-to-high']; existing.append({\"name\":\"servicebus-low-to-high\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	NEW_IB_B=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB_B'); existing=[c for c in existing if c.get('name')!='servicebus-low-to-high']; existing.append({\"name\":\"servicebus-low-to-high\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"blob_account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"blob_account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(SERVICEBUS_BLOB)\",\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_B" \
 		-H "Content-Type: application/json" \
@@ -846,3 +859,470 @@ docker-servicebus-smoke-test: docker-check servicebus-probe-run
 	echo "Service Bus message relay test: $$SB_FOUND" && \
 	[ "$$SB_FOUND" = "PASS" ] || \
 	{ echo "Service Bus message relay FAILED: servicebus-smoke-test:$$SB_ID not found on Server B test/servicebus-test"; exit 1; }
+	@echo ""
+	@echo "Running Service Bus file relay test..."
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_USERF=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"userf","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	SB_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/teams/name/test/channels/name/servicebus-test \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	SB_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/teams/name/test/channels/name/servicebus-test \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	SB_FILE_ID=$$(date +%s)-$$$$-sbf && \
+	echo "Uploading sample.pdf to Server A and posting via Service Bus connection..." && \
+	FILE_UPLOAD=$$(curl -sf -X POST "http://$(MM_HOST):$(MM_PORT_A)/api/v4/files?channel_id=$$SB_A" \
+		-H "Authorization: Bearer $$TOKEN_USERF" -F "files=@testdata/sample.pdf" \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['file_infos'][0]['id'])") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERF" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$SB_A"'","message":"servicebus-file-test:'"$$SB_FILE_ID"'","file_ids":["'"$$FILE_UPLOAD"'"]}' >/dev/null && \
+	echo "  Posted servicebus-file-test:$$SB_FILE_ID with sample.pdf to Server A test/servicebus-test" && \
+	echo "Polling Server B for Service Bus file relay (up to 60s)..." && \
+	SB_FILE_FOUND="FAIL" && \
+	for i in $$(seq 1 60); do \
+		sleep 1; \
+		SB_FILE_FOUND=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$SB_B/posts?per_page=10" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$SB_FILE_ID';m=[p for p in d.get('posts',{}).values() if 'servicebus-file-test:'+sid in p.get('message','')];files=(m[0].get('metadata') or {}).get('files') or [] if m else [];print('PASS' if m and len(files)>0 else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$SB_FILE_FOUND" = "PASS" ] && break; \
+	done && \
+	echo "Service Bus file relay test: $$SB_FILE_FOUND" && \
+	[ "$$SB_FILE_FOUND" = "PASS" ] || \
+	{ echo "Service Bus file relay FAILED: servicebus-file-test:$$SB_FILE_ID not found with attachments on Server B test/servicebus-test"; exit 1; }
+
+## Post lifecycle test: edits, deletes, reactions on the smoke test channel.
+## Requires the smoke test to have run (the low-to-high channel must be linked
+## end-to-end). Resolves the B-side post id once by message content, then drives
+## edit / reaction-add / reaction-remove / delete on Server A and verifies each
+## change propagates to the same post on Server B.
+.PHONY: docker-post-lifecycle-test
+docker-post-lifecycle-test: docker-check
+	@echo ""
+	@echo "Running cross-server post lifecycle test..."
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_USERA=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"usera","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	LTH_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/teams/name/test/channels/name/low-to-high \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	LTH_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/teams/name/test/channels/name/low-to-high \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	USERA_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/username/usera \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	LIFE_ID=$$(date +%s)-$$$$-life && \
+	echo "Posting lifecycle base message from Server A as usera..." && \
+	POST_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$LTH_A"'","message":"lifecycle-test:'"$$LIFE_ID"'"}' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "  Posted lifecycle-test:$$LIFE_ID (A post id: $$POST_A)" && \
+	echo "Polling Server B for the relayed post id (up to 20s)..." && \
+	POST_B="" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		POST_B=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$LTH_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$LIFE_ID';ids=[p['id'] for p in d.get('posts',{}).values() if 'lifecycle-test:'+sid in p.get('message','')];print(ids[0] if ids else '')"); \
+		[ -n "$$POST_B" ] && break; \
+	done && \
+	[ -n "$$POST_B" ] || { echo "Initial relay FAILED: lifecycle-test:$$LIFE_ID not found on Server B"; exit 1; } && \
+	echo "  Initial relay PASS (B post id: $$POST_B)" && \
+	echo "Editing the post on Server A..." && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts/$$POST_A/patch \
+		-H "Authorization: Bearer $$TOKEN_USERA" \
+		-H "Content-Type: application/json" \
+		-d '{"message":"lifecycle-test:'"$$LIFE_ID"' edited"}' >/dev/null && \
+	echo "  Edit issued; polling Server B for update (up to 20s)..." && \
+	EDIT_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		EDIT_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/posts/$$POST_B" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;p=json.load(sys.stdin);m=p.get('message','');u=p.get('update_at',0);c=p.get('create_at',0);print('PASS' if 'edited' in m and u>c else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$EDIT_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Edit relay test: $$EDIT_OK" && \
+	[ "$$EDIT_OK" = "PASS" ] || { echo "Edit relay FAILED: post $$POST_B on Server B did not reflect edit"; exit 1; } && \
+	echo "Adding reaction (thumbsup) on Server A..." && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/reactions \
+		-H "Authorization: Bearer $$TOKEN_USERA" \
+		-H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERA_ID"'","post_id":"'"$$POST_A"'","emoji_name":"thumbsup"}' >/dev/null && \
+	echo "  Reaction issued; polling Server B (up to 20s)..." && \
+	REACT_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		REACT_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/posts/$$POST_B/reactions" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;r=json.load(sys.stdin);print('PASS' if any(x.get('emoji_name')=='thumbsup' for x in (r or [])) else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$REACT_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Reaction add relay test: $$REACT_OK" && \
+	[ "$$REACT_OK" = "PASS" ] || { echo "Reaction add relay FAILED: thumbsup not present on $$POST_B"; exit 1; } && \
+	echo "Removing reaction (thumbsup) on Server A..." && \
+	curl -sf -X DELETE http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/$$USERA_ID/posts/$$POST_A/reactions/thumbsup \
+		-H "Authorization: Bearer $$TOKEN_USERA" >/dev/null && \
+	echo "  Reaction removal issued; polling Server B (up to 20s)..." && \
+	UNREACT_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		UNREACT_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/posts/$$POST_B/reactions" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;r=json.load(sys.stdin);print('PASS' if not any(x.get('emoji_name')=='thumbsup' for x in (r or [])) else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$UNREACT_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Reaction remove relay test: $$UNREACT_OK" && \
+	[ "$$UNREACT_OK" = "PASS" ] || { echo "Reaction remove relay FAILED: thumbsup still present on $$POST_B"; exit 1; } && \
+	echo "Deleting the post on Server A..." && \
+	curl -sf -X DELETE http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts/$$POST_A \
+		-H "Authorization: Bearer $$TOKEN_USERA" >/dev/null && \
+	echo "  Delete issued; polling Server B (up to 20s)..." && \
+	DEL_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		DEL_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/posts/$$POST_B?include_deleted=true" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;p=json.load(sys.stdin);print('PASS' if p.get('delete_at',0)>0 else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$DEL_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Delete relay test: $$DEL_OK" && \
+	[ "$$DEL_OK" = "PASS" ] || { echo "Delete relay FAILED: post $$POST_B not marked deleted on Server B"; exit 1; }
+
+## Profile image sync test: uploads a new avatar for a dedicated user on
+## Server A and verifies the framework propagates the change to the sync user
+## on Server B (last_picture_update must advance). Uses a fresh user (userg)
+## so it does not interfere with the smoke test's usera sync ownership.
+.PHONY: docker-profile-image-test
+docker-profile-image-test: docker-check
+	@echo ""
+	@echo "Running cross-server profile image sync test..."
+	@echo "Creating dedicated user (userg) on Server A..."
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local user create \
+		--email userg@example.com --username userg --password 'password' 2>/dev/null \
+		|| echo "  User userg already exists on Server A"
+	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local team users add test userg 2>/dev/null || true
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_USERG=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"userg","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	LTH_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/teams/name/test/channels/name/low-to-high \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	USERG_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/username/userg \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "Adding userg to test/low-to-high channel..." && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/channels/$$LTH_A/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERG_ID"'"}' >/dev/null 2>&1 || true && \
+	echo "Posting warmup message from userg (triggers framework user sync to Server B)..." && \
+	WARM_ID=$$(date +%s)-$$$$-prof && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERG" \
+		-H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$LTH_A"'","message":"profile-warmup:'"$$WARM_ID"'"}' >/dev/null && \
+	echo "  Polling Server B for sync user userg:cross-guard--low-to-high (up to 30s)..." && \
+	SYNC_USER_ID="" && INITIAL_LPU="0" && \
+	for i in $$(seq 1 30); do \
+		sleep 1; \
+		SYNC_INFO=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/users?per_page=200" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;users=json.load(sys.stdin);m=[u for u in users if u.get('username','').startswith('userg:')];print(m[0]['id']+' '+str(m[0].get('last_picture_update',0)) if m else '')" 2>/dev/null || echo ""); \
+		[ -n "$$SYNC_INFO" ] && SYNC_USER_ID=$$(echo $$SYNC_INFO | awk '{print $$1}') && INITIAL_LPU=$$(echo $$SYNC_INFO | awk '{print $$2}') && break; \
+	done && \
+	[ -n "$$SYNC_USER_ID" ] || { echo "Profile sync setup FAILED: userg sync user not found on Server B"; exit 1; } && \
+	echo "  Sync user found: id=$$SYNC_USER_ID last_picture_update=$$INITIAL_LPU" && \
+	echo "Generating unique profile image (forces a new last_picture_update)..." && \
+	python3 build/gen-unique-png.py > /tmp/userg-unique-image.png && \
+	echo "Uploading new profile image for userg on Server A..." && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/$$USERG_ID/image \
+		-H "Authorization: Bearer $$TOKEN_USERG" \
+		-F "image=@/tmp/userg-unique-image.png" >/dev/null && \
+	echo "  Image uploaded; polling Server B for last_picture_update advance (up to 90s)..." && \
+	LPU_OK="FAIL" && NEW_LPU="$$INITIAL_LPU" && \
+	for i in $$(seq 1 90); do \
+		sleep 1; \
+		NEW_LPU=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/$$SYNC_USER_ID" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin).get('last_picture_update',0))" 2>/dev/null || echo "$$INITIAL_LPU"); \
+		if [ "$$NEW_LPU" -gt "$$INITIAL_LPU" ] 2>/dev/null; then LPU_OK="PASS"; break; fi; \
+	done && \
+	echo "  Profile image sync test: $$LPU_OK (initial=$$INITIAL_LPU, new=$$NEW_LPU)" && \
+	[ "$$LPU_OK" = "PASS" ] || { echo "Profile image sync FAILED: last_picture_update did not advance on Server B"; exit 1; }
+
+## File filter test: verify sender-side and receiver-side file_filter_mode=deny
+## drops blocked attachments while still relaying the post body. Cleans up
+## (clears filter, resets plugin) at the end of each sub-test so subsequent
+## tests find an unfiltered low-to-high connection.
+## NOTE: sub-test C from the implementation plan (per-connection max_file_size)
+## is not implementable: the plugin reads the server's global
+## FileSettings.MaxFileSize, not a per-connection field. Size enforcement is
+## covered by Go unit tests in hooks_test.go.
+.PHONY: docker-file-filter-test
+docker-file-filter-test: docker-check
+	@echo ""
+	@echo "Running cross-server file filter test..."
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_USERA=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"usera","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	LTH_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/teams/name/test/channels/name/low-to-high \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	LTH_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/teams/name/test/channels/name/low-to-high \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "--- Sub-test A: sender-side deny .pdf ---" && \
+	echo "Setting file_filter_mode=deny, file_filter_types=.pdf on Server A outbound low-to-high..." && \
+	EXISTING_OB_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
+	NEW_OB_A=$$(python3 -c "import sys,json; e=json.loads('$$EXISTING_OB_A'); [c.update({'file_filter_mode':'deny','file_filter_types':'.pdf'}) for c in e if c.get('name')=='low-to-high']; print(json.dumps(e))") && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"'"$$(echo $$NEW_OB_A | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin disable $(PLUGIN_ID) >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin enable $(PLUGIN_ID) >/dev/null && \
+	sleep 3 && \
+	echo "  Server A plugin reset (filter=deny .pdf)" && \
+	FA_DENY_ID=$$(date +%s)-$$$$-fad && \
+	FILE_UPLOAD=$$(curl -sf -X POST "http://$(MM_HOST):$(MM_PORT_A)/api/v4/files?channel_id=$$LTH_A" \
+		-H "Authorization: Bearer $$TOKEN_USERA" -F "files=@testdata/sample.pdf" \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['file_infos'][0]['id'])") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$LTH_A"'","message":"filter-deny:'"$$FA_DENY_ID"'","file_ids":["'"$$FILE_UPLOAD"'"]}' >/dev/null && \
+	echo "  Posted filter-deny:$$FA_DENY_ID with PDF; polling B (file should be filtered, up to 20s)..." && \
+	FA_DENY_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		FA_DENY_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$LTH_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$FA_DENY_ID';m=[p for p in d.get('posts',{}).values() if 'filter-deny:'+sid in p.get('message','')];files=(m[0].get('metadata') or {}).get('files') or [] if m else [];print('PASS' if m and len(files)==0 else ('FAIL_WITH_FILES' if m else 'NOT_YET'))" 2>/dev/null || echo "NOT_YET"); \
+		[ "$$FA_DENY_OK" = "PASS" ] && break; \
+		[ "$$FA_DENY_OK" = "FAIL_WITH_FILES" ] && break; \
+	done && \
+	echo "  Sub-test A (sender deny .pdf): $$FA_DENY_OK" && \
+	[ "$$FA_DENY_OK" = "PASS" ] || { echo "Sub-test A FAILED: PDF reached Server B despite sender deny filter"; exit 1; } && \
+	echo "Switching filter to .txt (PDF now allowed)..." && \
+	EXISTING_OB_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
+	NEW_OB_A=$$(python3 -c "import sys,json; e=json.loads('$$EXISTING_OB_A'); [c.update({'file_filter_mode':'deny','file_filter_types':'.txt'}) for c in e if c.get('name')=='low-to-high']; print(json.dumps(e))") && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"'"$$(echo $$NEW_OB_A | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin disable $(PLUGIN_ID) >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin enable $(PLUGIN_ID) >/dev/null && \
+	sleep 3 && \
+	FA_ALLOW_ID=$$(date +%s)-$$$$-faa && \
+	FILE_UPLOAD2=$$(curl -sf -X POST "http://$(MM_HOST):$(MM_PORT_A)/api/v4/files?channel_id=$$LTH_A" \
+		-H "Authorization: Bearer $$TOKEN_USERA" -F "files=@testdata/sample.pdf" \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['file_infos'][0]['id'])") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$LTH_A"'","message":"filter-allow:'"$$FA_ALLOW_ID"'","file_ids":["'"$$FILE_UPLOAD2"'"]}' >/dev/null && \
+	echo "  Posted filter-allow:$$FA_ALLOW_ID with PDF; polling B (file should relay, up to 20s)..." && \
+	FA_ALLOW_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		FA_ALLOW_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$LTH_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$FA_ALLOW_ID';m=[p for p in d.get('posts',{}).values() if 'filter-allow:'+sid in p.get('message','')];files=(m[0].get('metadata') or {}).get('files') or [] if m else [];print('PASS' if m and len(files)>0 else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$FA_ALLOW_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Sub-test A negative (filter=.txt, PDF allowed): $$FA_ALLOW_OK" && \
+	[ "$$FA_ALLOW_OK" = "PASS" ] || { echo "Sub-test A negative FAILED: PDF should have relayed when filter excluded other extensions"; exit 1; } && \
+	echo "Restoring Server A: clearing sender filter..." && \
+	EXISTING_OB_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
+	NEW_OB_A=$$(python3 -c "import sys,json; e=json.loads('$$EXISTING_OB_A'); [c.update({'file_filter_mode':'','file_filter_types':''}) for c in e if c.get('name')=='low-to-high']; print(json.dumps(e))") && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"'"$$(echo $$NEW_OB_A | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin disable $(PLUGIN_ID) >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin enable $(PLUGIN_ID) >/dev/null && \
+	sleep 3 && \
+	echo "--- Sub-test B: receiver-side deny .pdf ---" && \
+	echo "Setting file_filter_mode=deny, file_filter_types=.pdf on Server B inbound low-to-high..." && \
+	EXISTING_IB_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
+	NEW_IB_B=$$(python3 -c "import sys,json; e=json.loads('$$EXISTING_IB_B'); [c.update({'file_filter_mode':'deny','file_filter_types':'.pdf'}) for c in e if c.get('name')=='low-to-high']; print(json.dumps(e))") && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"'"$$(echo $$NEW_IB_B | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local plugin disable $(PLUGIN_ID) >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local plugin enable $(PLUGIN_ID) >/dev/null && \
+	sleep 3 && \
+	echo "  Server B plugin reset (receiver filter=deny .pdf)" && \
+	FB_DENY_ID=$$(date +%s)-$$$$-fbd && \
+	FILE_UPLOAD3=$$(curl -sf -X POST "http://$(MM_HOST):$(MM_PORT_A)/api/v4/files?channel_id=$$LTH_A" \
+		-H "Authorization: Bearer $$TOKEN_USERA" -F "files=@testdata/sample.pdf" \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['file_infos'][0]['id'])") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$LTH_A"'","message":"filter-recv-deny:'"$$FB_DENY_ID"'","file_ids":["'"$$FILE_UPLOAD3"'"]}' >/dev/null && \
+	echo "  Posted filter-recv-deny:$$FB_DENY_ID with PDF; polling B (file should be filtered by receiver, up to 20s)..." && \
+	FB_DENY_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		FB_DENY_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$LTH_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$FB_DENY_ID';m=[p for p in d.get('posts',{}).values() if 'filter-recv-deny:'+sid in p.get('message','')];files=(m[0].get('metadata') or {}).get('files') or [] if m else [];print('PASS' if m and len(files)==0 else ('FAIL_WITH_FILES' if m else 'NOT_YET'))" 2>/dev/null || echo "NOT_YET"); \
+		[ "$$FB_DENY_OK" = "PASS" ] && break; \
+		[ "$$FB_DENY_OK" = "FAIL_WITH_FILES" ] && break; \
+	done && \
+	echo "  Sub-test B (receiver deny .pdf): $$FB_DENY_OK" && \
+	echo "Restoring Server B: clearing receiver filter..." && \
+	EXISTING_IB_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/config \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
+	NEW_IB_B=$$(python3 -c "import sys,json; e=json.loads('$$EXISTING_IB_B'); [c.update({'file_filter_mode':'','file_filter_types':''}) for c in e if c.get('name')=='low-to-high']; print(json.dumps(e))") && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"'"$$(echo $$NEW_IB_B | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local plugin disable $(PLUGIN_ID) >/dev/null && \
+	$(DOCKER_COMPOSE) exec -T mattermost-b mmctl --local plugin enable $(PLUGIN_ID) >/dev/null && \
+	sleep 3 && \
+	[ "$$FB_DENY_OK" = "PASS" ] || { echo "Sub-test B FAILED: PDF reached Server B despite receiver deny filter (state: $$FB_DENY_OK)"; exit 1; } && \
+	echo "  Receiver filter cleared, Server B plugin reset"
+
+## Connection prompt accept/block test: drives the first-time-link prompt
+## flow at the channel level. Uses a fresh channel name per run so prompt KV
+## state from previous runs does not mask new prompts. Requires the team to
+## already be linked (the smoke test does this for low-to-high on Server B).
+## Each sub-test uses its own channel name so the accept and block flows
+## stay independent.
+.PHONY: docker-prompt-test
+docker-prompt-test: docker-check
+	@echo ""
+	@echo "Running cross-server channel prompt accept/block test..."
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TOKEN_USERA=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"usera","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	TEAM_A=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/teams/name/test \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	TEAM_B=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/teams/name/test \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	USERA_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/username/usera \
+		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	ADMIN_B_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/username/admin \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	RUN_ID=$$(date +%s)-$$$$ && \
+	echo "--- Accept path ---" && \
+	ACC_NAME="prompt-accept-$$RUN_ID" && \
+	echo "Creating channel $$ACC_NAME on both servers..." && \
+	ACC_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$TEAM_A"'","name":"'"$$ACC_NAME"'","display_name":"'"$$ACC_NAME"'","type":"O"}' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	ACC_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$TEAM_B"'","name":"'"$$ACC_NAME"'","display_name":"'"$$ACC_NAME"'","type":"O"}' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "  Server A: $$ACC_A; Server B: $$ACC_B" && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/channels/$$ACC_A/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
+	echo "Linking channel on Server A (outbound only)..." && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$ACC_A"'","command":"/crossguard init-channel outbound:low-to-high"}' >/dev/null && \
+	echo "Posting trigger message on Server A (should NOT relay; should trigger prompt on B)..." && \
+	ACC_TRIG=$$(date +%s)-$$$$-acc-trig && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$ACC_A"'","message":"prompt-trigger:'"$$ACC_TRIG"'"}' >/dev/null && \
+	echo "Polling Server B channel $$ACC_NAME for prompt post (up to 20s)..." && \
+	PROMPT_FOUND="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		PROMPT_FOUND=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$ACC_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);hits=[p for p in d.get('posts',{}).values() if 'inbound Cross Guard connection' in p.get('message','') and 'low-to-high' in p.get('message','')];print('PASS' if hits else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$PROMPT_FOUND" = "PASS" ] && break; \
+	done && \
+	[ "$$PROMPT_FOUND" = "PASS" ] || { echo "Accept path FAILED: prompt not posted on Server B"; exit 1; } && \
+	echo "  Prompt posted on Server B" && \
+	echo "Calling channel/accept endpoint..." && \
+	ACCEPT_BODY=$$(python3 -c "import json; print(json.dumps({'user_id':'$$ADMIN_B_ID','context':{'channel_id':'$$ACC_B','conn_name':'low-to-high'}}))") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/plugins/crossguard/api/v1/prompt/channel/accept \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d "$$ACCEPT_BODY" >/dev/null && \
+	sleep 2 && \
+	echo "Verifying channel is now linked on Server B..." && \
+	LINKED=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/plugins/crossguard/api/v1/channels/$$ACC_B/status" \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; d=json.load(sys.stdin); conns=d.get('team_connections',[]); m=[c for c in conns if c.get('name')=='low-to-high' and c.get('direction')=='inbound']; print('PASS' if m and m[0].get('linked') else 'FAIL')") && \
+	[ "$$LINKED" = "PASS" ] || { echo "Accept path FAILED: channel not linked after accept (status=$$LINKED)"; exit 1; } && \
+	echo "  Channel linked PASS" && \
+	echo "Posting follow-up on Server A (should now relay)..." && \
+	ACC_FOLLOW=$$(date +%s)-$$$$-acc-follow && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$ACC_A"'","message":"prompt-follow:'"$$ACC_FOLLOW"'"}' >/dev/null && \
+	FOLLOW_OK="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		FOLLOW_OK=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$ACC_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$ACC_FOLLOW';print('PASS' if any('prompt-follow:'+sid in p.get('message','') for p in d.get('posts',{}).values()) else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$FOLLOW_OK" = "PASS" ] && break; \
+	done && \
+	echo "  Accept path follow-up relay: $$FOLLOW_OK" && \
+	[ "$$FOLLOW_OK" = "PASS" ] || { echo "Accept path FAILED: follow-up did not relay"; exit 1; } && \
+	echo "--- Block path ---" && \
+	BLK_NAME="prompt-block-$$RUN_ID" && \
+	echo "Creating channel $$BLK_NAME on both servers..." && \
+	BLK_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$TEAM_A"'","name":"'"$$BLK_NAME"'","display_name":"'"$$BLK_NAME"'","type":"O"}' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	BLK_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d '{"team_id":"'"$$TEAM_B"'","name":"'"$$BLK_NAME"'","display_name":"'"$$BLK_NAME"'","type":"O"}' \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+	echo "  Server A: $$BLK_A; Server B: $$BLK_B" && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/channels/$$BLK_A/members \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"user_id":"'"$$USERA_ID"'"}' >/dev/null 2>&1 || true && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/commands/execute \
+		-H "Authorization: Bearer $$TOKEN_A" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$BLK_A"'","command":"/crossguard init-channel outbound:low-to-high"}' >/dev/null && \
+	BLK_TRIG=$$(date +%s)-$$$$-blk-trig && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$BLK_A"'","message":"prompt-trigger:'"$$BLK_TRIG"'"}' >/dev/null && \
+	echo "Polling Server B for prompt on $$BLK_NAME (up to 20s)..." && \
+	BLK_PROMPT="FAIL" && \
+	for i in $$(seq 1 20); do \
+		sleep 1; \
+		BLK_PROMPT=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$BLK_B/posts?per_page=20" \
+			-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);hits=[p for p in d.get('posts',{}).values() if 'inbound Cross Guard connection' in p.get('message','') and 'low-to-high' in p.get('message','')];print('PASS' if hits else 'FAIL')" 2>/dev/null || echo "FAIL"); \
+		[ "$$BLK_PROMPT" = "PASS" ] && break; \
+	done && \
+	[ "$$BLK_PROMPT" = "PASS" ] || { echo "Block path FAILED: prompt not posted on Server B"; exit 1; } && \
+	echo "Calling channel/block endpoint..." && \
+	BLOCK_BODY=$$(python3 -c "import json; print(json.dumps({'user_id':'$$ADMIN_B_ID','context':{'channel_id':'$$BLK_B','conn_name':'low-to-high'}}))") && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/plugins/crossguard/api/v1/prompt/channel/block \
+		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
+		-d "$$BLOCK_BODY" >/dev/null && \
+	sleep 2 && \
+	echo "Posting follow-up on Server A (should NOT relay)..." && \
+	BLK_FOLLOW=$$(date +%s)-$$$$-blk-follow && \
+	curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/posts \
+		-H "Authorization: Bearer $$TOKEN_USERA" -H "Content-Type: application/json" \
+		-d '{"channel_id":"'"$$BLK_A"'","message":"prompt-follow:'"$$BLK_FOLLOW"'"}' >/dev/null && \
+	echo "Waiting 10s and verifying follow-up did NOT relay..." && \
+	sleep 10 && \
+	BLK_FOLLOW_LEAKED=$$(curl -sf "http://$(MM_HOST):$(MM_PORT_B)/api/v4/channels/$$BLK_B/posts?per_page=20" \
+		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json;d=json.load(sys.stdin);sid='$$BLK_FOLLOW';print('LEAKED' if any('prompt-follow:'+sid in p.get('message','') for p in d.get('posts',{}).values()) else 'BLOCKED')" 2>/dev/null || echo "BLOCKED") && \
+	echo "  Block path follow-up: $$BLK_FOLLOW_LEAKED" && \
+	[ "$$BLK_FOLLOW_LEAKED" = "BLOCKED" ] || { echo "Block path FAILED: follow-up relayed despite block"; exit 1; }
