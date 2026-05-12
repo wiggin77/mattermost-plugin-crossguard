@@ -4,11 +4,14 @@ import (
 	"encoding/xml"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
@@ -16,13 +19,14 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 		Version:     1,
 		Type:        TransportTypeSyncMsg,
 		ConnName:    "conn-a",
+		Timestamp:   "2026-05-11T10:00:00Z",
 		TeamName:    "team-a",
 		ChannelName: "channel-a",
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm1",
 			ChannelId: "ch1",
 			Users: map[string]*mmModel.User{
-				"u1": {Id: "u1", Username: "alice", UpdateAt: 100},
+				"u1": {Id: "u1", Username: "alice", Roles: "system_user", UpdateAt: 100},
 			},
 			Posts: []*mmModel.Post{
 				{Id: "p1", ChannelId: "ch1", Message: "hello", UpdateAt: 200},
@@ -30,7 +34,7 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 			Reactions: []*mmModel.Reaction{
 				{UserId: "u1", PostId: "p1", EmojiName: "thumbsup", UpdateAt: 250},
 			},
-		},
+		}),
 	}
 
 	data, err := MarshalEnvelope(env)
@@ -43,6 +47,7 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, env.Version, got.Version)
 	assert.Equal(t, env.Type, got.Type)
 	assert.Equal(t, env.ConnName, got.ConnName)
+	assert.Equal(t, env.Timestamp, got.Timestamp)
 	assert.Equal(t, env.TeamName, got.TeamName)
 	assert.Equal(t, env.ChannelName, got.ChannelName)
 
@@ -55,6 +60,23 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, "hello", got.SyncMsg.Posts[0].Message)
 	require.Len(t, got.SyncMsg.Reactions, 1)
 	assert.Equal(t, "thumbsup", got.SyncMsg.Reactions[0].EmojiName)
+}
+
+func TestTransportEnvelopeDefaultsTimestamp(t *testing.T) {
+	env := &TransportEnvelope{Type: TransportTypeTest, TestID: "x"}
+	_, err := MarshalEnvelope(env)
+	require.NoError(t, err)
+	require.NotEmpty(t, env.Timestamp, "MarshalEnvelope should default Timestamp when empty")
+	_, err = time.Parse(time.RFC3339, env.Timestamp)
+	require.NoError(t, err, "defaulted Timestamp must be RFC 3339")
+}
+
+func TestTransportEnvelopePreservesTimestamp(t *testing.T) {
+	want := "2026-01-02T03:04:05Z"
+	env := &TransportEnvelope{Type: TransportTypeTest, TestID: "x", Timestamp: want}
+	_, err := MarshalEnvelope(env)
+	require.NoError(t, err)
+	assert.Equal(t, want, env.Timestamp)
 }
 
 func TestTransportEnvelopeMarshalTest(t *testing.T) {
@@ -74,13 +96,13 @@ func TestTransportEnvelopeMarshalTest(t *testing.T) {
 func TestSplitTransportEnvelopeFits(t *testing.T) {
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Posts: []*mmModel.Post{
 				{Id: "p1", Message: "short"},
 			},
-		},
+		}),
 	}
 	parts, err := splitTransportEnvelope(env, 1<<20)
 	require.NoError(t, err)
@@ -91,13 +113,13 @@ func TestSplitTransportEnvelopeFits(t *testing.T) {
 func TestSplitTransportEnvelopeNoLimit(t *testing.T) {
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Posts: []*mmModel.Post{
 				{Id: "p1", Message: strings.Repeat("x", 10000)},
 			},
-		},
+		}),
 	}
 	parts, err := splitTransportEnvelope(env, 0)
 	require.NoError(t, err)
@@ -119,13 +141,13 @@ func TestSplitTransportEnvelopeMultiplePosts(t *testing.T) {
 
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Users:     map[string]*mmModel.User{"u1": {Id: "u1", Username: "alice"}},
 			Posts:     posts,
 			Reactions: reactions,
-		},
+		}),
 	}
 
 	full, err := MarshalEnvelope(env)
@@ -151,11 +173,11 @@ func TestSplitTransportEnvelopeMultiplePosts(t *testing.T) {
 func TestSplitTransportEnvelopeUsersOnly(t *testing.T) {
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Users:     map[string]*mmModel.User{"u1": {Id: "u1", Username: "alice"}},
-		},
+		}),
 	}
 	parts, err := splitTransportEnvelope(env, 10)
 	require.NoError(t, err)
@@ -165,13 +187,13 @@ func TestSplitTransportEnvelopeUsersOnly(t *testing.T) {
 func TestSplitTransportEnvelopeSinglePostOversize(t *testing.T) {
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Posts: []*mmModel.Post{
 				{Id: "p1", Message: strings.Repeat("y", 5000)},
 			},
-		},
+		}),
 	}
 	parts, err := splitTransportEnvelope(env, 100)
 	require.NoError(t, err)
@@ -188,11 +210,11 @@ func TestSplitTransportEnvelopeUTF8Safety(t *testing.T) {
 	}
 	env := &TransportEnvelope{
 		Type: TransportTypeSyncMsg,
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm",
 			ChannelId: "ch",
 			Posts:     posts,
-		},
+		}),
 	}
 
 	full, err := MarshalEnvelope(env)
@@ -242,10 +264,10 @@ func TestTransportEnvelopeXMLReadable(t *testing.T) {
 		ConnName:    "conn",
 		TeamName:    "team",
 		ChannelName: "channel",
-		SyncMsg: &mmModel.SyncMsg{
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm1",
 			ChannelId: "ch1",
-		},
+		}),
 	}
 	data, err := MarshalEnvelope(env)
 	require.NoError(t, err)

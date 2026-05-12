@@ -1,134 +1,316 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
-           xmlns:cg="urn:mattermost-crossguard"
-           targetNamespace="urn:mattermost-crossguard"
-           elementFormDefault="qualified">
+<!--
+  Cross Guard XML wire-format schema.
 
-  <!-- Root element -->
-  <xs:element name="CrossguardMessage" type="cg:CrossguardMessageType"/>
+  Defines every field that can cross a security domain boundary so
+  compliance content-inspection systems can validate every byte they
+  see.
+
+  The envelope fields (version, type, ConnName, Timestamp, TeamName,
+  ChannelName) are the routing and audit surface. The SyncMsg payload
+  is owned by the plugin (server/wire package), not by upstream
+  Mattermost: every field carried on the wire is enumerated here, and
+  any upstream model change is intentionally invisible until the wire
+  types are updated and the schema is re-reviewed.
+
+  Element order matches the field declaration order in the wire
+  structs (sequence, not all): a strict XSD makes structural
+  validation explicit and reviewable. Empty containers (Users, Posts,
+  Reactions, Statuses, MembershipChanges, Acknowledgements,
+  MentionTransforms) are suppressed on the wire by the wire-type
+  marshaler, so all are declared with minOccurs="0".
+
+  If the wire-type structs in server/wire/ change (add, remove, or
+  rename a field), this schema must be regenerated and the new
+  schema re-reviewed before deployment.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           elementFormDefault="unqualified">
 
   <!-- ============================================================
-       Constrained simple types
+       Envelope-level types
        ============================================================ -->
 
-  <!-- Mattermost 26-character alphanumeric identifier -->
-  <xs:simpleType name="MattermostIDType">
+  <xs:simpleType name="EnvelopeTypeEnum">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9]{26}"/>
+      <xs:enumeration value="sync_msg"/>
+      <xs:enumeration value="test"/>
+      <xs:enumeration value="attachment"/>
+      <xs:enumeration value="profile_image"/>
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- ISO 8601 timestamp (e.g. 2026-04-07T17:30:00Z) -->
   <xs:simpleType name="TimestampType">
     <xs:restriction base="xs:dateTime"/>
   </xs:simpleType>
 
-  <!-- Mattermost channel/team slug: lowercase alphanumeric, hyphens, underscores, max 64 -->
-  <xs:simpleType name="SlugType">
-    <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9][a-z0-9_\-]{0,63}"/>
-      <xs:maxLength value="64"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- Mattermost username: lowercase alphanumeric, hyphens, underscores, periods, max 64 -->
-  <xs:simpleType name="UsernameType">
-    <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9][a-z0-9_\-\.]{0,63}"/>
-      <xs:maxLength value="64"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- Post body text, max 65535 characters (Mattermost post size limit) -->
-  <xs:simpleType name="MessageTextType">
-    <xs:restriction base="xs:string">
-      <xs:maxLength value="65535"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- Emoji name: alphanumeric, underscores, hyphens, plus signs, max 64 -->
-  <xs:simpleType name="EmojiNameType">
-    <xs:restriction base="xs:string">
-      <xs:pattern value="[a-zA-Z0-9_\-\+]{1,64}"/>
-      <xs:maxLength value="64"/>
-    </xs:restriction>
-  </xs:simpleType>
-
-  <!-- Message type enumeration -->
-  <xs:simpleType name="MessageTypeEnum">
-    <xs:restriction base="xs:string">
-      <xs:enumeration value="crossguard_post"/>
-      <xs:enumeration value="crossguard_update"/>
-      <xs:enumeration value="crossguard_delete"/>
-      <xs:enumeration value="crossguard_reaction_add"/>
-      <xs:enumeration value="crossguard_reaction_remove"/>
-      <xs:enumeration value="crossguard_test"/>
-    </xs:restriction>
-  </xs:simpleType>
+  <xs:element name="CrossGuardEnvelope">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="ConnName"    type="xs:string"/>
+        <xs:element name="Timestamp"   type="TimestampType"/>
+        <xs:element name="TeamName"    type="xs:string"/>
+        <xs:element name="ChannelName" type="xs:string"/>
+        <xs:choice minOccurs="0">
+          <xs:element name="SyncMsg" type="SyncMsgType"/>
+          <xs:element name="TestID"  type="xs:string"/>
+        </xs:choice>
+      </xs:sequence>
+      <xs:attribute name="version" type="xs:int"           use="required"/>
+      <xs:attribute name="type"    type="EnvelopeTypeEnum" use="required"/>
+    </xs:complexType>
+  </xs:element>
 
   <!-- ============================================================
-       Complex types
+       SyncMsg payload
        ============================================================ -->
 
-  <!-- Envelope type -->
-  <xs:complexType name="CrossguardMessageType">
+  <xs:complexType name="SyncMsgType">
     <xs:sequence>
-      <xs:element name="Type" type="cg:MessageTypeEnum"/>
-      <xs:element name="Timestamp" type="cg:TimestampType"/>
-      <xs:choice>
-        <xs:element name="PostMessage" type="cg:PostMessageType" minOccurs="0"/>
-        <xs:element name="DeleteMessage" type="cg:DeleteMessageType" minOccurs="0"/>
-        <xs:element name="ReactionMessage" type="cg:ReactionMessageType" minOccurs="0"/>
-        <xs:element name="TestMessage" type="cg:TestMessageType" minOccurs="0"/>
-      </xs:choice>
+      <xs:element name="Id"                type="xs:string"/>
+      <xs:element name="ChannelId"         type="xs:string"/>
+      <xs:element name="Users"             type="UsersType"             minOccurs="0"/>
+      <xs:element name="Posts"             type="PostsContainerType"             minOccurs="0"/>
+      <xs:element name="Reactions"         type="ReactionsContainerType"         minOccurs="0"/>
+      <xs:element name="Statuses"          type="StatusesContainerType"          minOccurs="0"/>
+      <xs:element name="MembershipChanges" type="MembershipChangesContainerType" minOccurs="0"/>
+      <xs:element name="Acknowledgements"  type="AcknowledgementsContainerType"  minOccurs="0"/>
+      <xs:element name="MentionTransforms" type="MentionTransformsType"          minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 
-  <!-- Post message (new post or update) -->
-  <xs:complexType name="PostMessageType">
+  <xs:complexType name="UsersType">
     <xs:sequence>
-      <xs:element name="PostID" type="cg:MattermostIDType"/>
-      <xs:element name="RootID" type="cg:MattermostIDType" minOccurs="0"/>
-      <xs:element name="ChannelID" type="cg:MattermostIDType"/>
-      <xs:element name="ChannelName" type="cg:SlugType"/>
-      <xs:element name="TeamID" type="cg:MattermostIDType"/>
-      <xs:element name="TeamName" type="cg:SlugType"/>
-      <xs:element name="UserID" type="cg:MattermostIDType"/>
-      <xs:element name="Username" type="cg:UsernameType"/>
-      <xs:element name="MessageText" type="cg:MessageTextType"/>
-      <xs:element name="CreateAt" type="xs:long"/>
+      <xs:element name="User" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:complexContent>
+            <xs:extension base="UserType">
+              <xs:attribute name="id" type="xs:string" use="required"/>
+            </xs:extension>
+          </xs:complexContent>
+        </xs:complexType>
+      </xs:element>
     </xs:sequence>
   </xs:complexType>
 
-  <!-- Delete message -->
-  <xs:complexType name="DeleteMessageType">
+  <xs:complexType name="PostsContainerType">
     <xs:sequence>
-      <xs:element name="PostID" type="cg:MattermostIDType"/>
-      <xs:element name="ChannelID" type="cg:MattermostIDType"/>
-      <xs:element name="ChannelName" type="cg:SlugType"/>
-      <xs:element name="TeamID" type="cg:MattermostIDType"/>
-      <xs:element name="TeamName" type="cg:SlugType"/>
+      <xs:element name="Post" type="PostType" minOccurs="0" maxOccurs="unbounded"/>
     </xs:sequence>
   </xs:complexType>
 
-  <!-- Reaction message -->
-  <xs:complexType name="ReactionMessageType">
+  <xs:complexType name="ReactionsContainerType">
     <xs:sequence>
-      <xs:element name="PostID" type="cg:MattermostIDType"/>
-      <xs:element name="ChannelID" type="cg:MattermostIDType"/>
-      <xs:element name="ChannelName" type="cg:SlugType"/>
-      <xs:element name="TeamID" type="cg:MattermostIDType"/>
-      <xs:element name="TeamName" type="cg:SlugType"/>
-      <xs:element name="UserID" type="cg:MattermostIDType"/>
-      <xs:element name="Username" type="cg:UsernameType"/>
-      <xs:element name="EmojiName" type="cg:EmojiNameType"/>
+      <xs:element name="Reaction" type="ReactionType" minOccurs="0" maxOccurs="unbounded"/>
     </xs:sequence>
   </xs:complexType>
 
-  <!-- Test message (connectivity check) -->
-  <xs:complexType name="TestMessageType">
+  <xs:complexType name="StatusesContainerType">
     <xs:sequence>
-      <xs:element name="ID" type="cg:MattermostIDType"/>
+      <xs:element name="Status" type="StatusType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MembershipChangesContainerType">
+    <xs:sequence>
+      <xs:element name="MembershipChange" type="MembershipChangeType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="AcknowledgementsContainerType">
+    <xs:sequence>
+      <xs:element name="PostAcknowledgement" type="PostAcknowledgementType" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MentionTransformsType">
+    <xs:sequence>
+      <xs:element name="Transform" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="key"   type="xs:string" use="required"/>
+          <xs:attribute name="value" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- ============================================================
+       Content types
+       ============================================================ -->
+
+  <!--
+    Post: the wire-pruned subset of mmModel.Post.
+
+    Dropped (do not cross): MessageSource, PendingPostId, ReplyCount,
+    LastReplyAt, Participants, IsFollowing, Filenames, Metadata, plus
+    PostProps keys not in PostPropsType (attachments, previewed_post,
+    force_notification, channel_mentions, current_team_id,
+    unsafe_links, expire_at, read_duration, shared_channel_state,
+    workspace_name).
+  -->
+  <xs:complexType name="PostType">
+    <xs:sequence>
+      <xs:element name="Id"           type="xs:string"/>
+      <xs:element name="CreateAt"     type="xs:long"/>
+      <xs:element name="UpdateAt"     type="xs:long"/>
+      <xs:element name="EditAt"       type="xs:long"   minOccurs="0"/>
+      <xs:element name="DeleteAt"     type="xs:long"/>
+      <xs:element name="UserId"       type="xs:string"/>
+      <xs:element name="ChannelId"    type="xs:string"/>
+      <xs:element name="RootId"       type="xs:string" minOccurs="0"/>
+      <xs:element name="OriginalId"   type="xs:string" minOccurs="0"/>
+      <xs:element name="Message"      type="xs:string"/>
+      <xs:element name="Type"         type="xs:string" minOccurs="0"/>
+      <xs:element name="Props"        type="PostPropsType" minOccurs="0"/>
+      <xs:element name="Hashtags"     type="xs:string" minOccurs="0"/>
+      <xs:element name="FileIds"      type="FileIdsType" minOccurs="0"/>
+      <xs:element name="HasReactions" type="xs:boolean" minOccurs="0"/>
+      <xs:element name="RemoteId"     type="xs:string"  minOccurs="0"/>
+      <xs:element name="IsPinned"     type="xs:boolean" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="FileIdsType">
+    <xs:sequence>
+      <xs:element name="Id" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    PostProps: typed, whitelisted subset of upstream Post.Props
+    (StringInterface). Only the keys listed cross the wire.
+  -->
+  <xs:complexType name="PostPropsType">
+    <xs:sequence>
+      <xs:element name="FromWebhook"              type="xs:boolean" minOccurs="0"/>
+      <xs:element name="FromBot"                  type="xs:boolean" minOccurs="0"/>
+      <xs:element name="FromPlugin"               type="xs:boolean" minOccurs="0"/>
+      <xs:element name="FromOAuthApp"             type="xs:boolean" minOccurs="0"/>
+      <xs:element name="OverrideUsername"         type="xs:string"  minOccurs="0"/>
+      <xs:element name="OverrideIconURL"          type="xs:string"  minOccurs="0"/>
+      <xs:element name="OverrideIconEmoji"        type="xs:string"  minOccurs="0"/>
+      <xs:element name="WebhookDisplayName"       type="xs:string"  minOccurs="0"/>
+      <xs:element name="AddedUserId"              type="xs:string"  minOccurs="0"/>
+      <xs:element name="DeleteBy"                 type="xs:string"  minOccurs="0"/>
+      <xs:element name="AddChannelMember"         type="xs:string"  minOccurs="0"/>
+      <xs:element name="MentionHighlightDisabled" type="xs:boolean" minOccurs="0"/>
+      <xs:element name="DisableGroupHighlight"    type="xs:boolean" minOccurs="0"/>
+      <xs:element name="AIGeneratedByUserId"      type="xs:string"  minOccurs="0"/>
+      <xs:element name="AIGeneratedByUsername"    type="xs:string"  minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    User: the wire-pruned subset of mmModel.User.
+
+    Dropped (do not cross): AuthService, EmailVerified, AllowMarketing,
+    NotifyProps, LastPasswordUpdate, LastPictureUpdate, FailedAttempts,
+    MfaActive, LastActivityAt, TermsOfServiceId, TermsOfServiceCreateAt,
+    DisableWelcomeEmail, LastLogin, plus credential material already
+    suppressed upstream (Password, AuthData, MfaSecret, MfaUsedTimestamps).
+
+    User.Props keys are restricted to UserPropsType.
+  -->
+  <xs:complexType name="UserType">
+    <xs:sequence>
+      <xs:element name="Id"                type="xs:string"/>
+      <xs:element name="CreateAt"          type="xs:long"   minOccurs="0"/>
+      <xs:element name="UpdateAt"          type="xs:long"   minOccurs="0"/>
+      <xs:element name="DeleteAt"          type="xs:long"/>
+      <xs:element name="Username"          type="xs:string"/>
+      <xs:element name="Email"             type="xs:string"/>
+      <xs:element name="Nickname"          type="xs:string" minOccurs="0"/>
+      <xs:element name="FirstName"         type="xs:string" minOccurs="0"/>
+      <xs:element name="LastName"          type="xs:string" minOccurs="0"/>
+      <xs:element name="Position"          type="xs:string" minOccurs="0"/>
+      <xs:element name="Roles"             type="xs:string"/>
+      <xs:element name="Locale"            type="xs:string"  minOccurs="0"/>
+      <xs:element name="Timezone"          type="StringMapType" minOccurs="0"/>
+      <xs:element name="Props"             type="UserPropsType" minOccurs="0"/>
+      <xs:element name="RemoteId"          type="xs:string"  minOccurs="0"/>
+      <xs:element name="IsBot"             type="xs:boolean" minOccurs="0"/>
+      <xs:element name="BotDescription"    type="xs:string"  minOccurs="0"/>
+      <xs:element name="BotLastIconUpdate" type="xs:long"    minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    UserProps: typed, whitelisted subset of upstream User.Props
+    (StringMap). Only the keys listed cross the wire.
+  -->
+  <xs:complexType name="UserPropsType">
+    <xs:sequence>
+      <xs:element name="CustomStatus"     type="xs:string" minOccurs="0"/>
+      <xs:element name="RemoteUsername"   type="xs:string" minOccurs="0"/>
+      <xs:element name="RemoteEmail"      type="xs:string" minOccurs="0"/>
+      <xs:element name="OriginalRemoteId" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    StringMapType: an open string-to-string map serialized as a
+    sequence of <Entry key="..." value="..."/> elements, sorted by
+    key. Used for User.Timezone where the key set is not fixed by
+    the schema (e.g., "automaticTimezone", "manualTimezone",
+    "useAutomaticTimezone").
+  -->
+  <xs:complexType name="StringMapType">
+    <xs:sequence>
+      <xs:element name="Entry" minOccurs="0" maxOccurs="unbounded">
+        <xs:complexType>
+          <xs:attribute name="key"   type="xs:string" use="required"/>
+          <xs:attribute name="value" type="xs:string" use="required"/>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ReactionType">
+    <xs:sequence>
+      <xs:element name="UserId"    type="xs:string"/>
+      <xs:element name="PostId"    type="xs:string"/>
+      <xs:element name="EmojiName" type="xs:string"/>
+      <xs:element name="CreateAt"  type="xs:long"/>
+      <xs:element name="UpdateAt"  type="xs:long"/>
+      <xs:element name="DeleteAt"  type="xs:long"/>
+      <xs:element name="RemoteId"  type="xs:string" minOccurs="0"/>
+      <xs:element name="ChannelId" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!--
+    Status: presence-status snapshot.
+
+    Dropped (do not cross): ActiveChannel (channel ID is local to the
+    source server).
+  -->
+  <xs:complexType name="StatusType">
+    <xs:sequence>
+      <xs:element name="UserId"         type="xs:string"/>
+      <xs:element name="Status"         type="xs:string"/>
+      <xs:element name="Manual"         type="xs:boolean"/>
+      <xs:element name="LastActivityAt" type="xs:long"/>
+      <xs:element name="DNDEndTime"     type="xs:long"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="MembershipChangeType">
+    <xs:sequence>
+      <xs:element name="ChannelId"  type="xs:string"/>
+      <xs:element name="UserId"     type="xs:string"/>
+      <xs:element name="IsAdd"      type="xs:boolean"/>
+      <xs:element name="RemoteId"   type="xs:string" minOccurs="0"/>
+      <xs:element name="ChangeTime" type="xs:long"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="PostAcknowledgementType">
+    <xs:sequence>
+      <xs:element name="UserId"         type="xs:string"/>
+      <xs:element name="PostId"         type="xs:string"/>
+      <xs:element name="AcknowledgedAt" type="xs:long"/>
+      <xs:element name="ChannelId"      type="xs:string"/>
+      <xs:element name="RemoteId"       type="xs:string" minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 

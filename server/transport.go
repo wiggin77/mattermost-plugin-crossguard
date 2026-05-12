@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/xml"
 	"fmt"
+	"time"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
+
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 // Transport message types for the wire envelope.
@@ -17,15 +20,21 @@ const (
 
 // TransportEnvelope wraps content for XML wire transport between servers.
 // Exactly one of SyncMsg or TestID is populated, depending on Type.
+// The envelope-level fields (Version, Type, ConnName, Timestamp, TeamName,
+// ChannelName) are used by compliance content-inspection systems to route
+// and audit messages without parsing the SyncMsg payload, so they are
+// retained as documented in the wire-format plan even when the inner
+// SyncMsg encoding follows the upstream Mattermost model layout.
 type TransportEnvelope struct {
-	XMLName     xml.Name         `xml:"CrossGuardEnvelope"`
-	Version     int              `xml:"version,attr"`
-	Type        string           `xml:"type,attr"`
-	ConnName    string           `xml:"ConnName"`
-	TeamName    string           `xml:"TeamName"`
-	ChannelName string           `xml:"ChannelName"`
-	SyncMsg     *mmModel.SyncMsg `xml:"SyncMsg,omitempty"`
-	TestID      string           `xml:"TestID,omitempty"`
+	XMLName     xml.Name      `xml:"CrossGuardEnvelope"`
+	Version     int           `xml:"version,attr"`
+	Type        string        `xml:"type,attr"`
+	ConnName    string        `xml:"ConnName"`
+	Timestamp   string        `xml:"Timestamp"`
+	TeamName    string        `xml:"TeamName"`
+	ChannelName string        `xml:"ChannelName"`
+	SyncMsg     *wire.SyncMsg `xml:"SyncMsg,omitempty"`
+	TestID      string        `xml:"TestID,omitempty"`
 }
 
 // MarshalEnvelope serializes a TransportEnvelope to XML with the standard header.
@@ -35,6 +44,9 @@ func MarshalEnvelope(env *TransportEnvelope) ([]byte, error) {
 	}
 	if env.Version == 0 {
 		env.Version = 1
+	}
+	if env.Timestamp == "" {
+		env.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 	data, err := xml.Marshal(env)
 	if err != nil {
@@ -124,14 +136,14 @@ func splitTransportEnvelope(env *TransportEnvelope, maxSize int) ([]*TransportEn
 
 	// Pre-bucket reactions and acknowledgements by post ID, so we can build
 	// each split's slices without rescanning the originals every time.
-	reactionsByPost := make(map[string][]*mmModel.Reaction)
+	reactionsByPost := make(map[string][]*wire.Reaction)
 	for _, r := range env.SyncMsg.Reactions {
 		if r == nil {
 			continue
 		}
 		reactionsByPost[r.PostId] = append(reactionsByPost[r.PostId], r)
 	}
-	acksByPost := make(map[string][]*mmModel.PostAcknowledgement)
+	acksByPost := make(map[string][]*wire.PostAcknowledgement)
 	for _, a := range env.SyncMsg.Acknowledgements {
 		if a == nil {
 			continue
@@ -166,11 +178,11 @@ func splitTransportEnvelope(env *TransportEnvelope, maxSize int) ([]*TransportEn
 
 func buildSplitEnvelope(
 	src *TransportEnvelope,
-	posts []*mmModel.Post,
-	reactionsByPost map[string][]*mmModel.Reaction,
-	acksByPost map[string][]*mmModel.PostAcknowledgement,
+	posts []*wire.Post,
+	reactionsByPost map[string][]*wire.Reaction,
+	acksByPost map[string][]*wire.PostAcknowledgement,
 ) *TransportEnvelope {
-	subMsg := &mmModel.SyncMsg{
+	subMsg := &wire.SyncMsg{
 		Id:                src.SyncMsg.Id,
 		ChannelId:         src.SyncMsg.ChannelId,
 		Users:             src.SyncMsg.Users,
@@ -194,6 +206,7 @@ func buildSplitEnvelope(
 		Version:     src.Version,
 		Type:        src.Type,
 		ConnName:    src.ConnName,
+		Timestamp:   src.Timestamp,
 		TeamName:    src.TeamName,
 		ChannelName: src.ChannelName,
 		SyncMsg:     subMsg,

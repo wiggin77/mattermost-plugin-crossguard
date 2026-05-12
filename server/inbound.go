@@ -9,6 +9,7 @@ import (
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/store"
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 type inboundConn struct {
@@ -175,7 +176,8 @@ func (p *Plugin) handleInboundSyncMsg(connName string, env *TransportEnvelope) e
 
 	rewriteChannelIDs(env.SyncMsg, channel.Id)
 
-	resp, err := p.API.ReceiveSharedChannelSyncMsg(remoteID, env.SyncMsg)
+	syncMsg := env.SyncMsg.ToModel()
+	resp, err := p.API.ReceiveSharedChannelSyncMsg(remoteID, syncMsg)
 	if err != nil {
 		p.API.LogError("Failed to receive sync message",
 			"error_code", errcode.InboundReceiveSyncFailed,
@@ -213,7 +215,7 @@ func joinSyncErrors(resp mmModel.SyncResponse) string {
 // to the local channel ID. The remote sender's view of ChannelId is not
 // valid on the receiving side; the server's ReceiveSharedChannelSyncMsg
 // uses these IDs to route content.
-func rewriteChannelIDs(msg *mmModel.SyncMsg, localChannelID string) {
+func rewriteChannelIDs(msg *wire.SyncMsg, localChannelID string) {
 	msg.ChannelId = localChannelID
 	for _, post := range msg.Posts {
 		if post != nil {

@@ -109,15 +109,13 @@ cd webapp && npm run test:pw-ct        # Playwright component tests
 ### Backend Message Flow
 
 ```
-Outbound: MM Post Hook -> buildEnvelope() -> publishToOutbound() -> QueueProvider.Publish()
-Inbound:  QueueProvider.Subscribe() -> handleInboundMessage() -> resolve team/channel -> create post
+Outbound: OnSharedChannelsSyncMsg -> wire.SyncMsgFromModel -> TransportEnvelope -> QueueProvider.Publish()
+Inbound:  QueueProvider.Subscribe() -> processInboundMessage() -> wire.SyncMsg.ToModel() -> ReceiveSharedChannelSyncMsg()
 ```
 
-**Outbound path** (`hooks.go` -> `connections.go`): Mattermost hook methods (`MessageHasBeenPosted`, `MessageHasBeenUpdated`, `MessageHasBeenDeleted`, `ReactionHasBeenAdded/Removed`) check if the channel is relay-enabled, build an `Envelope`, and publish to all matching outbound providers.
+**Outbound path** (`hooks.go` -> `connections.go`): The plugin implements the shared-channels framework hooks (`OnSharedChannelsSyncMsg`, `OnSharedChannelsAttachmentSyncMsg`, `OnSharedChannelsProfileImageSyncMsg`, `OnSharedChannelsPing`). On a content sync, the upstream `*mmModel.SyncMsg` is converted to `*wire.SyncMsg` (pruned wire type), wrapped in a `TransportEnvelope`, and published to the matching outbound provider.
 
-**Inbound path** (`inbound.go`): Each inbound connection subscribes to its provider. Messages are unmarshaled from JSON or XML into `model.Envelope`, then dispatched by type to handlers that resolve team/channel, check idempotency via post mappings, resolve or create sync users, and create/update/delete local posts.
-
-**Retry queue** (`retry_queue.go`, `retry_dispatch.go`): When inbound messages reference posts or users that don't exist yet (out-of-order delivery), they're enqueued for retry (max 3 attempts, 20s delay, 2min max age).
+**Inbound path** (`inbound.go`): Each inbound connection subscribes to its provider. Messages are unmarshaled from XML into a `TransportEnvelope`, channel IDs are rewritten via `rewriteChannelIDs`, the wire SyncMsg is converted back to `*mmModel.SyncMsg`, and handed to `p.API.ReceiveSharedChannelSyncMsg`.
 
 ### QueueProvider Interface (`server/provider.go`)
 
@@ -146,10 +144,17 @@ Three implementations:
 - `CachingKVStore` (`caching.go`): Wraps KVStore with expirable LRU caches (15min TTL). Cluster cache invalidation via `OnPluginClusterEvent` with 4 event types (`cache_inv_teaminit`, `cache_inv_initteams`, `cache_inv_chaninit`, `cache_inv_rwindex`)
 - `client.go`: Implementation using Mattermost's pluginapi.Client KV operations. Keys are prefixed (e.g. `team_conns:`, `post_mapping:`, `deleting_flag:`)
 
-### Model Layer (`server/model/`)
+### Wire Types (`server/wire/`)
 
-- `Envelope`: Top-level message wrapper with `Type` field (e.g. `crossguard_post`, `crossguard_delete`) and format-agnostic serialization (JSON/XML auto-detected by first byte)
-- `PostMessage`, `DeleteMessage`, `ReactionMessage`, `TestMessage`: Type-specific payloads
+Plugin-owned XML wire types for cross-domain traffic. Each type is a pruned subset of the corresponding upstream `mmModel.X` (Post, User, Reaction, Status, MembershipChange, PostAcknowledgement, SyncMsg). Fields the receiver overwrites on arrival (e.g., `User.AuthService`, `User.MfaActive` via `sanitizeUserForSync`) and fields the receiver computes from its own state (`Post.ReplyCount`, `Post.LastReplyAt`, `Post.Participants`) are dropped at the source so they never appear on the wire.
+
+`Post.Props` and `User.Props` are typed structs (`PostProps`, `UserProps`) with a fixed, whitelisted set of keys. Unknown upstream keys are dropped. See `implementation-plans/26-05-11-02-plugin-owned-wire-types.md` for the per-key rationale.
+
+Each wire type exposes `XFromModel(*mmModel.X) *X` and `(*X).ToModel() *mmModel.X` for explicit conversion at the in-process boundaries. Wire types must not be edited without regenerating the XSD (`schema/crossguard.xsd`) and the example fixtures (`schema/examples/*.xml`); the regeneration is automated via the `UPDATE_EXAMPLES=1` env var on `go test -run TestExampleFiles ./server/`, but the new XSD must be re-reviewed by the security/compliance reviewer before deployment.
+
+### Transport Envelope (`server/transport.go`)
+
+`TransportEnvelope` wraps wire content with the routing/audit fields used by compliance content inspection: `Version`, `Type` (`sync_msg`, `test`, `attachment`, `profile_image`), `ConnName`, `Timestamp` (RFC 3339 UTC, defaults to `time.Now()` in `MarshalEnvelope`), `TeamName`, `ChannelName`, and either `SyncMsg` (`*wire.SyncMsg`) or `TestID`. `splitTransportEnvelope` splits oversized envelopes by post for providers with a `MaxMessageSize` limit.
 
 ### Service Layer (`server/service.go`)
 

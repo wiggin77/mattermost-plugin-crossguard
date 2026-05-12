@@ -9,6 +9,7 @@ import (
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 // OnSharedChannelsSyncMsg receives content changes from the server's Shared
@@ -80,7 +81,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 		ConnName:    connName,
 		TeamName:    team.Name,
 		ChannelName: channel.Name,
-		SyncMsg:     augmented,
+		SyncMsg:     wire.SyncMsgFromModel(augmented),
 	}
 
 	if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
