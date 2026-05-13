@@ -110,6 +110,36 @@ const (
 	InboundNoRemoteForConn     = 15105
 	InboundNotConfigured       = 15106
 	InboundTestReceived        = 15107
+
+	// Single-active-receiver election (Phase 2).
+	InboundActiveNodeElected         = 15200
+	InboundActiveNodeSteppedDown     = 15201
+	InboundActiveLeaseRenewalFailed  = 15202
+	InboundActiveLeaseLost           = 15203
+	InboundActiveLeaseAcquireFailed  = 15204
+	InboundActiveStepdownEventPubErr = 15205
+	InboundActiveStepdownEventRecv   = 15206
+	InboundActiveSubscribeFailed     = 15207
+	InboundActiveUnsubscribed        = 15208
+
+	// Sequencer state machine (Phase 4).
+	InboundSeqInOrder         = 15300
+	InboundSeqGapDetected     = 15301
+	InboundSeqGapFilled       = 15302
+	InboundSeqGapTimeout      = 15303
+	InboundSeqBufferOverflow  = 15304
+	InboundSeqDuplicate       = 15305
+	InboundSeqEpochReset      = 15306
+	InboundSeqStaleEpoch      = 15307
+	InboundSeqMissingFields   = 15308
+	InboundSeqTestEpochMatch  = 15309
+	InboundSeqTestEpochChange = 15310
+
+	// Cursor checkpointing (Phase 5).
+	InboundSeqCheckpointWritten    = 15400
+	InboundSeqCheckpointLoaded     = 15401
+	InboundSeqCheckpointLoadFailed = 15402
+	InboundSeqCheckpointStale      = 15403
 )
 
 // api.go (11000-11999)
@@ -442,6 +472,33 @@ var AllCodes = []int{
 	InboundNoRemoteForConn,
 	InboundNotConfigured,
 	InboundTestReceived,
+
+	InboundActiveNodeElected,
+	InboundActiveNodeSteppedDown,
+	InboundActiveLeaseRenewalFailed,
+	InboundActiveLeaseLost,
+	InboundActiveLeaseAcquireFailed,
+	InboundActiveStepdownEventPubErr,
+	InboundActiveStepdownEventRecv,
+	InboundActiveSubscribeFailed,
+	InboundActiveUnsubscribed,
+
+	InboundSeqInOrder,
+	InboundSeqGapDetected,
+	InboundSeqGapFilled,
+	InboundSeqGapTimeout,
+	InboundSeqBufferOverflow,
+	InboundSeqDuplicate,
+	InboundSeqEpochReset,
+	InboundSeqStaleEpoch,
+	InboundSeqMissingFields,
+	InboundSeqTestEpochMatch,
+	InboundSeqTestEpochChange,
+
+	InboundSeqCheckpointWritten,
+	InboundSeqCheckpointLoaded,
+	InboundSeqCheckpointLoadFailed,
+	InboundSeqCheckpointStale,
 
 	ConnectionsParseOutboundFailed,
 	ConnectionsConnectOutboundFailed,

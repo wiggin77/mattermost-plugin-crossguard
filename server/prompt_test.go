@@ -27,7 +27,7 @@ func defaultLogMocks(api *plugintest.API) {
 
 func registerLogMocks(api *plugintest.API, methods ...string) {
 	for _, m := range methods {
-		for n := 1; n <= 16; n++ {
+		for n := 1; n <= 32; n++ {
 			args := make([]any, n)
 			for i := range args {
 				args[i] = mock.Anything

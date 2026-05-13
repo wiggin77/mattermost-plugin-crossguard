@@ -1,5 +1,7 @@
 package store
 
+import "time"
+
 const (
 	PromptStatePending = "pending"
 	PromptStateBlocked = "blocked"
@@ -77,4 +79,29 @@ type KVStore interface {
 	// can detect out-of-order delivery. The first call for a given key
 	// returns 1.
 	BumpSequenceCounter(connName, channelID string) (uint64, error)
+
+	// AcquireOrRenewInboundLease writes nodeID as the lease holder for the
+	// named inbound connection with a TTL, using CAS so only one cluster node
+	// holds the lease at a time. Returns:
+	//   - acquired=true, renewed=false: lease was unheld or expired; we now hold it.
+	//   - acquired=false, renewed=true: we already held the lease; TTL extended.
+	//   - acquired=false, renewed=false: someone else holds it; currentHolder is set.
+	// Used by the single-active-receiver election loop.
+	AcquireOrRenewInboundLease(connName, nodeID string, ttl time.Duration) (acquired, renewed bool, currentHolder string, err error)
+
+	// ReleaseInboundLease deletes the lease key if and only if the current
+	// holder is nodeID. Used for graceful step-down (OnDeactivate, config
+	// reload). Safe to call when not the holder; returns nil in that case.
+	ReleaseInboundLease(connName, nodeID string) error
+
+	// GetSequencerCursor returns the persisted (epoch, nextExpected) for
+	// the inbound (connName, channelID) sequencer cursor, or empty/zero
+	// when no checkpoint has been written. Used on lease acquisition to
+	// resume the cursor where the previous active node left off.
+	GetSequencerCursor(connName, channelID string) (epoch string, nextExpected uint64, err error)
+
+	// SetSequencerCursor writes the (epoch, nextExpected) checkpoint for
+	// the named cursor. Called periodically by the sequencer to bound
+	// the duplicate-redelivery window after leadership handoff.
+	SetSequencerCursor(connName, channelID, epoch string, nextExpected uint64) error
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -270,6 +271,22 @@ func (m *mockKVStore) DeleteChannelConnectionRequest(_, _ string) error {
 
 func (m *mockKVStore) BumpSequenceCounter(_, _ string) (uint64, error) {
 	return 0, nil
+}
+
+func (m *mockKVStore) AcquireOrRenewInboundLease(_, _ string, _ time.Duration) (bool, bool, string, error) {
+	return false, false, "", nil
+}
+
+func (m *mockKVStore) ReleaseInboundLease(_, _ string) error {
+	return nil
+}
+
+func (m *mockKVStore) GetSequencerCursor(_, _ string) (string, uint64, error) {
+	return "", 0, nil
+}
+
+func (m *mockKVStore) SetSequencerCursor(_, _, _ string, _ uint64) error {
+	return nil
 }
 
 func newTestCaching(inner *mockKVStore) (*CachingKVStore, *plugintest.API) {

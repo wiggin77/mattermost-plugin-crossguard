@@ -54,6 +54,11 @@ type Plugin struct {
 	// on the wire.
 	epoch string
 
+	// sequencer is the inbound reorder buffer. Initialized in OnActivate
+	// from configuration knobs (SequencerGapTimeoutSeconds /
+	// SequencerBufferMaxEnvelopes / SequencerBufferMaxBytes). Phase 4.
+	sequencer *inboundSequencer
+
 	// remoteIDs maps connection name (per direction) to the shared channels
 	// remote ID assigned by the server. Inbound and outbound connections
 	// that share the same SiteURL also share a single remoteID. The map is
@@ -106,6 +111,17 @@ func (p *Plugin) OnActivate() error {
 		"error_code", errcode.PluginEpochAssigned,
 		"epoch", p.epoch, "node_id", p.nodeID)
 
+	cfg := p.getConfiguration()
+	p.sequencer = newInboundSequencer(
+		p.API,
+		cfg.gapTimeout(),
+		cfg.bufferMaxEnvelopes(),
+		cfg.bufferMaxBytes(),
+	)
+	p.sequencer.loadCursor = p.kvstore.GetSequencerCursor
+	p.startSequencerGapTicker(p.ctx)
+	p.startSequencerCheckpointTicker(p.ctx)
+
 	if err := p.registerRemotes(); err != nil {
 		return err
 	}
@@ -134,6 +150,10 @@ func (p *Plugin) OnDeactivate() error {
 }
 
 func (p *Plugin) OnPluginClusterEvent(_ context.Context, ev model.PluginClusterEvent) {
+	if ev.Id == clusterEventInboundStepdown {
+		p.handleStepdownEvent(ev.Data)
+		return
+	}
 	if caching, ok := p.kvstore.(*store.CachingKVStore); ok {
 		caching.HandleClusterEvent(ev)
 	}

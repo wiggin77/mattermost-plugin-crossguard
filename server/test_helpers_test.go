@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -147,6 +148,25 @@ func (s *testKVStore) DeleteChannelConnectionRequest(string, string) error { ret
 func (s *testKVStore) BumpSequenceCounter(string, string) (uint64, error) {
 	s.seqCounter++
 	return s.seqCounter, nil
+}
+
+// AcquireOrRenewInboundLease and ReleaseInboundLease return immediate ownership
+// for the calling node so existing tests that exercise the inbound path do not
+// have to set up a real cluster lease.
+func (s *testKVStore) AcquireOrRenewInboundLease(string, string, time.Duration) (bool, bool, string, error) {
+	return true, false, "", nil
+}
+
+func (s *testKVStore) ReleaseInboundLease(string, string) error {
+	return nil
+}
+
+func (s *testKVStore) GetSequencerCursor(string, string) (string, uint64, error) {
+	return "", 0, nil
+}
+
+func (s *testKVStore) SetSequencerCursor(string, string, string, uint64) error {
+	return nil
 }
 
 // setupTestPlugin builds a minimal Plugin instance backed by a testKVStore.

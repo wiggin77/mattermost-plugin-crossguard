@@ -70,6 +70,34 @@
                         "help_text": "When enabled (and 'Restrict Connection Management to System Admins' is also enabled), channel admins can submit channel connection link requests for team admin approval via direct message and can unlink channel connections directly. When disabled, channel admins are blocked entirely."
                     }
                 ]
+            },
+            {
+                "key": "SequencerSettings",
+                "title": "Inbound Sequencer (Advanced)",
+                "header": "Per-channel reorder buffer for inbound messages. Detects out-of-order delivery and lost predecessors using the Epoch and Sequence fields on each envelope. Defaults are tuned for typical compliance traffic; only change these if you see InboundSeqGapTimeout or InboundSeqBufferOverflow audit events at unacceptable rates.",
+                "settings": [
+                    {
+                        "key": "SequencerGapTimeoutSeconds",
+                        "display_name": "Gap-fill Timeout (seconds)",
+                        "type": "number",
+                        "default": 30,
+                        "help_text": "How long the sequencer holds an out-of-order envelope waiting for the missing predecessor before giving up. Lower values reduce the worst-case latency for late envelopes at the cost of more InboundSeqGapTimeout events. Raise for slow or lossy transports. Zero falls back to the default (30 seconds)."
+                    },
+                    {
+                        "key": "SequencerBufferMaxEnvelopes",
+                        "display_name": "Reorder Buffer Max Envelopes (per channel)",
+                        "type": "number",
+                        "default": 200,
+                        "help_text": "Maximum number of out-of-order envelopes held per channel before the sequencer dispatches the entire buffer best-effort and logs InboundSeqBufferOverflow. Raise for very high-volume channels. Zero falls back to the default (200)."
+                    },
+                    {
+                        "key": "SequencerBufferMaxBytes",
+                        "display_name": "Reorder Buffer Max Bytes (per channel)",
+                        "type": "number",
+                        "default": 52428800,
+                        "help_text": "Maximum total bytes held in the reorder buffer per channel (default 50 MB). Same overflow behaviour as the envelope-count cap. Raise for deployments with very large message payloads. Zero falls back to the default."
+                    }
+                ]
             }
         ]
     }

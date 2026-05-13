@@ -173,6 +173,40 @@ type configuration struct {
 	RestrictToSystemAdmins    *bool  `json:"RestrictToSystemAdmins"`
 	AllowTeamAdminRequests    *bool  `json:"AllowTeamAdminRequests"`
 	AllowChannelAdminRequests *bool  `json:"AllowChannelAdminRequests"`
+
+	// Sequencer (Phase 4) knobs. Zero values fall back to the defaults
+	// declared in sequencerDefaultGapTimeoutSeconds /
+	// sequencerDefaultBufferMaxEnvelopes / sequencerDefaultBufferMaxBytes.
+	SequencerGapTimeoutSeconds  int `json:"SequencerGapTimeoutSeconds"`
+	SequencerBufferMaxEnvelopes int `json:"SequencerBufferMaxEnvelopes"`
+	SequencerBufferMaxBytes     int `json:"SequencerBufferMaxBytes"`
+}
+
+const (
+	sequencerDefaultGapTimeoutSeconds  = 30
+	sequencerDefaultBufferMaxEnvelopes = 200
+	sequencerDefaultBufferMaxBytes     = 50 * 1024 * 1024
+)
+
+func (c *configuration) gapTimeout() time.Duration {
+	if c.SequencerGapTimeoutSeconds <= 0 {
+		return sequencerDefaultGapTimeoutSeconds * time.Second
+	}
+	return time.Duration(c.SequencerGapTimeoutSeconds) * time.Second
+}
+
+func (c *configuration) bufferMaxEnvelopes() int {
+	if c.SequencerBufferMaxEnvelopes <= 0 {
+		return sequencerDefaultBufferMaxEnvelopes
+	}
+	return c.SequencerBufferMaxEnvelopes
+}
+
+func (c *configuration) bufferMaxBytes() int {
+	if c.SequencerBufferMaxBytes <= 0 {
+		return sequencerDefaultBufferMaxBytes
+	}
+	return c.SequencerBufferMaxBytes
 }
 
 func (c *configuration) isUsernameLookupEnabled() bool {

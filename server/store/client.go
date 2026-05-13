@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/pkg/errors"
@@ -20,6 +21,8 @@ type Client struct {
 	connRequestPrefix     string
 	chanConnRequestPrefix string
 	seqCounterPrefix      string
+	inboundLeasePrefix    string
+	seqCursorPrefix       string
 }
 
 // NewKVStore creates a new KV store client.
@@ -35,6 +38,8 @@ func NewKVStore(client *pluginapi.Client, pluginID string) KVStore {
 		connRequestPrefix:     pluginID + "-connreq-",
 		chanConnRequestPrefix: pluginID + "-chanconnreq-",
 		seqCounterPrefix:      pluginID + "-seqctr-",
+		inboundLeasePrefix:    pluginID + "-actinb-",
+		seqCursorPrefix:       pluginID + "-seqcur-",
 	}
 }
 
@@ -484,6 +489,103 @@ func (kv Client) casModifyConnectionList(key string, modify func([]TeamConnectio
 		}
 	}
 	return errors.New("failed to modify connection list after max retries")
+}
+
+// AcquireOrRenewInboundLease implements the KVStore method of the same name.
+// Uses pluginapi.SetAtomic combined with pluginapi.SetExpiry so the lease is
+// written and given a TTL in a single KV round-trip, matching the existing
+// CAS-then-TTL pattern in azure_blob_provider's per-blob lock.
+func (kv Client) AcquireOrRenewInboundLease(connName, nodeID string, ttl time.Duration) (acquired, renewed bool, currentHolder string, err error) {
+	key := kv.inboundLeasePrefix + connName
+	const maxRetries = 3
+	for range maxRetries {
+		var current string
+		if getErr := kv.client.KV.Get(key, &current); getErr != nil {
+			return false, false, "", errors.Wrap(getErr, "failed to read inbound lease")
+		}
+
+		// Key absent or TTL expired: attempt acquire from nil.
+		if current == "" {
+			saved, setErr := kv.client.KV.Set(key, nodeID, pluginapi.SetAtomic(nil), pluginapi.SetExpiry(ttl))
+			if setErr != nil {
+				return false, false, "", errors.Wrap(setErr, "failed to acquire inbound lease")
+			}
+			if saved {
+				return true, false, "", nil
+			}
+			// Lost race; another node acquired between our Get and Set.
+			continue
+		}
+
+		// We already hold it: extend the TTL.
+		if current == nodeID {
+			saved, setErr := kv.client.KV.Set(key, nodeID, pluginapi.SetAtomic(nodeID), pluginapi.SetExpiry(ttl))
+			if setErr != nil {
+				return false, false, "", errors.Wrap(setErr, "failed to renew inbound lease")
+			}
+			if saved {
+				return false, true, "", nil
+			}
+			// Lost race; the holder field changed under us.
+			continue
+		}
+
+		// Someone else holds an unexpired lease.
+		return false, false, current, nil
+	}
+	return false, false, "", errors.New("failed to acquire or renew inbound lease after max retries")
+}
+
+// ReleaseInboundLease implements the KVStore method of the same name. Uses
+// pluginapi.SetAtomic with our nodeID as the expected old value so a stale
+// node attempting to release after losing the lease cannot accidentally
+// clear someone else's lease. When the CAS expected value matches but the
+// new value is nil-equivalent, the underlying pluginapi clears the key.
+func (kv Client) ReleaseInboundLease(connName, nodeID string) error {
+	key := kv.inboundLeasePrefix + connName
+	var current string
+	if err := kv.client.KV.Get(key, &current); err != nil {
+		return errors.Wrap(err, "failed to read inbound lease for release")
+	}
+	if current != nodeID {
+		// We don't hold it; nothing to release.
+		return nil
+	}
+	if err := kv.client.KV.Delete(key); err != nil {
+		return errors.Wrap(err, "failed to delete inbound lease")
+	}
+	return nil
+}
+
+// sequencerCursorRecord is the JSON-encoded shape stored under
+// seqCursorPrefix-<connName>-<channelID>. Persisting both fields together
+// lets a resuming node detect an epoch mismatch and reset cleanly.
+type sequencerCursorRecord struct {
+	Epoch        string `json:"epoch"`
+	NextExpected uint64 `json:"next_expected"`
+}
+
+// GetSequencerCursor implements the KVStore method of the same name.
+// Returns ("", 0, nil) when the key is absent.
+func (kv Client) GetSequencerCursor(connName, channelID string) (string, uint64, error) {
+	key := kv.seqCursorPrefix + connName + "-" + channelID
+	var rec sequencerCursorRecord
+	if err := kv.client.KV.Get(key, &rec); err != nil {
+		return "", 0, errors.Wrap(err, "failed to read sequencer cursor")
+	}
+	return rec.Epoch, rec.NextExpected, nil
+}
+
+// SetSequencerCursor implements the KVStore method of the same name.
+// Last-writer-wins; the sequencer holds the in-memory cursor anyway, so
+// CAS is not needed.
+func (kv Client) SetSequencerCursor(connName, channelID, epoch string, nextExpected uint64) error {
+	key := kv.seqCursorPrefix + connName + "-" + channelID
+	rec := sequencerCursorRecord{Epoch: epoch, NextExpected: nextExpected}
+	if _, err := kv.client.KV.Set(key, rec); err != nil {
+		return errors.Wrap(err, "failed to persist sequencer cursor")
+	}
+	return nil
 }
 
 // BumpSequenceCounter atomically increments the per-(connName, channelID)

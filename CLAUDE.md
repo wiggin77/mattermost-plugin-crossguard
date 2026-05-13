@@ -109,13 +109,15 @@ cd webapp && npm run test:pw-ct        # Playwright component tests
 ### Backend Message Flow
 
 ```
-Outbound: OnSharedChannelsSyncMsg -> wire.SyncMsgFromModel -> TransportEnvelope -> QueueProvider.Publish()
-Inbound:  QueueProvider.Subscribe() -> processInboundMessage() -> wire.SyncMsg.ToModel() -> ReceiveSharedChannelSyncMsg()
+Outbound: OnSharedChannelsSyncMsg -> wire.SyncMsgFromModel -> TransportEnvelope (Epoch, Sequence stamped) -> QueueProvider.Publish()
+Inbound:  QueueProvider.Subscribe() (single active node) -> processInboundMessage() -> inboundSequencer.Admit() -> wire.SyncMsg.ToModel() -> ReceiveSharedChannelSyncMsg()
 ```
 
-**Outbound path** (`hooks.go` -> `connections.go`): The plugin implements the shared-channels framework hooks (`OnSharedChannelsSyncMsg`, `OnSharedChannelsAttachmentSyncMsg`, `OnSharedChannelsProfileImageSyncMsg`, `OnSharedChannelsPing`). On a content sync, the upstream `*mmModel.SyncMsg` is converted to `*wire.SyncMsg` (pruned wire type), wrapped in a `TransportEnvelope`, and published to the matching outbound provider.
+**Outbound path** (`hooks.go` -> `connections.go`): The plugin implements the shared-channels framework hooks (`OnSharedChannelsSyncMsg`, `OnSharedChannelsAttachmentSyncMsg`, `OnSharedChannelsProfileImageSyncMsg`, `OnSharedChannelsPing`). On a content sync, the upstream `*mmModel.SyncMsg` is converted to `*wire.SyncMsg` (pruned wire type), wrapped in a `TransportEnvelope`, and published to the matching outbound provider. `publishToOutboundConn` stamps `Epoch` (one per plugin process, generated at `OnActivate`) on every envelope and `Sequence` (per `(connName, channelID)` monotonic counter via `KVStore.BumpSequenceCounter`) on every `sync_msg` part after splitting.
 
-**Inbound path** (`inbound.go`): Each inbound connection subscribes to its provider. Messages are unmarshaled from XML into a `TransportEnvelope`, channel IDs are rewritten via `rewriteChannelIDs`, the wire SyncMsg is converted back to `*mmModel.SyncMsg`, and handed to `p.API.ReceiveSharedChannelSyncMsg`.
+**Inbound path** (`inbound.go`): Each inbound connection runs an elector goroutine (`server/inbound_election.go`) that holds a KV TTL lease (45s TTL, 15s renewal, 3x safety ratio) so only one cluster node subscribes to the provider at a time. On the active node, messages are unmarshaled into a `TransportEnvelope`, routed through `inboundSequencer.Admit` to detect duplicates, reorder gaps, and audit lost ranges, then dispatched: channel IDs are rewritten via `rewriteChannelIDs`, the wire SyncMsg is converted back to `*mmModel.SyncMsg`, and handed to `p.API.ReceiveSharedChannelSyncMsg`. A 1-second gap-deadline ticker drains the sequencer of envelopes whose missing predecessors never arrived (audited as `InboundSeqGapTimeout`). A 5-second checkpoint ticker persists cursors to KV so leadership handoff resumes from where the previous active node left off.
+
+**Single-active-receiver and sequencer state** is detailed in `implementation-plans/26-05-13-01-envelope-sequence-and-epoch.md`. The receiver's audit codes (`InboundSeq*` and `InboundActive*` in `server/errcode/codes.go`) are the operator-facing contract.
 
 ### QueueProvider Interface (`server/provider.go`)
 
