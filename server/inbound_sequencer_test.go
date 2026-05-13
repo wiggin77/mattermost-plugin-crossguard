@@ -363,6 +363,45 @@ func TestSequencerNonSyncMsgPassthrough(t *testing.T) {
 	assert.Equal(t, "t1", got[0].TestID)
 }
 
+func TestSequencerCheckpointLoadThenEpochChange(t *testing.T) {
+	// The poc1/poc2 production bug, captured as a regression test.
+	// Setup: a previous sender session committed cursor (epochA, next=20)
+	// to KV. After a sender restart the receiver loads that checkpoint,
+	// then the first new-epoch envelope arrives. Pre-fix behavior was to
+	// reset to (epochB, next=1), buffer the envelope at seq=20, wait for
+	// the gap timeout to fire (30 s default), and only then dispatch.
+	// Fixed behavior: adopt the incoming envelope's Sequence as the new
+	// baseline and dispatch immediately.
+	api := &plugintest.API{}
+	registerLogMocks(api, "LogInfo", "LogWarn", "LogError", "LogDebug")
+	seq := newInboundSequencer(api, 30*time.Second, 200, 50*1024*1024)
+	seq.bytesPerEnvelope = func(*TransportEnvelope) int { return 100 }
+	seq.loadCursor = func(connName, channelID string) (string, uint64, error) {
+		if connName == "c" && channelID == "ch1" {
+			return "epochA", 20, nil
+		}
+		return "", 0, nil
+	}
+
+	// First envelope of the new epoch arrives. The sender's persisted
+	// counter might have continued from the old epoch (seq=20) or might
+	// have reset to seq=1; either way the receiver must dispatch
+	// immediately, not wait for a gap timeout.
+	got := seq.Admit("c", syncEnv("ch1", "epochB", 20))
+	require.Len(t, got, 1, "checkpointed cursor + new epoch must dispatch immediately, no gap wait")
+	assert.Equal(t, "epochB", got[0].Epoch)
+	assert.Equal(t, uint64(20), got[0].Sequence)
+
+	// Subsequent envelope under the same new epoch is monotonic from
+	// the adopted baseline.
+	got = seq.Admit("c", syncEnv("ch1", "epochB", 21))
+	require.Len(t, got, 1)
+	assert.Equal(t, uint64(21), got[0].Sequence)
+
+	expectLog(t, api, "LogInfo", 15401) // InboundSeqCheckpointLoaded
+	expectLog(t, api, "LogInfo", 15306) // InboundSeqEpochReset
+}
+
 func TestSequencerCheckpointRoundTrip(t *testing.T) {
 	// Simulate a leadership handoff: original sequencer runs, takes a
 	// snapshot, a fresh sequencer loads from that snapshot via the
