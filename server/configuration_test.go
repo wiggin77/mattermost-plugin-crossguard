@@ -326,23 +326,6 @@ func TestConfigurationValidate(t *testing.T) {
 	})
 }
 
-func TestIsUsernameLookupEnabled(t *testing.T) {
-	t.Run("nil defaults to true", func(t *testing.T) {
-		cfg := &configuration{}
-		assert.True(t, cfg.isUsernameLookupEnabled())
-	})
-
-	t.Run("explicitly true", func(t *testing.T) {
-		cfg := &configuration{UsernameLookup: new(true)}
-		assert.True(t, cfg.isUsernameLookupEnabled())
-	})
-
-	t.Run("explicitly false", func(t *testing.T) {
-		cfg := &configuration{UsernameLookup: new(false)}
-		assert.False(t, cfg.isUsernameLookupEnabled())
-	})
-}
-
 func TestIsRestrictedToSystemAdmins(t *testing.T) {
 	t.Run("nil defaults to false", func(t *testing.T) {
 		cfg := &configuration{}

@@ -166,10 +166,6 @@ Business logic for init/teardown of team and channel connections. Called by both
 
 When an inbound message arrives for an unlinked team or channel, the plugin posts an interactive Accept/Block prompt to admins. Prompts are stored in KV with "pending" or "blocked" state. Reset via `/crossguard reset-prompt`.
 
-### Sync Users (`server/sync_user.go`)
-
-Creates synthetic local users (username format: `{remote}.{connName}`) to represent remote senders. When `UsernameLookup` is enabled, attempts to match a real local user first.
-
 ### Frontend (`webapp/src/`)
 
 - `index.tsx`: Plugin entry point. Registers admin console custom settings, root components (modals), sidebar indicators, user popover attributes, channel header and main menu actions. Monitors Redux store for team/channel changes to update connection state.

@@ -45,13 +45,12 @@ test.describe('settings_schema', () => {
         }
     });
 
-    test('RelaySettings section has UsernameLookup and RestrictToSystemAdmins bool settings', () => {
+    test('RelaySettings section has RestrictToSystemAdmins bool setting', () => {
         const section = manifest.settings_schema.sections.find(
             (s: any) => s.key === 'RelaySettings',
         );
         expect(section).toBeDefined();
         const keys = section.settings.map((s: any) => s.key);
-        expect(keys).toContain('UsernameLookup');
         expect(keys).toContain('RestrictToSystemAdmins');
         for (const setting of section.settings) {
             expect(setting.type).toBe('bool');

@@ -169,7 +169,6 @@ func parseFilterTypes(raw string) []string {
 type configuration struct {
 	InboundConnections        string `json:"InboundConnections"`
 	OutboundConnections       string `json:"OutboundConnections"`
-	UsernameLookup            *bool  `json:"UsernameLookup"`
 	RestrictToSystemAdmins    *bool  `json:"RestrictToSystemAdmins"`
 	AllowTeamAdminRequests    *bool  `json:"AllowTeamAdminRequests"`
 	AllowChannelAdminRequests *bool  `json:"AllowChannelAdminRequests"`
@@ -207,10 +206,6 @@ func (c *configuration) bufferMaxBytes() int {
 		return sequencerDefaultBufferMaxBytes
 	}
 	return c.SequencerBufferMaxBytes
-}
-
-func (c *configuration) isUsernameLookupEnabled() bool {
-	return c.UsernameLookup == nil || *c.UsernameLookup
 }
 
 func (c *configuration) isRestrictedToSystemAdmins() bool {

@@ -42,13 +42,6 @@
                 "title": "Relay Settings",
                 "settings": [
                     {
-                        "key": "UsernameLookup",
-                        "display_name": "Username Lookup",
-                        "type": "bool",
-                        "default": true,
-                        "help_text": "When enabled, inbound messages will be posted as the matching local user if a user with the same username exists. When disabled, a synthetic relay user is always created."
-                    },
-                    {
                         "key": "RestrictToSystemAdmins",
                         "display_name": "Restrict Connection Management to System Admins",
                         "type": "bool",
