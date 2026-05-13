@@ -142,7 +142,7 @@ func TestSyncMsgFromModelEmpty(t *testing.T) {
 	assert.Equal(t, "sm1", got.Id)
 	assert.Equal(t, "ch01", got.ChannelId)
 	assert.Nil(t, got.Users)
-	assert.Nil(t, got.Posts)
+	assert.Nil(t, got.Post)
 	assert.Nil(t, got.MentionTransforms)
 }
 

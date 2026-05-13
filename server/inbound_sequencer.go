@@ -153,10 +153,15 @@ func (s *inboundSequencer) Admit(connName string, env *TransportEnvelope) []*Tra
 	// Epoch change: dispatch any old-epoch buffered envelopes (they're
 	// valid data, just from a previous sender session - the receiver
 	// is content-keyed and doesn't care about epoch), then reset the
-	// cursor for the new session.
+	// cursor for the new session. The receiver adopts the incoming
+	// envelope's Sequence as the new baseline rather than insisting
+	// the new epoch start at 1: the sender process is a fresh
+	// conversation, and the receiver has no basis to predict what
+	// starting seq it will use. Monotonicity within the new epoch is
+	// what matters; the absolute starting value is opaque.
 	var ready []*TransportEnvelope
 	if env.Epoch != state.epoch {
-		ready = s.handleEpochChange(connName, key, state, env.Epoch)
+		ready = s.handleEpochChange(connName, key, state, env.Epoch, env.Sequence)
 	}
 
 	// Duplicate of an already-dispatched seq: discard. The receiver is
@@ -292,10 +297,17 @@ func (s *inboundSequencer) observeTestEpoch(connName, epoch string) {
 // ID, not by epoch, so old-epoch envelopes still apply and should not
 // be dropped just because the sender restarted.
 //
+// The cursor is set to the incoming envelope's Sequence (not to 1):
+// the sender's per-channel counter strategy across restarts is its own
+// concern, and the receiver has no basis to predict what starting seq
+// the new epoch will use. Subsequent envelopes within the new epoch
+// must arrive monotonically from this baseline; the absolute starting
+// value is opaque to the receiver and that is fine.
+//
 // Stale-epoch arrivals (env.Epoch < state.epoch by some ordering) are
 // not detectable here without persisted epoch history; we treat any
 // epoch change as forward progress and accept the new envelope.
-func (s *inboundSequencer) handleEpochChange(connName string, key seqKey, state *seqState, newEpoch string) []*TransportEnvelope {
+func (s *inboundSequencer) handleEpochChange(connName string, key seqKey, state *seqState, newEpoch string, incomingSeq uint64) []*TransportEnvelope {
 	var released []*TransportEnvelope
 	if len(state.buffer) > 0 {
 		seqs := make([]uint64, 0, len(state.buffer))
@@ -320,10 +332,11 @@ func (s *inboundSequencer) handleEpochChange(connName string, key seqKey, state 
 	s.api.LogInfo("Inbound sequencer epoch reset",
 		"error_code", errcode.InboundSeqEpochReset,
 		"conn_name", connName, "channel_id", key.channelID,
-		"old_epoch", state.epoch, "new_epoch", newEpoch)
+		"old_epoch", state.epoch, "new_epoch", newEpoch,
+		"new_baseline_seq", incomingSeq)
 
 	state.epoch = newEpoch
-	state.nextExpected = 1
+	state.nextExpected = incomingSeq
 	state.buffer = make(map[uint64]*bufferedEnvelope)
 	state.bufferSize = 0
 	state.gapStart = time.Time{}

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/assert"
@@ -60,8 +59,8 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, env.SyncMsg.ChannelId, got.SyncMsg.ChannelId)
 	require.Len(t, got.SyncMsg.Users, 1)
 	assert.Equal(t, "alice", got.SyncMsg.Users["u1"].Username)
-	require.Len(t, got.SyncMsg.Posts, 1)
-	assert.Equal(t, "hello", got.SyncMsg.Posts[0].Message)
+	require.NotNil(t, got.SyncMsg.Post)
+	assert.Equal(t, "hello", got.SyncMsg.Post.Message)
 	require.Len(t, got.SyncMsg.Reactions, 1)
 	assert.Equal(t, "thumbsup", got.SyncMsg.Reactions[0].EmojiName)
 }
@@ -123,139 +122,114 @@ func TestTransportEnvelopeMarshalTest(t *testing.T) {
 	assert.Nil(t, got.SyncMsg)
 }
 
-func TestSplitTransportEnvelopeFits(t *testing.T) {
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Posts: []*mmModel.Post{
-				{Id: "p1", Message: "short"},
-			},
-		}),
+func TestFanoutSinglePostNoMetadata(t *testing.T) {
+	template := &TransportEnvelope{
+		Version:  1,
+		Type:     TransportTypeSyncMsg,
+		ConnName: "low-to-high",
 	}
-	parts, err := splitTransportEnvelope(env, 1<<20)
-	require.NoError(t, err)
-	require.Len(t, parts, 1)
-	assert.Same(t, env, parts[0])
+	msg := &mmModel.SyncMsg{
+		Id:        "sm-1",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+		},
+		Posts: []*mmModel.Post{{Id: "p1", UserId: "u1", Message: "hello"}},
+	}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 1)
+	require.NotNil(t, envs[0].SyncMsg.Post)
+	assert.Equal(t, "p1", envs[0].SyncMsg.Post.Id)
+	require.Len(t, envs[0].SyncMsg.Users, 1)
+	assert.Contains(t, envs[0].SyncMsg.Users, "u1")
 }
 
-func TestSplitTransportEnvelopeNoLimit(t *testing.T) {
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Posts: []*mmModel.Post{
-				{Id: "p1", Message: strings.Repeat("x", 10000)},
-			},
-		}),
+func TestFanoutMultiPostWithReactions(t *testing.T) {
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+			"u2": {Id: "u2", Username: "bob"},
+		},
+		Posts: []*mmModel.Post{
+			{Id: "p1", UserId: "u1", Message: "first"},
+			{Id: "p2", UserId: "u2", Message: "second"},
+		},
+		Reactions: []*mmModel.Reaction{
+			{UserId: "u2", PostId: "p1", EmojiName: "thumbsup"},
+		},
 	}
-	parts, err := splitTransportEnvelope(env, 0)
-	require.NoError(t, err)
-	require.Len(t, parts, 1)
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 2, "two posts produce two envelopes; reaction rides with its post")
+
+	// First post envelope carries p1 + its reaction + the author.
+	assert.Equal(t, "p1", envs[0].SyncMsg.Post.Id)
+	require.Len(t, envs[0].SyncMsg.Reactions, 1)
+	assert.Equal(t, "thumbsup", envs[0].SyncMsg.Reactions[0].EmojiName)
+	assert.Contains(t, envs[0].SyncMsg.Users, "u1", "post envelope inlines the post's author only")
+	assert.NotContains(t, envs[0].SyncMsg.Users, "u2", "non-author users do not ride with the post")
+
+	// Second post envelope carries p2 with no reaction.
+	assert.Equal(t, "p2", envs[1].SyncMsg.Post.Id)
+	assert.Empty(t, envs[1].SyncMsg.Reactions)
+	assert.Contains(t, envs[1].SyncMsg.Users, "u2")
 }
 
-func TestSplitTransportEnvelopeMultiplePosts(t *testing.T) {
-	posts := make([]*mmModel.Post, 10)
-	for i := range posts {
-		posts[i] = &mmModel.Post{
-			Id:      mmModel.NewId(),
-			Message: strings.Repeat("a", 200),
-		}
+func TestFanoutMetadataOnly(t *testing.T) {
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+		},
+		MembershipChanges: []*mmModel.MembershipChangeMsg{
+			{ChannelId: "ch", UserId: "u1", IsAdd: true, ChangeTime: 12345},
+		},
 	}
-	reactions := []*mmModel.Reaction{
-		{UserId: "u1", PostId: posts[0].Id, EmojiName: "tada"},
-		{UserId: "u1", PostId: posts[5].Id, EmojiName: "ok_hand"},
-	}
-
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Users:     map[string]*mmModel.User{"u1": {Id: "u1", Username: "alice"}},
-			Posts:     posts,
-			Reactions: reactions,
-		}),
-	}
-
-	full, err := MarshalEnvelope(env)
-	require.NoError(t, err)
-	maxSize := len(full) / 3
-
-	parts, err := splitTransportEnvelope(env, maxSize)
-	require.NoError(t, err)
-	require.Greater(t, len(parts), 1, "envelope should split into multiple parts")
-
-	totalPosts := 0
-	totalReactions := 0
-	for _, part := range parts {
-		require.NotNil(t, part.SyncMsg)
-		totalPosts += len(part.SyncMsg.Posts)
-		totalReactions += len(part.SyncMsg.Reactions)
-		assert.Equal(t, env.SyncMsg.Users, part.SyncMsg.Users, "users map should be in every split")
-	}
-	assert.Equal(t, len(posts), totalPosts)
-	assert.Equal(t, len(reactions), totalReactions)
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 1, "membership-only sync produces one metadata envelope")
+	assert.Nil(t, envs[0].SyncMsg.Post, "metadata envelope has no <Post>")
+	require.Len(t, envs[0].SyncMsg.MembershipChanges, 1)
+	assert.Contains(t, envs[0].SyncMsg.Users, "u1")
 }
 
-func TestSplitTransportEnvelopeUsersOnly(t *testing.T) {
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Users:     map[string]*mmModel.User{"u1": {Id: "u1", Username: "alice"}},
-		}),
+func TestFanoutPostsPlusOrphanReaction(t *testing.T) {
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+			"u2": {Id: "u2", Username: "bob"},
+		},
+		Posts: []*mmModel.Post{
+			{Id: "p1", UserId: "u1", Message: "in this batch"},
+		},
+		Reactions: []*mmModel.Reaction{
+			{UserId: "u2", PostId: "p999", EmojiName: "smile"}, // orphan: p999 not in this batch
+		},
 	}
-	parts, err := splitTransportEnvelope(env, 10)
-	require.NoError(t, err)
-	require.Len(t, parts, 1, "users-only sync should not be split")
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 2, "one post envelope + one metadata envelope for the orphan")
+	assert.NotNil(t, envs[0].SyncMsg.Post)
+	assert.Empty(t, envs[0].SyncMsg.Reactions, "p1 has no reactions in this batch")
+	assert.Nil(t, envs[1].SyncMsg.Post)
+	require.Len(t, envs[1].SyncMsg.Reactions, 1)
+	assert.Equal(t, "p999", envs[1].SyncMsg.Reactions[0].PostId)
+	assert.Contains(t, envs[1].SyncMsg.Users, "u2", "reacting user inlined on metadata envelope")
 }
 
-func TestSplitTransportEnvelopeSinglePostOversize(t *testing.T) {
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Posts: []*mmModel.Post{
-				{Id: "p1", Message: strings.Repeat("y", 5000)},
-			},
-		}),
-	}
-	parts, err := splitTransportEnvelope(env, 100)
-	require.NoError(t, err)
-	require.Len(t, parts, 1, "single post that exceeds the limit cannot be split")
-}
-
-func TestSplitTransportEnvelopeUTF8Safety(t *testing.T) {
-	posts := make([]*mmModel.Post, 5)
-	for i := range posts {
-		posts[i] = &mmModel.Post{
-			Id:      mmModel.NewId(),
-			Message: strings.Repeat("中文", 50),
-		}
-	}
-	env := &TransportEnvelope{
-		Type: TransportTypeSyncMsg,
-		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
-			Id:        "sm",
-			ChannelId: "ch",
-			Posts:     posts,
-		}),
-	}
-
-	full, err := MarshalEnvelope(env)
-	require.NoError(t, err)
-	parts, err := splitTransportEnvelope(env, len(full)/2)
-	require.NoError(t, err)
-	for _, part := range parts {
-		for _, p := range part.SyncMsg.Posts {
-			assert.True(t, utf8.ValidString(p.Message), "split post must remain valid UTF-8")
-		}
-	}
+func TestFanoutEmptySyncMsgEmitsBare(t *testing.T) {
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{Id: "sm", ChannelId: "ch"}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 1, "empty sync msg still emits one envelope so the cursor advances")
+	assert.Nil(t, envs[0].SyncMsg.Post)
+	assert.Empty(t, envs[0].SyncMsg.Reactions)
+	assert.Empty(t, envs[0].SyncMsg.MembershipChanges)
 }
 
 func TestBuildSyncResponse(t *testing.T) {

@@ -105,123 +105,191 @@ func buildSyncResponse(msg *mmModel.SyncMsg) mmModel.SyncResponse {
 	return resp
 }
 
-// splitTransportEnvelope splits the SyncMsg portion of an envelope into
-// multiple envelopes, each fitting within maxSize bytes when serialized.
+// buildOutboundEnvelopes fans out an upstream SyncMsg into one envelope
+// per post plus an optional metadata envelope. The unit of publication
+// is one logical message so compliance content inspection rejects with
+// minimum blast radius: a rejection drops only the offending post, not
+// the entire sync cycle's worth of content.
 //
-// When the envelope already fits, it is returned as-is. If maxSize <= 0
-// (provider has no limit), it is returned as-is.
+// The fanout walks msg:
 //
-// The Users map is duplicated into each split envelope to preserve sender
-// context for the posts. Reactions and Acknowledgements are placed only in
-// the envelope containing their associated post.
+//   - Each post in msg.Posts produces one post envelope carrying the
+//     post, its author (filtered out of msg.Users by UserId), reactions
+//     on this post (filtered by PostId), acknowledgements on this post,
+//     and the full MentionTransforms map.
 //
-// If the envelope holds no posts (users-only sync) or a single post is too
-// large on its own, it is sent as one envelope. The provider handles
-// individual oversize messages.
-func splitTransportEnvelope(env *TransportEnvelope, maxSize int) ([]*TransportEnvelope, error) {
-	if env == nil {
-		return nil, fmt.Errorf("envelope is nil")
+//   - Remaining content (orphan reactions, orphan acks, all memberships,
+//     all statuses, and the users referenced by any of those) produces
+//     one metadata envelope. The metadata envelope has no <Post>
+//     element and is therefore not subject to content-rejection at the
+//     compliance tool. Emitted only when at least one non-post item
+//     remains after the post fanout.
+//
+// When msg has no posts and no metadata-eligible content, returns a
+// single envelope carrying just the SyncMsg identifiers so the
+// upstream cursor still advances.
+//
+// templateEnv supplies the routing/audit fields (Version, Type,
+// ConnName, Timestamp, TeamName, ChannelName). Its own SyncMsg field
+// is ignored.
+func buildOutboundEnvelopes(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg) []*TransportEnvelope {
+	if templateEnv == nil || msg == nil {
+		return nil
 	}
 
-	data, err := MarshalEnvelope(env)
-	if err != nil {
-		return nil, err
+	// Pre-bucket reactions and acks by their referenced PostId.
+	reactionsByPost := make(map[string][]*mmModel.Reaction)
+	for _, r := range msg.Reactions {
+		if r != nil {
+			reactionsByPost[r.PostId] = append(reactionsByPost[r.PostId], r)
+		}
 	}
-	if maxSize <= 0 || len(data) <= maxSize {
-		return []*TransportEnvelope{env}, nil
-	}
-
-	if env.SyncMsg == nil || len(env.SyncMsg.Posts) <= 1 {
-		return []*TransportEnvelope{env}, nil
-	}
-
-	posts := env.SyncMsg.Posts
-	postIDs := make(map[string]struct{}, len(posts))
-	for _, p := range posts {
-		if p != nil {
-			postIDs[p.Id] = struct{}{}
+	acksByPost := make(map[string][]*mmModel.PostAcknowledgement)
+	for _, a := range msg.Acknowledgements {
+		if a != nil {
+			acksByPost[a.PostId] = append(acksByPost[a.PostId], a)
 		}
 	}
 
-	// Pre-bucket reactions and acknowledgements by post ID, so we can build
-	// each split's slices without rescanning the originals every time.
-	reactionsByPost := make(map[string][]*wire.Reaction)
-	for _, r := range env.SyncMsg.Reactions {
+	localPostIDs := make(map[string]struct{})
+	out := make([]*TransportEnvelope, 0, len(msg.Posts)+1)
+	for _, post := range msg.Posts {
+		if post == nil {
+			continue
+		}
+		localPostIDs[post.Id] = struct{}{}
+		out = append(out, buildPostEnvelope(templateEnv, msg, post, reactionsByPost, acksByPost))
+	}
+
+	if meta := buildMetadataEnvelope(templateEnv, msg, localPostIDs); meta != nil {
+		out = append(out, meta)
+	}
+
+	if len(out) == 0 {
+		// No posts, no metadata-eligible content; emit a single bare
+		// envelope so the framework's per-remote cursor still
+		// advances on success.
+		out = append(out, cloneEnvelopeHeader(templateEnv, &wire.SyncMsg{
+			Id:        msg.Id,
+			ChannelId: msg.ChannelId,
+		}))
+	}
+	return out
+}
+
+// buildPostEnvelope constructs a single post envelope carrying the
+// given post plus its causally-related metadata. The post's author is
+// the only user inlined; other users that may have been in msg.Users
+// (e.g., referenced by membership changes) belong on the metadata
+// envelope.
+func buildPostEnvelope(
+	templateEnv *TransportEnvelope,
+	msg *mmModel.SyncMsg,
+	post *mmModel.Post,
+	reactionsByPost map[string][]*mmModel.Reaction,
+	acksByPost map[string][]*mmModel.PostAcknowledgement,
+) *TransportEnvelope {
+	subModel := &mmModel.SyncMsg{
+		Id:                msg.Id,
+		ChannelId:         msg.ChannelId,
+		Posts:             []*mmModel.Post{post},
+		Reactions:         reactionsByPost[post.Id],
+		Acknowledgements:  acksByPost[post.Id],
+		MentionTransforms: msg.MentionTransforms,
+	}
+	if author, ok := msg.Users[post.UserId]; ok {
+		subModel.Users = map[string]*mmModel.User{post.UserId: author}
+	}
+	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel))
+}
+
+// buildMetadataEnvelope constructs the optional metadata envelope for
+// content that does not ride with a post: orphan reactions and acks
+// (whose post is not in this sync cycle), all memberships, all
+// statuses, and the users referenced by any of those. Returns nil
+// when nothing in this category is present.
+func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg, localPostIDs map[string]struct{}) *TransportEnvelope {
+	var orphanReactions []*mmModel.Reaction
+	for _, r := range msg.Reactions {
 		if r == nil {
 			continue
 		}
-		reactionsByPost[r.PostId] = append(reactionsByPost[r.PostId], r)
+		if _, in := localPostIDs[r.PostId]; !in {
+			orphanReactions = append(orphanReactions, r)
+		}
 	}
-	acksByPost := make(map[string][]*wire.PostAcknowledgement)
-	for _, a := range env.SyncMsg.Acknowledgements {
+	var orphanAcks []*mmModel.PostAcknowledgement
+	for _, a := range msg.Acknowledgements {
 		if a == nil {
 			continue
 		}
-		acksByPost[a.PostId] = append(acksByPost[a.PostId], a)
-	}
-
-	splits := make([]*TransportEnvelope, 0)
-	idx := 0
-	for idx < len(posts) {
-		// Try the largest remaining slice first, halving until it fits or
-		// shrinks to a single post (which we then send unconditionally).
-		count := len(posts) - idx
-		for count > 1 {
-			candidate := buildSplitEnvelope(env, posts[idx:idx+count], reactionsByPost, acksByPost)
-			candidateData, marshalErr := MarshalEnvelope(candidate)
-			if marshalErr != nil {
-				return nil, marshalErr
-			}
-			if len(candidateData) <= maxSize {
-				break
-			}
-			count /= 2
+		if _, in := localPostIDs[a.PostId]; !in {
+			orphanAcks = append(orphanAcks, a)
 		}
-		split := buildSplitEnvelope(env, posts[idx:idx+count], reactionsByPost, acksByPost)
-		splits = append(splits, split)
-		idx += count
 	}
 
-	return splits, nil
+	hasContent := len(orphanReactions) > 0 ||
+		len(orphanAcks) > 0 ||
+		len(msg.MembershipChanges) > 0 ||
+		len(msg.Statuses) > 0
+	if !hasContent {
+		return nil
+	}
+
+	usersRef := make(map[string]struct{})
+	for _, r := range orphanReactions {
+		usersRef[r.UserId] = struct{}{}
+	}
+	for _, a := range orphanAcks {
+		usersRef[a.UserId] = struct{}{}
+	}
+	for _, m := range msg.MembershipChanges {
+		if m != nil {
+			usersRef[m.UserId] = struct{}{}
+		}
+	}
+	for _, s := range msg.Statuses {
+		if s != nil {
+			usersRef[s.UserId] = struct{}{}
+		}
+	}
+
+	var users map[string]*mmModel.User
+	for id := range usersRef {
+		if u, ok := msg.Users[id]; ok {
+			if users == nil {
+				users = make(map[string]*mmModel.User)
+			}
+			users[id] = u
+		}
+	}
+
+	subModel := &mmModel.SyncMsg{
+		Id:                msg.Id,
+		ChannelId:         msg.ChannelId,
+		Users:             users,
+		Reactions:         orphanReactions,
+		Statuses:          msg.Statuses,
+		MembershipChanges: msg.MembershipChanges,
+		Acknowledgements:  orphanAcks,
+	}
+	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel))
 }
 
-func buildSplitEnvelope(
-	src *TransportEnvelope,
-	posts []*wire.Post,
-	reactionsByPost map[string][]*wire.Reaction,
-	acksByPost map[string][]*wire.PostAcknowledgement,
-) *TransportEnvelope {
-	subMsg := &wire.SyncMsg{
-		Id:                src.SyncMsg.Id,
-		ChannelId:         src.SyncMsg.ChannelId,
-		Users:             src.SyncMsg.Users,
-		MentionTransforms: src.SyncMsg.MentionTransforms,
-		Posts:             posts,
-	}
-
-	for _, p := range posts {
-		if p == nil {
-			continue
-		}
-		if rs := reactionsByPost[p.Id]; len(rs) > 0 {
-			subMsg.Reactions = append(subMsg.Reactions, rs...)
-		}
-		if as := acksByPost[p.Id]; len(as) > 0 {
-			subMsg.Acknowledgements = append(subMsg.Acknowledgements, as...)
-		}
-	}
-
+// cloneEnvelopeHeader copies the routing/audit fields from templateEnv
+// into a new envelope and attaches the given SyncMsg. Sequence is left
+// zero; publishToOutboundConn stamps a fresh per-channel Sequence on
+// each envelope it publishes.
+func cloneEnvelopeHeader(templateEnv *TransportEnvelope, subMsg *wire.SyncMsg) *TransportEnvelope {
 	return &TransportEnvelope{
-		Version:   src.Version,
-		Type:      src.Type,
-		ConnName:  src.ConnName,
-		Timestamp: src.Timestamp,
-		Epoch:     src.Epoch,
-		// Sequence intentionally left zero: each split part gets its own
-		// per-part Sequence stamped by publishToOutboundConn after split.
-		TeamName:    src.TeamName,
-		ChannelName: src.ChannelName,
+		Version:     templateEnv.Version,
+		Type:        templateEnv.Type,
+		ConnName:    templateEnv.ConnName,
+		Timestamp:   templateEnv.Timestamp,
+		Epoch:       templateEnv.Epoch,
+		TeamName:    templateEnv.TeamName,
+		ChannelName: templateEnv.ChannelName,
 		SyncMsg:     subMsg,
-		TestID:      src.TestID,
+		TestID:      templateEnv.TestID,
 	}
 }

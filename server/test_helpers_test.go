@@ -64,7 +64,6 @@ func connectToEmbeddedNATS(t *testing.T, addr, subject string) *natsProvider {
 // test override individual methods via flexibleKVStore.
 type testKVStore struct {
 	store.KVStore
-	seqCounter uint64
 }
 
 func newTestKVStore() *testKVStore {
@@ -142,13 +141,6 @@ func (s *testKVStore) UpdateChannelConnectionRequest(string, string, *store.Conn
 	return nil
 }
 func (s *testKVStore) DeleteChannelConnectionRequest(string, string) error { return nil }
-
-// BumpSequenceCounter returns a stub monotonic value derived from an in-process
-// counter so tests can exercise the publish path without a real KV backend.
-func (s *testKVStore) BumpSequenceCounter(string, string) (uint64, error) {
-	s.seqCounter++
-	return s.seqCounter, nil
-}
 
 // AcquireOrRenewInboundLease and ReleaseInboundLease return immediate ownership
 // for the calling node so existing tests that exercise the inbound path do not

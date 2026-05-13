@@ -273,12 +273,9 @@ func (p *Plugin) handleInboundSyncMsg(connName string, env *TransportEnvelope) e
 		return fmt.Errorf("ReceiveSharedChannelSyncMsg failed: %w", err)
 	}
 
-	postCount := 0
-	if env.SyncMsg != nil {
-		postCount = len(env.SyncMsg.Posts)
-	}
+	hasPost := env.SyncMsg != nil && env.SyncMsg.Post != nil
 	p.API.LogDebug("ReceiveSharedChannelSyncMsg accepted",
-		"conn_name", connName, "channel_id", channel.Id, "post_count", postCount)
+		"conn_name", connName, "channel_id", channel.Id, "has_post", hasPost)
 
 	if errs := joinSyncErrors(resp); errs != "" {
 		p.API.LogWarn("Some entities failed to sync",
@@ -305,10 +302,8 @@ func joinSyncErrors(resp mmModel.SyncResponse) string {
 // uses these IDs to route content.
 func rewriteChannelIDs(msg *wire.SyncMsg, localChannelID string) {
 	msg.ChannelId = localChannelID
-	for _, post := range msg.Posts {
-		if post != nil {
-			post.ChannelId = localChannelID
-		}
+	if msg.Post != nil {
+		msg.Post.ChannelId = localChannelID
 	}
 	for _, reaction := range msg.Reactions {
 		if reaction != nil {

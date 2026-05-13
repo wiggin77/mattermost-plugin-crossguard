@@ -136,15 +136,13 @@ func TestSequencerReactionBeforePost(t *testing.T) {
 		UserId: "u1", PostId: "p1", EmojiName: "thumbsup",
 	}}
 	postEnv := syncEnv("ch1", "epochA", 1)
-	postEnv.SyncMsg.Posts = []*wire.Post{{
-		Id: "p1", Message: "hello",
-	}}
+	postEnv.SyncMsg.Post = &wire.Post{Id: "p1", Message: "hello"}
 
 	require.Empty(t, seq.Admit("c", reactionEnv), "reaction at seq=2 buffered while post at seq=1 not yet seen")
 
 	got := seq.Admit("c", postEnv)
 	require.Len(t, got, 2)
-	assert.Equal(t, "p1", got[0].SyncMsg.Posts[0].Id, "post dispatched first")
+	assert.Equal(t, "p1", got[0].SyncMsg.Post.Id, "post dispatched first")
 	assert.Equal(t, "thumbsup", got[1].SyncMsg.Reactions[0].EmojiName, "reaction dispatched after post")
 }
 
@@ -212,6 +210,39 @@ func TestSequencerEpochResetEmptyBuffer(t *testing.T) {
 	got := seq.Admit("c", syncEnv("ch1", "epochB", 1))
 	require.Len(t, got, 1, "new epoch starts fresh from seq=1")
 	assert.Equal(t, "epochB", got[0].Epoch)
+	expectLog(t, api, "LogInfo", 15306) // InboundSeqEpochReset
+}
+
+func TestSequencerEpochResetNonOneBaseline(t *testing.T) {
+	// A new epoch's first envelope can carry any Sequence value; the
+	// receiver adopts whatever it sees as the cursor baseline rather
+	// than insisting on seq=1. This covers the case where a sender's
+	// counter strategy persists across epochs (e.g., KV-backed) and
+	// the new epoch resumes at seq=N instead of seq=1, and it also
+	// avoids a 30-second gap-fill wait on the very first envelope
+	// after a sender restart.
+	seq, api := newTestSequencer(t)
+
+	require.Len(t, seq.Admit("c", syncEnv("ch1", "epochA", 1)), 1)
+
+	// New epoch first envelope arrives at seq=20 (e.g., sender counter
+	// did not reset on restart). Should dispatch immediately.
+	got := seq.Admit("c", syncEnv("ch1", "epochB", 20))
+	require.Len(t, got, 1, "first seq of new epoch dispatches in-order regardless of value")
+	assert.Equal(t, "epochB", got[0].Epoch)
+	assert.Equal(t, uint64(20), got[0].Sequence)
+
+	// Subsequent envelope in the same epoch must be monotonic from the
+	// adopted baseline. seq=21 dispatches in-order.
+	got = seq.Admit("c", syncEnv("ch1", "epochB", 21))
+	require.Len(t, got, 1)
+	assert.Equal(t, uint64(21), got[0].Sequence)
+
+	// seq=19 in the new epoch is below the baseline and counts as a
+	// duplicate (or out-of-order arrival from an indistinguishable
+	// pre-cursor seq).
+	require.Empty(t, seq.Admit("c", syncEnv("ch1", "epochB", 19)),
+		"seq below the adopted baseline is treated as duplicate")
 	expectLog(t, api, "LogInfo", 15306) // InboundSeqEpochReset
 }
 

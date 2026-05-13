@@ -38,6 +38,17 @@ const (
 // the plugin's current epoch so the receiver can correlate the test against
 // the sender session it expects to see on subsequent sync_msg envelopes.
 // Test envelopes carry Epoch but never Sequence (no channel scope).
+// nextOutboundSeq returns the next per-(connName, channelID) sequence
+// number under the current epoch. Concurrency-safe; the counter map is
+// reset to empty on every OnActivate.
+func (p *Plugin) nextOutboundSeq(connName, channelID string) uint64 {
+	key := connName + "\x00" + channelID
+	p.outboundSeqMu.Lock()
+	defer p.outboundSeqMu.Unlock()
+	p.outboundSeq[key]++
+	return p.outboundSeq[key]
+}
+
 func buildTestEnvelope(epoch string) (*TransportEnvelope, []byte, string, error) {
 	msgID := newID()
 	env := &TransportEnvelope{
@@ -113,10 +124,13 @@ func (p *Plugin) reconnectOutbound() {
 const healthRecheckInterval = 30 * time.Second
 
 // publishToOutboundConn serializes the TransportEnvelope to XML and publishes
-// it to the named outbound connection. Splits the SyncMsg if the resulting
-// payload exceeds the provider's MaxMessageSize. Returns an error if any
-// part fails to publish (so the caller can propagate the failure to the
-// shared channels server, preventing cursor advance).
+// it to the named outbound connection. Each call publishes exactly one
+// envelope; the caller (hooks.go) has already fanned out a SyncMsg into
+// one envelope per post plus an optional metadata envelope via
+// buildOutboundEnvelopes. Stamps the sender's Epoch on the envelope and a
+// fresh per-(connName, channelID) Sequence for sync_msg envelopes.
+// Returns an error so the caller can propagate the failure to the
+// shared channels server and prevent cursor advance.
 func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelope, connName string) error {
 	p.outboundMu.RLock()
 	var oc *outboundConn
@@ -137,61 +151,36 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 		return fmt.Errorf("outbound connection %q is unhealthy, skipping publish", connName)
 	}
 
-	// Stamp the sender's epoch on the source envelope before splitting so
-	// every resulting part inherits the same epoch.
 	env.Epoch = p.epoch
 
-	maxSize := oc.provider.MaxMessageSize()
-	parts, err := splitTransportEnvelope(env, maxSize)
-	if err != nil {
+	// Stamp sequence for sync_msg envelopes (test envelopes carry no
+	// channel scope and never get a sequence number). The counter is
+	// scoped to the current epoch via an in-memory map that resets on
+	// OnActivate, so the first envelope on each channel under a new
+	// epoch carries Sequence=1.
+	if env.Type == TransportTypeSyncMsg && env.SyncMsg != nil {
+		env.Sequence = p.nextOutboundSeq(connName, env.SyncMsg.ChannelId)
+	}
+
+	data, marshalErr := MarshalEnvelope(env)
+	if marshalErr != nil {
+		p.API.LogError("Failed to serialize outbound envelope",
+			"error_code", errcode.ConnectionsSerializePartFailed,
+			"name", connName, "error", marshalErr.Error())
 		p.updateOutboundHealth(connName, false)
-		return fmt.Errorf("split envelope: %w", err)
+		return marshalErr
 	}
-
-	if len(parts) > 1 {
-		p.API.LogInfo("Envelope split into parts for provider size limit",
-			"error_code", errcode.ConnectionsMessageSplit,
-			"connection", connName, "parts", len(parts))
-	}
-
-	for i, part := range parts {
-		// Sequence is stamped per-part for sync_msg envelopes only. Each
-		// part is its own envelope on the wire, so each consumes a counter
-		// increment. Receivers see a dense monotonic sequence per
-		// (connName, channelID).
-		if part.Type == TransportTypeSyncMsg && part.SyncMsg != nil {
-			seq, seqErr := p.kvstore.BumpSequenceCounter(connName, part.SyncMsg.ChannelId)
-			if seqErr != nil {
-				p.API.LogError("Failed to bump sequence counter for outbound envelope",
-					"error_code", errcode.ConnectionsSeqCounterIncrementFail,
-					"name", connName, "channel_id", part.SyncMsg.ChannelId,
-					"part", i+1, "error", seqErr.Error())
-				p.updateOutboundHealth(connName, false)
-				return seqErr
-			}
-			part.Sequence = seq
-		}
-
-		data, marshalErr := MarshalEnvelope(part)
-		if marshalErr != nil {
-			p.API.LogError("Failed to serialize outbound envelope part",
-				"error_code", errcode.ConnectionsSerializePartFailed,
-				"name", connName, "part", i+1, "error", marshalErr.Error())
-			p.updateOutboundHealth(connName, false)
-			return marshalErr
-		}
-		if pubErr := oc.provider.Publish(ctx, data); pubErr != nil {
-			p.API.LogError("Failed to publish outbound envelope part",
-				"error_code", errcode.ConnectionsPublishPartFailed,
-				"name", connName, "part", i+1, "error", pubErr.Error())
-			p.updateOutboundHealth(connName, false)
-			return pubErr
-		}
+	if pubErr := oc.provider.Publish(ctx, data); pubErr != nil {
+		p.API.LogError("Failed to publish outbound envelope",
+			"error_code", errcode.ConnectionsPublishPartFailed,
+			"name", connName, "error", pubErr.Error())
+		p.updateOutboundHealth(connName, false)
+		return pubErr
 	}
 
 	p.updateOutboundHealth(connName, true)
 	p.API.LogDebug("Outbound publish completed",
-		"connection", connName, "type", env.Type, "parts", len(parts))
+		"connection", connName, "type", env.Type)
 	return nil
 }
 

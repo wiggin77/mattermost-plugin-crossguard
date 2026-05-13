@@ -45,6 +45,7 @@ func exampleCases() []exampleCase {
 		{"18_post_with_props_webhook.xml", postWithPropsWebhookEnvelope},
 		{"19_user_with_timezone_and_props.xml", userWithTimezoneAndPropsEnvelope},
 		{"20_bot_user.xml", botUserEnvelope},
+		{"21_metadata_orphan_reaction.xml", metadataOrphanReactionEnvelope},
 	}
 }
 
@@ -594,4 +595,25 @@ func botUserEnvelope() *TransportEnvelope {
 			Message:   "Deployment of v1.2.3 to production complete.",
 		}},
 	}), "epoch20aaaaaaaaaaaaaaaaaaa", 1)
+}
+
+// 21: Metadata envelope. A sync cycle that produced no posts emits one
+// envelope with no <Post> element, carrying only the non-post content
+// (here, a reaction on a post from a previous sync cycle). Compliance
+// content inspection sees an envelope with nothing to reject; metadata
+// envelopes always flow.
+func metadataOrphanReactionEnvelope() *TransportEnvelope {
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+		Id:        "sm-21",
+		ChannelId: chanID,
+		Users:     map[string]*mmModel.User{userA: alice()},
+		Reactions: []*mmModel.Reaction{{
+			UserId:    userA,
+			PostId:    postID1, // post is from an earlier sync cycle, not in this batch
+			EmojiName: "raised_hands",
+			CreateAt:  1712958300000,
+			UpdateAt:  1712958300000,
+			ChannelId: chanID,
+		}},
+	}), "epoch21aaaaaaaaaaaaaaaaaaa", 1)
 }

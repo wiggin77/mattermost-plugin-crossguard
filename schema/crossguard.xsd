@@ -85,7 +85,7 @@
       <xs:element name="Id"                type="xs:string"/>
       <xs:element name="ChannelId"         type="xs:string"/>
       <xs:element name="Users"             type="UsersType"             minOccurs="0"/>
-      <xs:element name="Posts"             type="PostsContainerType"             minOccurs="0"/>
+      <xs:element name="Post"              type="PostType"              minOccurs="0"/>
       <xs:element name="Reactions"         type="ReactionsContainerType"         minOccurs="0"/>
       <xs:element name="Statuses"          type="StatusesContainerType"          minOccurs="0"/>
       <xs:element name="MembershipChanges" type="MembershipChangesContainerType" minOccurs="0"/>
@@ -105,12 +105,6 @@
           </xs:complexContent>
         </xs:complexType>
       </xs:element>
-    </xs:sequence>
-  </xs:complexType>
-
-  <xs:complexType name="PostsContainerType">
-    <xs:sequence>
-      <xs:element name="Post" type="PostType" minOccurs="0" maxOccurs="unbounded"/>
     </xs:sequence>
   </xs:complexType>
 

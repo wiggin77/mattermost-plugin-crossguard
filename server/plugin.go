@@ -54,6 +54,19 @@ type Plugin struct {
 	// on the wire.
 	epoch string
 
+	// outboundSeq is the per-(connName, channelID) outbound envelope
+	// counter, scoped to the current epoch. Reset to empty on every
+	// OnActivate so the first envelope on each channel under a new
+	// epoch is Sequence=1, matching the design invariant. In-memory
+	// rather than KV-persisted because the counter only needs to live
+	// for the lifetime of the epoch; the upstream shared-channels sync
+	// loop runs on a single cluster leader at a time. The receiver's
+	// epoch-change handler is also tolerant of non-1 baselines, so
+	// even if this counter somehow leaks across restarts the wire
+	// stays correct.
+	outboundSeqMu sync.Mutex
+	outboundSeq   map[string]uint64
+
 	// sequencer is the inbound reorder buffer. Initialized in OnActivate
 	// from configuration knobs (SequencerGapTimeoutSeconds /
 	// SequencerBufferMaxEnvelopes / SequencerBufferMaxBytes). Phase 4.
@@ -107,6 +120,7 @@ func (p *Plugin) OnActivate() error {
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.nodeID = model.NewId()
 	p.epoch = model.NewId()
+	p.outboundSeq = make(map[string]uint64)
 	p.API.LogInfo("Sender epoch assigned",
 		"error_code", errcode.PluginEpochAssigned,
 		"epoch", p.epoch, "node_id", p.nodeID)

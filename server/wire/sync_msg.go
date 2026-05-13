@@ -29,10 +29,16 @@ type MentionTransforms map[string]string
 // resulting wire format omits any container with no children, which
 // the strict XSD declares with minOccurs=0.
 type SyncMsg struct {
-	Id                string
-	ChannelId         string
-	Users             UserMap
-	Posts             []*Post
+	Id        string
+	ChannelId string
+	Users     UserMap
+	// Post is at most one per envelope. The sender's split policy emits
+	// one envelope per post so compliance content-inspection tools can
+	// reject the specific post that triggered classification without
+	// dropping unrelated content as collateral. Non-post content
+	// (reactions, acks, memberships, statuses) rides with the relevant
+	// post or in a separate metadata envelope that has no Post field.
+	Post              *Post
 	Reactions         []*Reaction
 	Statuses          []*Status
 	MembershipChanges []*MembershipChange
@@ -57,8 +63,10 @@ func (m *SyncMsg) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 			return err
 		}
 	}
-	if err := encodeWrappedSlice(e, "Posts", "Post", m.Posts); err != nil {
-		return err
+	if m.Post != nil {
+		if err := e.EncodeElement(m.Post, xml.StartElement{Name: xml.Name{Local: "Post"}}); err != nil {
+			return err
+		}
 	}
 	if err := encodeWrappedSlice(e, "Reactions", "Reaction", m.Reactions); err != nil {
 		return err
@@ -103,10 +111,12 @@ func (m *SyncMsg) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 				if err := d.DecodeElement(&m.Users, &t); err != nil {
 					return err
 				}
-			case "Posts":
-				if err := decodeWrappedSlice(d, "Post", &m.Posts); err != nil {
+			case "Post":
+				var p Post
+				if err := d.DecodeElement(&p, &t); err != nil {
 					return err
 				}
+				m.Post = &p
 			case "Reactions":
 				if err := decodeWrappedSlice(d, "Reaction", &m.Reactions); err != nil {
 					return err
@@ -218,11 +228,13 @@ func SyncMsgFromModel(m *mmModel.SyncMsg) *SyncMsg {
 			out.Users[id] = UserFromModel(u)
 		}
 	}
+	// At most one post per envelope by the sender's split policy. If the
+	// upstream slice has more than one entry it is a sender-side bug;
+	// take the first and let the caller log if it cares. We do not
+	// silently coalesce because that would obscure the split-policy
+	// invariant.
 	if len(m.Posts) > 0 {
-		out.Posts = make([]*Post, 0, len(m.Posts))
-		for _, p := range m.Posts {
-			out.Posts = append(out.Posts, PostFromModel(p))
-		}
+		out.Post = PostFromModel(m.Posts[0])
 	}
 	if len(m.Reactions) > 0 {
 		out.Reactions = make([]*Reaction, 0, len(m.Reactions))
@@ -271,11 +283,8 @@ func (m *SyncMsg) ToModel() *mmModel.SyncMsg {
 			out.Users[id] = u.ToModel()
 		}
 	}
-	if len(m.Posts) > 0 {
-		out.Posts = make([]*mmModel.Post, 0, len(m.Posts))
-		for _, p := range m.Posts {
-			out.Posts = append(out.Posts, p.ToModel())
-		}
+	if m.Post != nil {
+		out.Posts = []*mmModel.Post{m.Post.ToModel()}
 	}
 	if len(m.Reactions) > 0 {
 		out.Reactions = make([]*mmModel.Reaction, 0, len(m.Reactions))

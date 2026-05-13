@@ -269,10 +269,6 @@ func (m *mockKVStore) DeleteChannelConnectionRequest(_, _ string) error {
 	return nil
 }
 
-func (m *mockKVStore) BumpSequenceCounter(_, _ string) (uint64, error) {
-	return 0, nil
-}
-
 func (m *mockKVStore) AcquireOrRenewInboundLease(_, _ string, _ time.Duration) (bool, bool, string, error) {
 	return false, false, "", nil
 }

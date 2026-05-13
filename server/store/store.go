@@ -73,13 +73,6 @@ type KVStore interface {
 	UpdateChannelConnectionRequest(channelID, connKey string, req *ConnectionRequest) error
 	DeleteChannelConnectionRequest(channelID, connKey string) error
 
-	// BumpSequenceCounter atomically increments the per-(connName, channelID)
-	// outbound envelope sequence counter and returns the new value. Used to
-	// stamp the Sequence field on outbound sync_msg envelopes so the receiver
-	// can detect out-of-order delivery. The first call for a given key
-	// returns 1.
-	BumpSequenceCounter(connName, channelID string) (uint64, error)
-
 	// AcquireOrRenewInboundLease writes nodeID as the lease holder for the
 	// named inbound connection with a TTL, using CAS so only one cluster node
 	// holds the lease at a time. Returns:

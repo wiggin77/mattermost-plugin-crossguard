@@ -9,7 +9,6 @@ import (
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
-	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 // OnSharedChannelsSyncMsg receives content changes from the server's Shared
@@ -75,20 +74,25 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 
 	augmented := p.augmentSyncMsgUsers(msg)
 
-	env := &TransportEnvelope{
+	// Fan out into one envelope per post plus an optional metadata
+	// envelope so a compliance rejection of one post does not lose the
+	// rest of the sync cycle. Each envelope is published independently
+	// and gets its own per-channel Sequence in publishToOutboundConn.
+	template := &TransportEnvelope{
 		Version:     1,
 		Type:        TransportTypeSyncMsg,
 		ConnName:    connName,
 		TeamName:    team.Name,
 		ChannelName: channel.Name,
-		SyncMsg:     wire.SyncMsgFromModel(augmented),
 	}
-
-	if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
-		p.API.LogError("Failed to publish outbound sync envelope",
-			"error_code", errcode.OutboundSyncMsgPublishFailed,
-			"conn_name", connName, "channel_id", msg.ChannelId, "error", err.Error())
-		return mmModel.SyncResponse{}, fmt.Errorf("publish failed for %s: %w", connName, err)
+	envs := buildOutboundEnvelopes(template, augmented)
+	for _, env := range envs {
+		if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
+			p.API.LogError("Failed to publish outbound sync envelope",
+				"error_code", errcode.OutboundSyncMsgPublishFailed,
+				"conn_name", connName, "channel_id", msg.ChannelId, "error", err.Error())
+			return mmModel.SyncResponse{}, fmt.Errorf("publish failed for %s: %w", connName, err)
+		}
 	}
 
 	return buildSyncResponse(msg), nil

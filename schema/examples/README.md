@@ -11,7 +11,30 @@ markdown-rich update, a code-block dump, a table, a thread reply, and an
 incident write-up; the standup is edited, then deleted; Alice adds a reaction,
 removes it, and adds a custom-emoji reaction. Examples 12-20 cover the
 remaining wire-type variants (test envelope, membership, status, ack, mention
-transforms, typed Props, typed Users, bot users).
+transforms, typed Props, typed Users, bot users). Example 21 demonstrates a
+metadata envelope: a sync cycle that emitted no post, only an orphan
+reaction (a reaction on a post from a previous sync cycle).
+
+## Post envelopes vs. metadata envelopes
+
+Every sender-originated envelope is `type="sync_msg"`. Each carries at most
+one `<Post>` element so compliance content inspection can reject a single
+post without losing other content as collateral damage.
+
+- A **post envelope** has a `<Post>` child of `<SyncMsg>`. It carries the
+  post, its author in `<Users>`, any reactions or acknowledgements on this
+  post in `<Reactions>` / `<Acknowledgements>`, and the full
+  `<MentionTransforms>` map.
+- A **metadata envelope** has no `<Post>` child. It carries non-post
+  content from the same sync cycle: orphan reactions and acks (on posts
+  from previous cycles), all membership changes, all statuses, and the
+  users referenced by any of those. Metadata envelopes have no
+  inspectable content, so compliance tools should accept them
+  unconditionally.
+
+A single upstream sync cycle fans out to **N post envelopes plus an
+optional metadata envelope**, all sharing the same channel sequence space
+and arriving at the receiver in seq order.
 
 ## Files
 
@@ -37,6 +60,7 @@ transforms, typed Props, typed Users, bot users).
 | 18 | `18_post_with_props_webhook.xml`           | Typed `<Props>` with webhook + AI provenance keys          |
 | 19 | `19_user_with_timezone_and_props.xml`      | User `<Timezone>` (open map) and typed `<Props>`           |
 | 20 | `20_bot_user.xml`                          | Bot user (`IsBot`, `BotDescription`, `BotLastIconUpdate`)  |
+| 21 | `21_metadata_orphan_reaction.xml`          | Metadata envelope: no `<Post>`, one orphan reaction        |
 
 ## What the examples prove
 
