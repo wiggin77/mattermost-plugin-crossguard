@@ -125,11 +125,20 @@ phase is independently testable and reversible. **Phase 1 lands
 first as the standalone wire-format change**, then we revisit the
 remaining phases in order.
 
-### Phase 1: XSD + example fixtures (this PR)
+### Phase 1: XSD, example fixtures, and sender stamping (LANDED)
 
-The minimal wire-format change. No Go code changes. The schema and
+**Status: implemented.** Originally scoped as schema + struct fields
+only; expanded at implementation time to also include the sender
+stamping work that the plan had as Phase 3, since the receiver-side
+work that gates on stamping is several phases out and there was no
+benefit to splitting the PRs. Phase 3 below is left as a heading for
+the audit trail but its content has merged into Phase 1.
+
+The minimal wire-format change plus sender population. The schema and
 examples carry the new optional fields so compliance review can begin
-in parallel with the receiver work.
+in parallel with the receiver work, and outbound traffic already
+populates them so the receiver work can be tested end-to-end as soon
+as it lands.
 
 Files:
 
@@ -209,70 +218,210 @@ Move inbound subscription to a cluster-aware single-active model so
 the receiver state machine in later phases can run as in-memory
 per-process state.
 
-Files:
+#### Election mechanism
+
+The plugin API does not expose a first-class leader primitive.
+`OnPluginClusterEvent` is a pub/sub channel between plugin instances
+on different nodes; events are lossy, unordered, and carry no leader
+semantics. It cannot be the authoritative election mechanism on its
+own.
+
+The authoritative mechanism is a **KV TTL lease per inbound
+connection**, using the same pattern as `azure_blob_provider.go`'s
+per-blob locking. `OnPluginClusterEvent` is a secondary fast-path
+that shortens graceful handoff but is not required for correctness.
+
+**The lease key.** One key per inbound connection:
+
+- Key: `<pluginID>-actinb-<connName>` (matches the existing
+  `teaminit-` / `chaninit-` / `seqctr-` prefix convention).
+- Value: this node's node ID (`p.nodeID`, already populated at
+  `OnActivate` via `model.NewId()`).
+- TTL: 45 seconds.
+- Written with `pluginapi.KVSetOptions{Atomic: true, OldValue: ...,
+  ExpireInSeconds: 45}` so renewal and acquire share a single
+  CAS-with-TTL call.
+
+**Renewal and acquire cadence.** A single goroutine per node ticks
+every **15 seconds** (one third of the TTL, giving two missed
+renewals of headroom before handoff). On each tick, for each
+configured inbound connection, the node does **read-then-conditional-CAS**:
+
+| What the read returns | What the node does |
+|---|---|
+| Key absent (no holder)             | Attempt CAS-from-`nil` to `myNodeID`. On success: call `provider.Subscribe(...)`. On failure (sibling raced): do nothing, recheck next tick. |
+| Key value == `myNodeID` (I hold it) | CAS-with-OldValue=`myNodeID` to renew the TTL. On success: stay subscribed. On failure (lost the lease somehow, e.g., partition + sibling acquired): call `provider.Unsubscribe()`, transition to non-holder. |
+| Key value != `myNodeID` (sibling holds it) | Do nothing. No CAS attempt. Stay quiescent. |
+
+This makes the lease **sticky in steady state**: the holder keeps
+renewing successfully, non-holders never even attempt to acquire.
+`Subscribe` is called exactly once on acquire, `Unsubscribe` exactly
+once on lose. No flapping under normal conditions.
+
+**Transitions only happen when the cluster topology actually changes:**
+
+1. The holder crashes and stops renewing. After up to 45s the TTL
+   expires; the next non-holder tick reads `nil` and acquires.
+2. The holder voluntarily releases (OnDeactivate, config reload).
+   It writes nothing further; alternatively it broadcasts a
+   step-down cluster event so siblings tick immediately.
+3. Network partition cuts the holder off from KV. Its renewal CAS
+   times out or returns an error; the node assumes it lost the
+   lease and unsubscribes.
+
+In all three cases, exactly one `Subscribe` and one `Unsubscribe`
+call across the cluster. Steady-state subscribe/unsubscribe count is
+zero.
+
+**Worst-case crash failover:** 45 seconds (one TTL). Graceful
+failover with the step-down nudge: sub-second. During the dead
+window:
+
+- Azure Queue, Azure Service Bus, Azure Blob: messages queue at the
+  broker and are delivered to the new leader on acquire. No loss.
+- NATS core: messages emitted during the window are lost (no
+  JetStream replay). Detection comes from Phase 4's receiver-side
+  sequence gap audit (`InboundSeqGapTimeout`), so the loss is
+  recorded with the missing seq range rather than silent. This is
+  the explicit tradeoff the user accepted under the
+  "audit-on-loss" rule.
+
+**Why 15s / 45s and not 5s / 15s.** The shorter pair would give a
+15s worst-case failover but tripled KV traffic and zero benefit in
+steady state (the renewal succeeds every time). The 45s ceiling on
+ungraceful failover is acceptable because Cross Guard's expected
+traffic is compliance flows, not user-facing real-time chat. If a
+deployment ever needs faster crash failover, the ticker is the lever
+to turn (drop to 10s ticker / 30s TTL, keeping the 3x ratio); the
+TTL ratio itself should not go below 3x without specific reason, as
+2x is one slow KV write away from churn.
+
+**`OnPluginClusterEvent` as a fast-path nudge.** Two cluster events
+defined in this phase:
+
+- `active_inbound_stepdown` (payload: `connName`, sender node ID):
+  published by a node that is gracefully releasing the lease (e.g.,
+  in `OnDeactivate` or on a config reload that drops the
+  connection). Siblings that receive it tick immediately for that
+  connection instead of waiting for the next 15s beat. Bounded
+  effort: lossy delivery is fine, since if the event is missed the
+  TTL still expires within 45s.
+- `active_inbound_acquired` (payload: `connName`, sender node ID):
+  optional, published by a node that has just acquired a lease.
+  Helps siblings update internal "who is active" diagnostics
+  without an extra KV read. Pure diagnostic; not load-bearing.
+
+**Dual-leader defense at the transport layer.** During a brief
+overlap window (old leader has not yet realized it lost the lease;
+new leader has just acquired), both might be subscribed. Each
+provider's existing ack model prevents double-processing:
+
+- NATS queue group (already configured at `connections.go:173`)
+  delivers each message to exactly one subscriber.
+- Azure Queue's visibility timeout prevents double dequeue.
+- Azure Service Bus's peek-lock prevents double receive.
+- Azure Blob's per-blob lock (already in the provider via
+  `tryAcquireBlobLock` / `releaseBlobLock`) prevents double process.
+
+So the application-level dual-leader window is harmless. The wasted
+work is one node briefly polling before discovering it has no
+lease.
+
+**Clock skew.** TTL is measured by the KV backend, not by the
+caller, so cross-node clock skew does not affect lease expiration.
+The only timing the caller controls is its own ticker; as long as
+each node's monotonic clock advances at roughly real-time, the
+mechanism is robust to multi-second wall-clock skew between nodes.
+
+#### Files
 
 - `server/inbound.go`: replace direct `provider.Subscribe` at startup
   with an election-gated subscribe. On becoming active for a
   connection, call `Subscribe`; on stepping down, call the provider's
   `Close` (or a new `Unsubscribe` if `Close` is too heavy).
 - `server/connections.go`: track active-set per inbound connection.
-- New file `server/inbound_election.go`: thin wrapper around the
-  Mattermost plugin cluster service for "active node for connection
-  X" semantics. Use `KVSetWithOptions` with a TTL on a lease key,
-  re-acquire on a timer. (The plugin API does not expose a leader
-  primitive directly; the TTL-lease pattern is the established
-  idiom in this codebase. Confirm against `pluginapi.Cluster` or
-  fall back to KV-lease.)
+- New file `server/inbound_election.go`: the ticker, the lease
+  read-then-CAS state machine, and the cluster-event handlers.
+- `server/plugin.go`: wire the election ticker into `OnActivate` /
+  `OnDeactivate`. On `OnDeactivate`, release all held leases by
+  publishing `active_inbound_stepdown` and writing a tombstone (or
+  simply allowing the TTL to expire if a fast shutdown is preferred).
+- `server/store/store.go` and `server/store/client.go`: add
+  `AcquireInboundLease(connName, nodeID string, ttlSeconds int)
+  (acquired bool, currentHolder string, err error)` and
+  `RenewInboundLease(connName, nodeID string, ttlSeconds int)
+  (renewed bool, err error)` to encapsulate the read-then-CAS logic
+  behind the store interface.
 - New error codes in `server/errcode/codes.go`:
-  - `InboundActiveNodeElected`
-  - `InboundActiveNodeSteppedDown`
-  - `InboundActiveLeaseRenewalFailed`
+  - `InboundActiveNodeElected` (info, on acquire)
+  - `InboundActiveNodeSteppedDown` (info, on lose)
+  - `InboundActiveLeaseRenewalFailed` (warn, on a single failed renewal CAS)
+  - `InboundActiveLeaseLost` (warn, on losing the lease after a failed renewal)
+  - `InboundActiveLeaseAcquireFailed` (warn, on a failed acquire CAS)
 
 Out: NATS queue groups stay configured (`connections.go:173` keeps
-passing `manifest.Id`). They are not load-bearing anymore but defend
-against a split-second overlap window during leadership handoff.
+passing `manifest.Id`). They are no longer load-bearing for ordering
+once Phase 4 lands, but they continue to defend against the
+brief dual-leader window described above. Keep them.
 
-Validation gate for Phase 2:
+#### Validation gate for Phase 2
 
-- New unit test simulating two nodes, only one subscribes at a time.
+- New unit test simulating two nodes racing on the same lease; only
+  one ends up subscribed, no flapping over 100 ticks.
+- New unit test simulating crash failover: holder stops renewing,
+  sibling acquires within `(ticker + TTL)` worst case.
+- New unit test for graceful step-down: holder publishes step-down
+  event, sibling acquires within one tick (sub-second).
 - Docker dual-server smoke test (`make docker-smoke-test`) passes
-  unchanged.
+  unchanged (the test uses a single inbound node per server, so it
+  exercises the acquire-and-stay-active happy path).
 
-### Phase 3: Sender-side sequence assignment
+### Phase 3: Sender-side sequence assignment (LANDED in Phase 1)
 
-Make outbound `sync_msg` envelopes carry `Epoch` and `Sequence`.
+**Status: implemented as part of Phase 1.** Final shape:
 
-Files:
+- `server/plugin.go`: `Plugin.epoch` is generated via `model.NewId()`
+  in `OnActivate` and logged with `errcode.PluginEpochAssigned`. **No
+  KV persistence of the epoch.** Each `OnActivate` produces a fresh
+  epoch. The plan had this as an "optional optimization, not
+  load-bearing"; skipping it keeps the code simple and is correct
+  under the audit-on-loss rule, since a receiver seeing an unexpected
+  new epoch resets cleanly.
+- `server/connections.go`: `publishToOutboundConn` stamps `env.Epoch`
+  before `splitTransportEnvelope` so all splits inherit the same
+  epoch, then calls `BumpSequenceCounter` per `sync_msg` part *after*
+  splitting so each part consumes its own counter increment.
+  `buildSplitEnvelope` propagates `Epoch` and leaves `Sequence` zero
+  to be stamped per-part by the publish loop.
+- `server/store/store.go` and `server/store/client.go`: single new
+  method `BumpSequenceCounter(connName, channelID string) (uint64,
+  error)`. KV key is `<pluginID>-seqctr-<connName>-<channelID>` (the
+  `seqctr-` prefix matches the existing `teaminit-`/`chaninit-`/etc.
+  convention rather than the `seq_counter:` form named in the plan
+  draft). Atomic via `pluginapi.SetAtomic` in a 5-retry CAS loop. No
+  separate get/set; the bump is the only operation the caller needs.
+- `server/store/caching.go`: no override. The counter is write-mostly
+  per channel and the existing `CachingKVStore` embedding passes
+  through to the inner client without caching, which is exactly what
+  we want.
+- New error codes added:
+  - `errcode.PluginEpochAssigned` (info log in `OnActivate`)
+  - `errcode.ConnectionsSeqCounterIncrementFail` (error log when the
+    CAS loop exhausts retries)
 
-- `server/plugin.go`: generate a 26-char Mattermost ID epoch via
-  `mmModel.NewId()` at `OnActivate` and store on the plugin struct.
-  Persist in KV under `seq_epoch:<outboundConnName>` so a quick
-  restart can reuse the same epoch if persistence is recent
-  (optional optimization; not load-bearing).
-- `server/connections.go` (outbound dispatch path): before publishing,
-  look up the per-`(outboundConnName, channelID)` counter, increment,
-  stamp the envelope, persist the new counter value. Counter key:
-  `seq_counter:<outboundConnName>:<channelID>` storing uint64
-  little-endian.
-- `server/store/store.go`: add `GetSequenceCounter` /
-  `SetSequenceCounter` / `BumpSequenceCounter` (atomic-ish) to the
-  `KVStore` interface.
-- `server/store/client.go`: implement against `pluginapi.KV` using
-  `KVCompareAndSet` for atomic increment.
-- `server/store/caching.go`: cache the counter with very short TTL
-  (or do not cache; counters are write-mostly per channel and
-  caching is unlikely to help).
-- New error codes:
-  - `SenderEpochAssigned`
-  - `SenderSeqCounterIncrementFailed`
-  - `SenderSeqCounterPersistFailed`
-
-Validation gate for Phase 3:
-
-- New unit test: assigning sequences across two channels and two
-  connections produces independent monotonic streams.
-- Integration: capture published envelopes in the docker env and
-  assert monotonic sequence per channel-conn.
+  Only two codes rather than the three the plan named, because the
+  CAS retry is part of `BumpSequenceCounter` itself; there is no
+  separate "persist" step that could fail independently.
+- `buildTestEnvelope` grew an `epoch string` parameter so the
+  `api.go` test-connection handler can pass `p.epoch` through
+  without coupling `buildTestEnvelope` to plugin state. Test
+  envelopes carry `Epoch` but not `Sequence`.
+- `server/test_helpers_test.go` gained a `seqCounter` field and a
+  `BumpSequenceCounter` override on `testKVStore` so tests that
+  exercise the publish path get a deterministic monotonic counter
+  without a real KV backend.
+- `server/transport_test.go` covers the round-trip of both fields
+  and asserts both are omitted from the wire when zero.
 
 ### Phase 4: Receiver-side cursor and reorder buffer
 
@@ -309,12 +458,79 @@ Files:
 
 Validation gate for Phase 4:
 
-- Unit tests covering: in-order, single-gap-filled, single-gap-
-  timeout, duplicate, epoch reset, buffer overflow, missing fields.
-- Integration: a fault-injection test that delivers envelopes
-  intentionally reordered (e.g., via a test-only provider that
-  swaps adjacent messages with probability 0.5) and asserts no
-  reactions are lost.
+#### Unit tests for the sequencer state machine
+
+Each row is one named test in `server/inbound_sequencer_test.go`.
+The "Audit code" column is what the test asserts the sequencer
+emits so that operator playbooks stay in sync with the code paths.
+
+| Test name | Scenario | Audit code asserted |
+|---|---|---|
+| `TestSequencerInOrder` | Seqs 1, 2, 3 arrive in order, each dispatched immediately. | `InboundSeqInOrder` |
+| `TestSequencerSingleGapFilled` | Seqs 1, 3 arrive (3 buffered), then 2 arrives. Sequencer dispatches 2 then 3. | `InboundSeqGapDetected`, then `InboundSeqGapFilled` |
+| `TestSequencerMultiGapDrain` | Seqs 1, 4, 2, 3, 5 arrive in that order. After 3 lands, 2, 3, 4 dispatch contiguously, then 5 dispatches directly. Verifies the buffer drains correctly when multiple held seqs become contiguous on a single arrival. | `InboundSeqGapDetected`, `InboundSeqGapFilled` (twice) |
+| `TestSequencerReactionBeforePost` | The motivating scenario. Sender emits `(channel=X, seq=1)` carrying post P, then `(channel=X, seq=2)` carrying a reaction on P. Transport reorders so seq=2 arrives first. Sequencer holds seq=2, accepts seq=1 (which is dispatched and creates the post mapping), then drains seq=2 (the reaction). Assert the reaction is successfully applied. | `InboundSeqGapDetected`, `InboundSeqGapFilled` |
+| `TestSequencerGapTimeout` | Seqs 1, 3 arrive; seq=2 never arrives. After `SequencerGapTimeoutSeconds`, the gap deadline fires, the audit log emits the missing range, and seq=3 is dispatched with the gap recorded. | `InboundSeqGapDetected`, then `InboundSeqGapTimeout` with `missing_from=2, missing_to=2, missing_count=1` |
+| `TestSequencerPersistentGap` | Seqs 1, 5 arrive; seqs 2, 3, 4 never arrive. After timeout, audit emits a range, not three separate lines. | `InboundSeqGapTimeout` with `missing_from=2, missing_to=4, missing_count=3` |
+| `TestSequencerDuplicateBelowCursor` | Seqs 1, 2, 3 dispatched. Seq=2 arrives again (transport redelivery). Sequencer discards. | `InboundSeqDuplicate` |
+| `TestSequencerDuplicateBuffered` | Seqs 1, 3 arrive (3 buffered). Seq=3 arrives again. Discarded without affecting the buffer. | `InboundSeqDuplicate` |
+| `TestSequencerEpochResetEmptyBuffer` | Cursor at `(epochA, nextExpected=5)`. Envelope `(epochB, seq=1)` arrives. Cursor resets to `(epochB, nextExpected=2)`, seq=1 dispatches. | `InboundSeqEpochReset` |
+| `TestSequencerEpochResetNonEmptyBuffer` | Cursor at `(epochA, nextExpected=2)`. Seqs `(epochA, 3)` and `(epochA, 4)` are buffered. Envelope `(epochB, seq=1)` arrives. Buffered envelopes from the old epoch are dropped (audit emits the abandoned seq range), cursor resets, seq=1 dispatches. | `InboundSeqEpochReset` with `abandoned_count=2`, plus one `InboundSeqGapTimeout` audit for the abandoned old-epoch range |
+| `TestSequencerStaleEpochDropped` | Cursor at `(epochB, nextExpected=2)`. Envelope `(epochA, seq=5)` arrives late from the previous session. Discarded (older epoch, never resurrects). | `InboundSeqDuplicate` (subclass: stale-epoch) or a dedicated `InboundSeqStaleEpoch` code — pick during implementation |
+| `TestSequencerCrossChannelIsolation` | Two channels A and B. Reordering on A (seqs `1, 3, 2`) does not affect B's cursor or buffer. B's seqs `1, 2, 3` dispatch in order regardless. Verifies the per-`(remoteID, channelID)` keying. | None new; asserts the existing codes fire only against the affected channel ID |
+| `TestSequencerBufferOverflowByCount` | Set `SequencerBufferMaxEnvelopes=10`. Hold 10 out-of-order envelopes. The 11th arrival overflows: sequencer drops the oldest held envelope, emits overflow audit, and admits the 11th. Cursor advances past the dropped gap. | `InboundSeqBufferOverflow` with `cause=count` |
+| `TestSequencerBufferOverflowByBytes` | Set `SequencerBufferMaxBytes` small. Hold envelopes summing to the cap. Next arrival overflows by byte count, same audit shape. | `InboundSeqBufferOverflow` with `cause=bytes` |
+| `TestSequencerMissingEpochField` | Envelope arrives with `Epoch=""`. Sequencer logs and falls through (Phase 2 compat). | `InboundSeqMissingFields` |
+| `TestSequencerMissingSequenceField` | Envelope arrives with `Sequence=0`. Sequencer logs and falls through (Phase 2 compat). | `InboundSeqMissingFields` |
+| `TestSequencerNonSyncMsgPassthrough` | Test/attachment/profile_image envelopes bypass the sequencer entirely even with `Epoch` set. | None new; asserts dispatch happens unconditionally |
+
+#### Integration tests for transport-level reordering
+
+These live in `server/integration_test.go` (or the docker test
+harness) and use a **reorder-injection wrapper** around each
+QueueProvider. The wrapper sits between `Publish` and the underlying
+provider on the sender side, holds the latest N envelopes in a
+small buffer, and releases them in a controlled order. Two reorder
+modes:
+
+- `swap-adjacent`: with probability `p`, swap the next envelope
+  with the previous one in the buffer. Models random network
+  reordering.
+- `delay-one-in-N`: hold every Nth envelope for K ticks before
+  releasing. Models the Azure Queue retry-after-visibility-timeout
+  pattern.
+
+Integration scenarios:
+
+| Test name | Scenario | Pass criterion |
+|---|---|---|
+| `TestIntegrationReorderNATS` | NATS queue group on the sender side wrapped in `swap-adjacent p=0.5`. 100 posts plus 100 reactions interleaved across 5 channels. | Every reaction is applied on the receiver. Audit log shows `InboundSeqGapFilled` events but no `InboundSeqGapTimeout`. |
+| `TestIntegrationReorderAzureQueue` | Azure Queue provider, simulate handler-error-then-retry on 10% of messages (real reordering vector). Same payload as above. | Every reaction applied. `InboundSeqDuplicate` events may fire (visibility timeout redelivery); `InboundSeqGapTimeout` does not. |
+| `TestIntegrationReorderServiceBus` | Service Bus provider, AbandonMessage on 10% of messages. Same payload. | Same pass criterion as Azure Queue. |
+| `TestIntegrationReorderAzureBlob` | Azure Blob provider, two senders writing concurrently to produce out-of-order blob arrival on the receiver. | Every reaction applied. |
+| `TestIntegrationLossNATS` | NATS, randomly drop 5% of messages (simulating the no-replay loss window). | Receiver emits `InboundSeqGapTimeout` with the exact dropped seq ranges; no silent loss. |
+| `TestIntegrationCrossChannelIsolation` | Inject reordering only on channel A. Channel B traffic should not stall. | Channel B's posts/reactions dispatch in real time regardless of A's gap-fill waits. |
+
+Each integration test takes a few seconds of wall time; the suite
+target is under 60 seconds total. They run under `make
+docker-integration-test` against the Mattermost dual-server +
+Azurite + Service Bus emulator stack already in place.
+
+#### Property-based test (optional, nice-to-have)
+
+`TestSequencerInvariants` in `server/inbound_sequencer_test.go`
+uses `testing/quick` to generate random reorder sequences of length
+20 from a known-monotonic source and asserts two invariants:
+
+1. **No loss without audit.** Every input seq either dispatches or
+   appears in an `InboundSeqGapTimeout` audit range. The union of
+   dispatched seqs and audited-as-lost seqs equals the input set.
+2. **Dispatched seqs are monotonic per channel.** The receiver sees
+   strictly increasing sequence numbers per channel after the
+   sequencer drains.
+
+This is the strongest correctness statement we can make without a
+back-channel.
 
 ### Phase 5: Cursor checkpointing
 
@@ -353,14 +569,19 @@ Validation gate for Phase 5:
 ## Risks and open questions
 
 1. **Active-node election primitive.** Plugin API exposes
-   `OnPluginClusterEvent` and `KVSetWithOptions(... ExpireInSeconds)`
-   but not a first-class leader primitive. The TTL-lease pattern
-   works but has a worst-case dual-leader window of
-   `lease_ttl + clock_skew`. NATS queue groups defend against this
-   at the transport level; for Azure providers, the message ACK
-   path (visibility timeout, peek-lock, blob lock) defends against
-   double processing. Phase 2 must verify each provider's behavior
-   under brief dual-subscription.
+   `OnPluginClusterEvent` (lossy, unordered pub/sub) and
+   `KVSetWithOptions(... ExpireInSeconds)` (TTL key) but no
+   first-class leader callback. Phase 2 uses the TTL-lease pattern
+   already established by `azure_blob_provider.go`'s per-blob
+   locking: read-then-CAS on a per-connection key with 45s TTL and
+   15s renewal cadence. Steady-state subscribe count is zero; one
+   `Subscribe` per actual leadership change. Worst-case crash
+   failover is 45s; graceful failover with the step-down cluster
+   event is sub-second. The brief dual-leader window during handoff
+   is defended at the transport level: NATS queue groups deliver to
+   one subscriber, Azure providers' ack models (visibility timeout,
+   peek-lock, blob lock) prevent double processing. See Phase 2 for
+   the full election mechanism.
 2. **Counter persistence atomicity.** `pluginapi.KV.CompareAndSet`
    is the right primitive but is per-key. If a sender crashes
    between increment and publish, the counter advances but the
@@ -393,21 +614,33 @@ Per phase the gate is a clean `make check-style`, a green
 integration step. Cross-phase, the final gate before merge to main
 is:
 
-- `make test` clean
-- `make docker-integration-test` clean
-- `python3 -c "import xmlschema; ..."` validates all 20 fixtures
-- A new fault-injection test in the docker env that reorders 50%
-  of envelopes and asserts no reactions or acknowledgements are
-  lost on the receiver side.
+- `make test` clean (covers the full Phase 4 unit-test catalog
+  including the named reorder, gap, duplicate, epoch-reset,
+  buffer-overflow, and cross-channel-isolation tests).
+- `make docker-integration-test` clean, including the new
+  per-transport reorder/loss tests in Phase 4
+  (`TestIntegrationReorderNATS`, `TestIntegrationReorderAzureQueue`,
+  `TestIntegrationReorderServiceBus`,
+  `TestIntegrationReorderAzureBlob`, `TestIntegrationLossNATS`,
+  `TestIntegrationCrossChannelIsolation`).
+- `python3 -c "import xmlschema; ..."` validates all 20 fixtures.
+- The motivating regression test `TestSequencerReactionBeforePost`
+  passes: a reaction emitted at `seq=N+1` arriving before its post
+  at `seq=N` is held in the reorder buffer, the post lands and is
+  dispatched, the reaction drains, and the receiver applies it.
+  This is the bug that originally exposed the missing-retry-queue
+  gap; the regression test stays in the suite indefinitely.
 
 ## Order of work
 
-1. **Phase 1 lands first** as a standalone PR carrying the XSD
-   update, the inert struct fields, the updated example fixtures,
-   and the round-trip test extension. This unblocks compliance
-   review of the wire format and is fully reversible.
-2. Phases 2-6 land in order as separate PRs, each with the gates
-   above. Phases 2 and 3 can land in either order (sender stamping
-   is harmless until receiver enforces; receiver election is
-   harmless until receiver enforces). Phase 4 depends on Phases 2
-   and 3. Phases 5 and 6 depend on Phase 4.
+1. **Phase 1 has landed** carrying the XSD update, the struct
+   fields, sender epoch generation, sender sequence stamping (the
+   work originally scoped as Phase 3), the updated example fixtures,
+   and the round-trip test extension. Compliance review of the wire
+   format is unblocked and outbound traffic already populates the
+   new fields.
+2. Phases 2 and 4-6 land in order as separate PRs, each with the
+   gates above. Phase 4 (receiver cursor + reorder buffer) now
+   depends only on Phase 2 (single-active-receiver), since Phase 3
+   is done. Phases 5 (checkpointing) and 6 (docs + audit guide)
+   depend on Phase 4.
