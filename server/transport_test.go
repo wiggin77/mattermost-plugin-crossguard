@@ -20,6 +20,8 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 		Type:        TransportTypeSyncMsg,
 		ConnName:    "conn-a",
 		Timestamp:   "2026-05-11T10:00:00Z",
+		Epoch:       "epoch01aaaaaaaaaaaaaaaaaaa",
+		Sequence:    42,
 		TeamName:    "team-a",
 		ChannelName: "channel-a",
 		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
@@ -48,6 +50,8 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, env.Type, got.Type)
 	assert.Equal(t, env.ConnName, got.ConnName)
 	assert.Equal(t, env.Timestamp, got.Timestamp)
+	assert.Equal(t, env.Epoch, got.Epoch)
+	assert.Equal(t, env.Sequence, got.Sequence)
 	assert.Equal(t, env.TeamName, got.TeamName)
 	assert.Equal(t, env.ChannelName, got.ChannelName)
 
@@ -60,6 +64,32 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, "hello", got.SyncMsg.Posts[0].Message)
 	require.Len(t, got.SyncMsg.Reactions, 1)
 	assert.Equal(t, "thumbsup", got.SyncMsg.Reactions[0].EmojiName)
+}
+
+func TestTransportEnvelopeEpochSequenceOmittedWhenZero(t *testing.T) {
+	env := &TransportEnvelope{
+		Version:     1,
+		Type:        TransportTypeSyncMsg,
+		ConnName:    "conn-a",
+		Timestamp:   "2026-05-11T10:00:00Z",
+		TeamName:    "team-a",
+		ChannelName: "channel-a",
+		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
+			Id:        "sm1",
+			ChannelId: "ch1",
+		}),
+	}
+
+	data, err := MarshalEnvelope(env)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(data), "<Epoch>")
+	assert.NotContains(t, string(data), "<Sequence>")
+
+	got, err := UnmarshalEnvelope(data)
+	require.NoError(t, err)
+	assert.Empty(t, got.Epoch)
+	assert.Zero(t, got.Sequence)
 }
 
 func TestTransportEnvelopeDefaultsTimestamp(t *testing.T) {

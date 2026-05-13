@@ -47,6 +47,13 @@ type Plugin struct {
 
 	nodeID string
 
+	// epoch identifies the sender process generation. Generated once at
+	// OnActivate and stamped on every outbound envelope so receivers can
+	// detect sender restart (cursor reset) versus normal in-stream
+	// reordering. Same 26-char Mattermost ID format as every other ID
+	// on the wire.
+	epoch string
+
 	// remoteIDs maps connection name (per direction) to the shared channels
 	// remote ID assigned by the server. Inbound and outbound connections
 	// that share the same SiteURL also share a single remoteID. The map is
@@ -94,6 +101,10 @@ func (p *Plugin) OnActivate() error {
 
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	p.nodeID = model.NewId()
+	p.epoch = model.NewId()
+	p.API.LogInfo("Sender epoch assigned",
+		"error_code", errcode.PluginEpochAssigned,
+		"epoch", p.epoch, "node_id", p.nodeID)
 
 	if err := p.registerRemotes(); err != nil {
 		return err

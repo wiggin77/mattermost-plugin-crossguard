@@ -44,11 +44,26 @@
     <xs:restriction base="xs:dateTime"/>
   </xs:simpleType>
 
+  <!--
+    EpochIdType: 26-character Mattermost ID identifying the sender
+    process generation. Generated via mmModel.NewId() at OnActivate
+    and emitted on every sender-originated envelope (sync_msg and
+    test) so the receiver can detect sender restart. Same format as
+    every other ID on the wire.
+  -->
+  <xs:simpleType name="EpochIdType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9]{26}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
   <xs:element name="CrossGuardEnvelope">
     <xs:complexType>
       <xs:sequence>
         <xs:element name="ConnName"    type="xs:string"/>
         <xs:element name="Timestamp"   type="TimestampType"/>
+        <xs:element name="Epoch"       type="EpochIdType"   minOccurs="0"/>
+        <xs:element name="Sequence"    type="xs:unsignedLong" minOccurs="0"/>
         <xs:element name="TeamName"    type="xs:string"/>
         <xs:element name="ChannelName" type="xs:string"/>
         <xs:choice minOccurs="0">

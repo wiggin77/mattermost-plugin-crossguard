@@ -580,18 +580,22 @@ func TestFileFilterValidation(t *testing.T) {
 }
 
 func TestBuildTestEnvelope(t *testing.T) {
-	env, data, msgID, err := buildTestEnvelope()
+	const epoch = "abcdef0123456789abcdef0123"
+	env, data, msgID, err := buildTestEnvelope(epoch)
 	require.NoError(t, err)
 	require.NotEmpty(t, msgID)
 	require.NotEmpty(t, data)
 	require.NotNil(t, env)
 	assert.Equal(t, TransportTypeTest, env.Type)
 	assert.Equal(t, msgID, env.TestID)
+	assert.Equal(t, epoch, env.Epoch)
+	assert.Equal(t, uint64(0), env.Sequence, "test envelopes never carry a Sequence")
 
 	got, err := UnmarshalEnvelope(data)
 	require.NoError(t, err)
 	assert.Equal(t, TransportTypeTest, got.Type)
 	assert.Equal(t, msgID, got.TestID)
+	assert.Equal(t, epoch, got.Epoch)
 }
 
 func TestAzureConfigValidation(t *testing.T) {

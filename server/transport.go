@@ -20,17 +20,26 @@ const (
 
 // TransportEnvelope wraps content for XML wire transport between servers.
 // Exactly one of SyncMsg or TestID is populated, depending on Type.
-// The envelope-level fields (Version, Type, ConnName, Timestamp, TeamName,
-// ChannelName) are used by compliance content-inspection systems to route
-// and audit messages without parsing the SyncMsg payload, so they are
-// retained as documented in the wire-format plan even when the inner
-// SyncMsg encoding follows the upstream Mattermost model layout.
+// The envelope-level fields (Version, Type, ConnName, Timestamp, Epoch,
+// Sequence, TeamName, ChannelName) are used by compliance content-inspection
+// systems to route and audit messages without parsing the SyncMsg payload,
+// so they are retained as documented in the wire-format plan even when the
+// inner SyncMsg encoding follows the upstream Mattermost model layout.
+//
+// Epoch identifies the sender process generation (26-char Mattermost ID
+// generated at OnActivate). Sequence is a per-(ConnName, channel) monotonic
+// counter that lets receivers detect out-of-order delivery. Epoch is stamped
+// on every sender-originated envelope (sync_msg and test). Sequence is
+// stamped only on sync_msg envelopes since test envelopes have no channel
+// scope.
 type TransportEnvelope struct {
 	XMLName     xml.Name      `xml:"CrossGuardEnvelope"`
 	Version     int           `xml:"version,attr"`
 	Type        string        `xml:"type,attr"`
 	ConnName    string        `xml:"ConnName"`
 	Timestamp   string        `xml:"Timestamp"`
+	Epoch       string        `xml:"Epoch,omitempty"`
+	Sequence    uint64        `xml:"Sequence,omitempty"`
 	TeamName    string        `xml:"TeamName"`
 	ChannelName string        `xml:"ChannelName"`
 	SyncMsg     *wire.SyncMsg `xml:"SyncMsg,omitempty"`
@@ -203,10 +212,13 @@ func buildSplitEnvelope(
 	}
 
 	return &TransportEnvelope{
-		Version:     src.Version,
-		Type:        src.Type,
-		ConnName:    src.ConnName,
-		Timestamp:   src.Timestamp,
+		Version:   src.Version,
+		Type:      src.Type,
+		ConnName:  src.ConnName,
+		Timestamp: src.Timestamp,
+		Epoch:     src.Epoch,
+		// Sequence intentionally left zero: each split part gets its own
+		// per-part Sequence stamped by publishToOutboundConn after split.
 		TeamName:    src.TeamName,
 		ChannelName: src.ChannelName,
 		SyncMsg:     subMsg,

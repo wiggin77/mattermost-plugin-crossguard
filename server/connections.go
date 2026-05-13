@@ -34,11 +34,16 @@ const (
 	kindProfileImage = "profile_image"
 )
 
-func buildTestEnvelope() (*TransportEnvelope, []byte, string, error) {
+// buildTestEnvelope builds a connectivity-check envelope. The caller passes
+// the plugin's current epoch so the receiver can correlate the test against
+// the sender session it expects to see on subsequent sync_msg envelopes.
+// Test envelopes carry Epoch but never Sequence (no channel scope).
+func buildTestEnvelope(epoch string) (*TransportEnvelope, []byte, string, error) {
 	msgID := newID()
 	env := &TransportEnvelope{
 		Version: 1,
 		Type:    TransportTypeTest,
+		Epoch:   epoch,
 		TestID:  msgID,
 	}
 	data, err := MarshalEnvelope(env)
@@ -132,6 +137,10 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 		return fmt.Errorf("outbound connection %q is unhealthy, skipping publish", connName)
 	}
 
+	// Stamp the sender's epoch on the source envelope before splitting so
+	// every resulting part inherits the same epoch.
+	env.Epoch = p.epoch
+
 	maxSize := oc.provider.MaxMessageSize()
 	parts, err := splitTransportEnvelope(env, maxSize)
 	if err != nil {
@@ -146,6 +155,23 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 	}
 
 	for i, part := range parts {
+		// Sequence is stamped per-part for sync_msg envelopes only. Each
+		// part is its own envelope on the wire, so each consumes a counter
+		// increment. Receivers see a dense monotonic sequence per
+		// (connName, channelID).
+		if part.Type == TransportTypeSyncMsg && part.SyncMsg != nil {
+			seq, seqErr := p.kvstore.BumpSequenceCounter(connName, part.SyncMsg.ChannelId)
+			if seqErr != nil {
+				p.API.LogError("Failed to bump sequence counter for outbound envelope",
+					"error_code", errcode.ConnectionsSeqCounterIncrementFail,
+					"name", connName, "channel_id", part.SyncMsg.ChannelId,
+					"part", i+1, "error", seqErr.Error())
+				p.updateOutboundHealth(connName, false)
+				return seqErr
+			}
+			part.Sequence = seq
+		}
+
 		data, marshalErr := MarshalEnvelope(part)
 		if marshalErr != nil {
 			p.API.LogError("Failed to serialize outbound envelope part",

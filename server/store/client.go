@@ -19,6 +19,7 @@ type Client struct {
 	rewriteIndexPrefix    string
 	connRequestPrefix     string
 	chanConnRequestPrefix string
+	seqCounterPrefix      string
 }
 
 // NewKVStore creates a new KV store client.
@@ -33,6 +34,7 @@ func NewKVStore(client *pluginapi.Client, pluginID string) KVStore {
 		rewriteIndexPrefix:    pluginID + "-rwi-",
 		connRequestPrefix:     pluginID + "-connreq-",
 		chanConnRequestPrefix: pluginID + "-chanconnreq-",
+		seqCounterPrefix:      pluginID + "-seqctr-",
 	}
 }
 
@@ -482,4 +484,35 @@ func (kv Client) casModifyConnectionList(key string, modify func([]TeamConnectio
 		}
 	}
 	return errors.New("failed to modify connection list after max retries")
+}
+
+// BumpSequenceCounter atomically increments the per-(connName, channelID)
+// sequence counter and returns the new value. The first call for a key
+// returns 1. Uses pluginapi.SetAtomic to retry on concurrent writers from
+// other cluster nodes; falls back to a bounded retry loop.
+func (kv Client) BumpSequenceCounter(connName, channelID string) (uint64, error) {
+	key := kv.seqCounterPrefix + connName + "-" + channelID
+	const maxRetries = 5
+	for range maxRetries {
+		var current uint64
+		if err := kv.client.KV.Get(key, &current); err != nil {
+			return 0, errors.Wrap(err, "failed to read sequence counter")
+		}
+		next := current + 1
+
+		var saved bool
+		var err error
+		if current == 0 {
+			saved, err = kv.client.KV.Set(key, next, pluginapi.SetAtomic(nil))
+		} else {
+			saved, err = kv.client.KV.Set(key, next, pluginapi.SetAtomic(current))
+		}
+		if err != nil {
+			return 0, errors.Wrap(err, "failed to CAS sequence counter")
+		}
+		if saved {
+			return next, nil
+		}
+	}
+	return 0, errors.New("failed to bump sequence counter after max retries")
 }

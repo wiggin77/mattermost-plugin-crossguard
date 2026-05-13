@@ -268,6 +268,10 @@ func (m *mockKVStore) DeleteChannelConnectionRequest(_, _ string) error {
 	return nil
 }
 
+func (m *mockKVStore) BumpSequenceCounter(_, _ string) (uint64, error) {
+	return 0, nil
+}
+
 func newTestCaching(inner *mockKVStore) (*CachingKVStore, *plugintest.API) {
 	api := &plugintest.API{}
 	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil)

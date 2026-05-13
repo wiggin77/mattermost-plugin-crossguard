@@ -135,12 +135,13 @@ const (
 
 // connections.go (16000-16999)
 const (
-	ConnectionsParseOutboundFailed   = 16000
-	ConnectionsConnectOutboundFailed = 16001
-	ConnectionsOutboundEstablished   = 16002
-	ConnectionsMessageSplit          = 16004
-	ConnectionsSerializePartFailed   = 16005
-	ConnectionsPublishPartFailed     = 16006
+	ConnectionsParseOutboundFailed     = 16000
+	ConnectionsConnectOutboundFailed   = 16001
+	ConnectionsOutboundEstablished     = 16002
+	ConnectionsMessageSplit            = 16004
+	ConnectionsSerializePartFailed     = 16005
+	ConnectionsPublishPartFailed       = 16006
+	ConnectionsSeqCounterIncrementFail = 16007
 )
 
 // azure_blob_provider.go (18000-18999)
@@ -303,6 +304,7 @@ const (
 const (
 	PluginRegisterFailed   = 27000
 	PluginUnregisterFailed = 27001
+	PluginEpochAssigned    = 27002
 
 	// Upgrade migrations (one-shot, run from OnActivate).
 	PluginMigrateListKVFailed     = 27100
@@ -447,6 +449,7 @@ var AllCodes = []int{
 	ConnectionsMessageSplit,
 	ConnectionsSerializePartFailed,
 	ConnectionsPublishPartFailed,
+	ConnectionsSeqCounterIncrementFail,
 
 	AzureBlobContainerCreateRetry,
 	AzureBlobWALInTempStorage,
@@ -582,6 +585,7 @@ var AllCodes = []int{
 
 	PluginRegisterFailed,
 	PluginUnregisterFailed,
+	PluginEpochAssigned,
 	PluginMigrateListKVFailed,
 	PluginMigrateDeleteKVFailed,
 	PluginMigrateRecordKVFailed,

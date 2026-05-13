@@ -57,6 +57,41 @@ what the plugin actually emits. In particular:
   those fields are not semantically meaningful. Example 08 has an empty
   `<Message></Message>` for a deletion. Both validate against the XSD.
 
+## Envelope ordering: `Epoch` and `Sequence`
+
+Each sender-originated envelope carries an `<Epoch>` element that identifies
+the sender process generation, and `sync_msg` envelopes additionally carry a
+`<Sequence>` element that is monotonic per `(ConnName, ChannelId)` within an
+epoch. Together they let a receiver detect out-of-order delivery, suppress
+duplicates, and notice a sender restart (epoch change resets the cursor).
+
+- **`Epoch`**: 26-character Mattermost ID (`[a-z0-9]{26}`) generated once at
+  plugin activation. Shared across every channel on every outbound connection
+  from a single sender instance. Emitted on every sender-originated envelope
+  including `test`, so a connectivity ping can flag a restart even when no
+  payload is in flight.
+- **`Sequence`**: unsigned 64-bit decimal starting at `1` for the first
+  envelope on a given `(ConnName, ChannelId)` within an epoch and incrementing
+  by one for each subsequent envelope. **Emitted on `sync_msg` envelopes
+  only.** Test envelopes have no channel scope and intentionally omit it.
+
+How the example timeline demonstrates this:
+
+- Examples 01-11 are one logical sender session: all share `Epoch =
+  epoch01aaaaaaaaaaaaaaaaaaa` and number sequences `1..11` in timeline order.
+- Example 12 (a `test` envelope) carries the same `Epoch` but no `Sequence`,
+  modelling the receiver-side rule "Sequence applies to sync_msg only".
+- Examples 13-20 each define their own `Epoch`
+  (`epoch13aaaaaaaaaaaaaaaaaaa` through `epoch20aaaaaaaaaaaaaaaaaaa`) and
+  start from `Sequence=1`. A receiver seeing one of these after example 11
+  would observe a new epoch and reset its cursor for that connection.
+
+A receiver that sees a `<Sequence>` value lower than its current
+`nextExpected` (with matching `Epoch`) treats the envelope as a duplicate
+and drops it; a higher value with no intervening fill triggers a bounded
+reorder wait. The wire format itself is just two elements; the state machine
+lives in the receiver.
+
 ## Conventions
 
 - All Mattermost IDs are 26 characters of `[a-z0-9]`.

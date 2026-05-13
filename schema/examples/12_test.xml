@@ -1,2 +1,2 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CrossGuardEnvelope version="1" type="test"><ConnName>nats-low-to-high</ConnName><Timestamp>2026-05-11T10:00:00Z</Timestamp><TeamName></TeamName><ChannelName></ChannelName><TestID>test-37io7o7ewliugtoc022jpmyb1e</TestID></CrossGuardEnvelope>
+<CrossGuardEnvelope version="1" type="test"><ConnName>nats-low-to-high</ConnName><Timestamp>2026-05-11T10:00:00Z</Timestamp><Epoch>epoch01aaaaaaaaaaaaaaaaaaa</Epoch><TeamName></TeamName><ChannelName></ChannelName><TestID>test-37io7o7ewliugtoc022jpmyb1e</TestID></CrossGuardEnvelope>

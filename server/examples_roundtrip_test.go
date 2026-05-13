@@ -127,6 +127,13 @@ const (
 	postID1 = "p01postaaaaaaaaaaaaaaaaaaa"
 	postID2 = "p02postaaaaaaaaaaaaaaaaaaa"
 	postID3 = "p03postaaaaaaaaaaaaaaaaaaa"
+
+	// timelineEpoch is the shared sender-session ID for the 01-12 timeline
+	// (one sender process emitting 11 sync_msgs plus 1 connectivity ping).
+	// Examples 13-20 are independent scenarios and each defines its own
+	// epoch in its builder so reviewers can see that the receiver treats
+	// them as separate sender sessions.
+	timelineEpoch = "epoch01aaaaaaaaaaaaaaaaaaa"
 )
 
 func alice() *mmModel.User {
@@ -175,6 +182,24 @@ func baseEnvelope(connName, channelName string, msg *mmModel.SyncMsg) *Transport
 	}
 }
 
+// withSeq stamps the timeline epoch and a per-envelope sequence on the
+// envelope. Used by the 01-11 timeline so a reviewer can read the fixtures
+// top-to-bottom as one ordered sender session.
+func withSeq(env *TransportEnvelope, seq uint64) *TransportEnvelope {
+	env.Epoch = timelineEpoch
+	env.Sequence = seq
+	return env
+}
+
+// withIndependentSession stamps an independent (per-example) epoch and
+// sequence. Used by examples 13-20 to show that receivers treat each as a
+// separate sender session.
+func withIndependentSession(env *TransportEnvelope, epoch string, seq uint64) *TransportEnvelope {
+	env.Epoch = epoch
+	env.Sequence = seq
+	return env
+}
+
 func postSimpleEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
 		Id:        "sm-01",
@@ -189,7 +214,7 @@ func postSimpleEnvelope() *TransportEnvelope {
 			Message:   "Morning team. Standup at 9:30 in the usual room, see you there.",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 1)
 }
 
 func postMarkdownRichEnvelope() *TransportEnvelope {
@@ -206,7 +231,7 @@ func postMarkdownRichEnvelope() *TransportEnvelope {
 			Message:   "**Release notes** for `v1.2.3`:\n\n- New <Tag>-style filter on inbound\n- *Italic* and **bold** rendering checked\n- Quote: > stay focused on the migration\n\nSee #release-eng for follow-ups.",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 2)
 }
 
 func postCodeBlocksEnvelope() *TransportEnvelope {
@@ -223,7 +248,7 @@ func postCodeBlocksEnvelope() *TransportEnvelope {
 			Message:   "Here's the migration shim, note the explicit <Envelope> handling:\n\n```go\nfunc migrate(e *Envelope) error {\n    if e == nil { return nil }\n    return apply(e)\n}\n```",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 3)
 }
 
 func postTableAndLinksEnvelope() *TransportEnvelope {
@@ -240,7 +265,7 @@ func postTableAndLinksEnvelope() *TransportEnvelope {
 			Message:   "Status board:\n\n| Service | Owner | Link |\n| --- | --- | --- |\n| ingest | alice | https://wiki/ingest |\n| relay | bob | https://wiki/relay |\n\nSee [the runbook](https://runbooks.example.com/relay).",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 4)
 }
 
 func postThreadReplyEnvelope() *TransportEnvelope {
@@ -258,7 +283,7 @@ func postThreadReplyEnvelope() *TransportEnvelope {
 			Message:   "Replying in thread, sounds good to me.",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 5)
 }
 
 func postIncidentReportEnvelope() *TransportEnvelope {
@@ -275,7 +300,7 @@ func postIncidentReportEnvelope() *TransportEnvelope {
 			Message:   "## Incident write-up\n\n**Summary:** Brief outage of the <Relay> path between low and high domains.\n\n**Timeline:**\n1. 09:14 alert fires\n2. 09:18 oncall paged\n3. 09:32 root cause identified (stale DNS entry)\n4. 09:41 mitigation applied\n5. 09:47 all clear\n\n**Action items:** see thread.",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 6)
 }
 
 func postUpdateEnvelope() *TransportEnvelope {
@@ -293,7 +318,7 @@ func postUpdateEnvelope() *TransportEnvelope {
 			Message:   "Morning team. Standup moved to 9:45 in the upstairs room.",
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 7)
 }
 
 func postDeleteEnvelope() *TransportEnvelope {
@@ -309,7 +334,7 @@ func postDeleteEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 8)
 }
 
 func reactionAddEnvelope() *TransportEnvelope {
@@ -325,7 +350,7 @@ func reactionAddEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 9)
 }
 
 func reactionRemoveEnvelope() *TransportEnvelope {
@@ -342,7 +367,7 @@ func reactionRemoveEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 10)
 }
 
 func reactionCustomEmojiEnvelope() *TransportEnvelope {
@@ -358,15 +383,19 @@ func reactionCustomEmojiEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 11)
 }
 
 func testEnvelope() *TransportEnvelope {
+	// Test envelopes carry the sender's current Epoch (so the receiver can
+	// correlate the ping against an ongoing sync_msg session and detect a
+	// restart) but never a Sequence (no channel scope).
 	return &TransportEnvelope{
 		Version:     1,
 		Type:        TransportTypeTest,
 		ConnName:    "nats-low-to-high",
 		Timestamp:   fixedTimestamp,
+		Epoch:       timelineEpoch,
 		TeamName:    "",
 		ChannelName: "",
 		TestID:      "test-37io7o7ewliugtoc022jpmyb1e",
@@ -388,7 +417,7 @@ func membershipChangeJoinEnvelope() *TransportEnvelope {
 			ChangeTime: 1712957500000,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", msg), "epoch13aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 14: MembershipChange (leave). Exercises IsAdd=false. Users map is
@@ -406,7 +435,7 @@ func membershipChangeLeaveEnvelope() *TransportEnvelope {
 			ChangeTime: 1712957600000,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", msg), "epoch14aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 15: Status (DND with end time). Exercises the <Statuses> container.
@@ -425,12 +454,12 @@ func statusDndEnvelope() *TransportEnvelope {
 			DNDEndTime:     1712961300,
 		}},
 	}
-	return baseEnvelope("nats-low-to-high", "general", msg)
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", msg), "epoch15aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 16: PostAcknowledgement. Exercises the <Acknowledgements> container.
 func postAcknowledgementEnvelope() *TransportEnvelope {
-	return baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
 		Id:        "sm-16",
 		ChannelId: chanID,
 		Acknowledgements: []*mmModel.PostAcknowledgement{{
@@ -439,13 +468,13 @@ func postAcknowledgementEnvelope() *TransportEnvelope {
 			AcknowledgedAt: 1712957800000,
 			ChannelId:      chanID,
 		}},
-	})
+	}), "epoch16aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 17: MentionTransforms. Exercises the <MentionTransforms> sorted-key
 // map serialization.
 func mentionTransformsEnvelope() *TransportEnvelope {
-	return baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
 		Id:        "sm-17",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
@@ -461,7 +490,7 @@ func mentionTransformsEnvelope() *TransportEnvelope {
 			"@alice": userA,
 			"@bob":   userB,
 		},
-	})
+	}), "epoch17aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 18: Post with typed PostProps (webhook + AI provenance). Exercises
@@ -469,7 +498,7 @@ func mentionTransformsEnvelope() *TransportEnvelope {
 // whitelisted set in action. Drops the upstream "attachments" and
 // "force_notification" keys silently.
 func postWithPropsWebhookEnvelope() *TransportEnvelope {
-	return baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
 		Id:        "sm-18",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
@@ -496,7 +525,7 @@ func postWithPropsWebhookEnvelope() *TransportEnvelope {
 				"channel_mentions":   map[string]any{"@here": "drop"},
 			},
 		}},
-	})
+	}), "epoch18aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 19: User with Timezone (open StringMap) and typed UserProps. Exercises
@@ -531,11 +560,11 @@ func userWithTimezoneAndPropsEnvelope() *TransportEnvelope {
 		},
 		RemoteId: &remoteID,
 	}
-	return baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
 		Id:        "sm-19",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: user},
-	})
+	}), "epoch19aaaaaaaaaaaaaaaaaaa", 1)
 }
 
 // 20: Bot user. Exercises IsBot, BotDescription, BotLastIconUpdate, and
@@ -552,7 +581,7 @@ func botUserEnvelope() *TransportEnvelope {
 		BotDescription:    "Posts deployment progress to release channels.",
 		BotLastIconUpdate: 1712000000000,
 	}
-	return baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
 		Id:        "sm-20",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userBot: bot},
@@ -564,5 +593,5 @@ func botUserEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 			Message:   "Deployment of v1.2.3 to production complete.",
 		}},
-	})
+	}), "epoch20aaaaaaaaaaaaaaaaaaa", 1)
 }
