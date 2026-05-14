@@ -268,6 +268,16 @@ ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test:pw-ct;
 endif
 
+## Runs only the in-process transport integration tests (TestIntegration*).
+## These exercise the reorder/loss wrapper against embedded transports and
+## are also picked up by the broader `make test` target; this exists for
+## faster local iteration on the integration suite alone.
+.PHONY: integration-test
+integration-test: apply install-go-tools
+ifneq ($(HAS_SERVER),)
+	$(GOBIN)/gotestsum -- -v -run '^TestIntegration' ./server/...
+endif
+
 ## Prints Go code coverage summary to terminal.
 .PHONY: coverage-backend
 coverage-backend: apply

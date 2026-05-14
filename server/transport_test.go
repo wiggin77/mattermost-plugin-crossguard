@@ -232,6 +232,175 @@ func TestFanoutEmptySyncMsgEmitsBare(t *testing.T) {
 	assert.Empty(t, envs[0].SyncMsg.MembershipChanges)
 }
 
+func TestFanoutPostsOnlyDistinctUsers(t *testing.T) {
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+			"u2": {Id: "u2", Username: "bob"},
+			"u3": {Id: "u3", Username: "carol"},
+		},
+		Posts: []*mmModel.Post{
+			{Id: "p1", UserId: "u1", Message: "from alice"},
+			{Id: "p2", UserId: "u2", Message: "from bob"},
+		},
+	}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 2)
+
+	// Each post envelope inlines only its post's author. carol (u3) is
+	// referenced by nothing in this batch so she doesn't appear anywhere.
+	require.Len(t, envs[0].SyncMsg.Users, 1)
+	assert.Contains(t, envs[0].SyncMsg.Users, "u1")
+	assert.NotContains(t, envs[0].SyncMsg.Users, "u2")
+	assert.NotContains(t, envs[0].SyncMsg.Users, "u3")
+
+	require.Len(t, envs[1].SyncMsg.Users, 1)
+	assert.Contains(t, envs[1].SyncMsg.Users, "u2")
+	assert.NotContains(t, envs[1].SyncMsg.Users, "u1")
+	assert.NotContains(t, envs[1].SyncMsg.Users, "u3")
+}
+
+func TestFanoutReactionWithoutPostUser(t *testing.T) {
+	// Orphan reaction whose user is not in msg.Users. The metadata
+	// envelope should still be built; the user lookup just misses
+	// without nil deref.
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users:     map[string]*mmModel.User{}, // empty
+		Reactions: []*mmModel.Reaction{
+			{UserId: "u-unknown", PostId: "p-elsewhere", EmojiName: "smile"},
+		},
+	}
+
+	require.NotPanics(t, func() {
+		envs := buildOutboundEnvelopes(template, msg)
+		require.Len(t, envs, 1, "one metadata envelope")
+		assert.Nil(t, envs[0].SyncMsg.Post)
+		require.Len(t, envs[0].SyncMsg.Reactions, 1)
+		assert.Empty(t, envs[0].SyncMsg.Users, "lookup miss is silent")
+	})
+}
+
+func TestFanoutMembershipPlusOrphanReactionSameUser(t *testing.T) {
+	// Membership and orphan reaction both reference u1. The metadata
+	// envelope should dedupe the user (Users is a map, not a slice).
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+		},
+		Reactions: []*mmModel.Reaction{
+			{UserId: "u1", PostId: "p-elsewhere", EmojiName: "+1"},
+		},
+		MembershipChanges: []*mmModel.MembershipChangeMsg{
+			{ChannelId: "ch", UserId: "u1", IsAdd: true, ChangeTime: 1},
+		},
+	}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 1, "one metadata envelope; no posts")
+	require.Len(t, envs[0].SyncMsg.Users, 1, "user deduped across membership + reaction")
+	assert.Contains(t, envs[0].SyncMsg.Users, "u1")
+}
+
+func TestFanoutNilEntries(t *testing.T) {
+	// Defensive: nil entries in Posts/Reactions/Acknowledgements/etc.
+	// should be skipped, not panic.
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+		},
+		Posts: []*mmModel.Post{
+			nil,
+			{Id: "p1", UserId: "u1", Message: "real"},
+			nil,
+		},
+		Reactions: []*mmModel.Reaction{
+			nil,
+			{UserId: "u1", PostId: "p1", EmojiName: "ok"},
+		},
+		Acknowledgements: []*mmModel.PostAcknowledgement{
+			nil,
+		},
+		MembershipChanges: []*mmModel.MembershipChangeMsg{
+			nil,
+		},
+	}
+
+	require.NotPanics(t, func() {
+		envs := buildOutboundEnvelopes(template, msg)
+		// Exactly one post envelope, no metadata envelope (nil membership
+		// is skipped and the reaction is local to p1).
+		require.Len(t, envs, 1)
+		require.NotNil(t, envs[0].SyncMsg.Post)
+		assert.Equal(t, "p1", envs[0].SyncMsg.Post.Id)
+		require.Len(t, envs[0].SyncMsg.Reactions, 1)
+	})
+}
+
+func TestFanoutMentionTransformsDuplicatedPerPostEnvelope(t *testing.T) {
+	// MentionTransforms is the same map on every post envelope: the
+	// fanout duplicates it across envelopes by design (size trade-off
+	// documented in plan 02).
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm",
+		ChannelId: "ch",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+			"u2": {Id: "u2", Username: "bob"},
+		},
+		Posts: []*mmModel.Post{
+			{Id: "p1", UserId: "u1", Message: "first"},
+			{Id: "p2", UserId: "u2", Message: "second"},
+		},
+		MentionTransforms: map[string]string{
+			"@oldname": "@newname",
+		},
+	}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 2)
+	for i, env := range envs {
+		require.NotNil(t, env.SyncMsg.MentionTransforms, "envelope %d", i)
+		assert.Equal(t, "@newname", env.SyncMsg.MentionTransforms["@oldname"], "envelope %d", i)
+	}
+}
+
+func TestFanoutSyncMsgIDAndChannelIDPreserved(t *testing.T) {
+	// Every emitted envelope inherits Id and ChannelId from the source
+	// SyncMsg, regardless of whether it's a post envelope or metadata
+	// envelope or the empty-bare case.
+	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
+	msg := &mmModel.SyncMsg{
+		Id:        "sm-source",
+		ChannelId: "ch-source",
+		Users: map[string]*mmModel.User{
+			"u1": {Id: "u1", Username: "alice"},
+		},
+		Posts: []*mmModel.Post{
+			{Id: "p1", UserId: "u1", Message: "x"},
+		},
+		MembershipChanges: []*mmModel.MembershipChangeMsg{
+			{ChannelId: "ch-source", UserId: "u1", IsAdd: true, ChangeTime: 1},
+		},
+	}
+	envs := buildOutboundEnvelopes(template, msg)
+	require.Len(t, envs, 2, "one post + one metadata")
+	for i, env := range envs {
+		assert.Equal(t, "sm-source", env.SyncMsg.Id, "envelope %d Id", i)
+		assert.Equal(t, "ch-source", env.SyncMsg.ChannelId, "envelope %d ChannelId", i)
+	}
+}
+
 func TestBuildSyncResponse(t *testing.T) {
 	msg := &mmModel.SyncMsg{
 		Users: map[string]*mmModel.User{

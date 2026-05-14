@@ -207,7 +207,9 @@ func buildPostEnvelope(
 // content that does not ride with a post: orphan reactions and acks
 // (whose post is not in this sync cycle), all memberships, all
 // statuses, and the users referenced by any of those. Returns nil
-// when nothing in this category is present.
+// when nothing in this category is present. Nil entries in any of the
+// input slices are skipped throughout, so an all-nil slice does not
+// trigger a degenerate empty metadata envelope.
 func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg, localPostIDs map[string]struct{}) *TransportEnvelope {
 	var orphanReactions []*mmModel.Reaction
 	for _, r := range msg.Reactions {
@@ -227,11 +229,23 @@ func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg,
 			orphanAcks = append(orphanAcks, a)
 		}
 	}
+	var memberships []*mmModel.MembershipChangeMsg
+	for _, m := range msg.MembershipChanges {
+		if m != nil {
+			memberships = append(memberships, m)
+		}
+	}
+	var statuses []*mmModel.Status
+	for _, s := range msg.Statuses {
+		if s != nil {
+			statuses = append(statuses, s)
+		}
+	}
 
 	hasContent := len(orphanReactions) > 0 ||
 		len(orphanAcks) > 0 ||
-		len(msg.MembershipChanges) > 0 ||
-		len(msg.Statuses) > 0
+		len(memberships) > 0 ||
+		len(statuses) > 0
 	if !hasContent {
 		return nil
 	}
@@ -243,15 +257,11 @@ func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg,
 	for _, a := range orphanAcks {
 		usersRef[a.UserId] = struct{}{}
 	}
-	for _, m := range msg.MembershipChanges {
-		if m != nil {
-			usersRef[m.UserId] = struct{}{}
-		}
+	for _, m := range memberships {
+		usersRef[m.UserId] = struct{}{}
 	}
-	for _, s := range msg.Statuses {
-		if s != nil {
-			usersRef[s.UserId] = struct{}{}
-		}
+	for _, s := range statuses {
+		usersRef[s.UserId] = struct{}{}
 	}
 
 	var users map[string]*mmModel.User
@@ -269,8 +279,8 @@ func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg,
 		ChannelId:         msg.ChannelId,
 		Users:             users,
 		Reactions:         orphanReactions,
-		Statuses:          msg.Statuses,
-		MembershipChanges: msg.MembershipChanges,
+		Statuses:          statuses,
+		MembershipChanges: memberships,
 		Acknowledgements:  orphanAcks,
 	}
 	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel))
