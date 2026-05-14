@@ -26,7 +26,11 @@ entry point `make docker-integration-test` is preserved.
   are infrastructure, not tests, and stay in make.
 - Migrating the Go unit tests in `server/*_test.go`. They are fine as-is.
 - Adding new test coverage. The migration is one-for-one; new gaps are
-  separate work.
+  separate work. Exception: tests that obviously parameterize over a
+  `transport` axis (lifecycle being the clearest case) should be migrated
+  as table-driven even though the table has only one row at migration
+  time. The shape is in scope for the migration; populating additional
+  rows is the follow-up coverage plan's job.
 - Parallelizing tests. The current suite is serial because tests share the
   `low-to-high` channel and global plugin config; that constraint does not
   go away with the language change.
@@ -114,7 +118,16 @@ before bulk migration.
 3. Port `docker-post-lifecycle-test` to `TestPostLifecycle`. This test
    touches every primitive (post, edit, react, delete, poll, single-post-
    GET-by-id) without needing config patches, so it exercises the harness
-   without the complexity of plugin resets.
+   without the complexity of plugin resets. Structure the test body as a
+   table-driven loop over a `transport` axis (channel name, connection
+   name, optional plugin-config setup hook), and populate the table with
+   a single NATS row at migration time (one-for-one with the shell test).
+   This reserves the shape so the follow-up coverage plan closes the
+   Azure lifecycle gap by adding Azure Queue, Azure Blob, and Service Bus
+   rows rather than rewriting or refactoring the test. Same shape applies
+   to other migrated tests whose underlying capability is transport-
+   agnostic (profile image, file filter, prompt accept/block); keep them
+   single-row at migration time.
 4. Run both old and new versions back to back; confirm equivalence.
 
 **Exit criterion:** `make docker-integration-test-go` runs the lifecycle
