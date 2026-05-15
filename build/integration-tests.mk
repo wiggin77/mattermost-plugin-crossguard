@@ -146,6 +146,19 @@ docker-smoke-test: docker-check
 	echo "Smoke test result: $$FOUND" || \
 	{ echo "Smoke test FAILED: message smoke-test:$$SMOKE_ID not found on Server B low-to-high"; exit 1; }
 
+## Go-driven integration tests (Phase 1 of the makefile-to-Go migration).
+## Runs only the tests that have been ported to server/integration/.
+## See implementation-plans/26-05-11-01-migrate-integration-tests-to-go.md.
+## Containers must already be up (make docker-setup) and the plugin deployed
+## (make deploy).
+.PHONY: docker-integration-test-go
+docker-integration-test-go: docker-check
+	@echo ""
+	@echo "Running Go-driven integration tests (server/integration/)..."
+	@MM_HOST=$(MM_HOST) MM_PORT_A=$(MM_PORT_A) MM_PORT_B=$(MM_PORT_B) \
+		DOCKER_COMPOSE_FILE=docker-compose.dev.yml \
+		go test -tags=integration -timeout=30m -count=1 -v ./server/integration/...
+
 ## Full integration test suite (rewrite-team, file relay, XML, Azure)
 .PHONY: docker-integration-test
 docker-integration-test: docker-check
