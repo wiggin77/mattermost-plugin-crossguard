@@ -66,10 +66,16 @@
             Transport security supports TLS 1.2+ across all providers and provider-specific
             authentication: NATS supports mutual certificate authentication (mTLS), token or
             credentials authentication, and ACLs for subject-level access control; Azure Queue and
-            Azure Blob use Azure Storage shared-key connection strings over TLS-always endpoints;
-            Azure Service Bus uses a SAS connection string (with SAS material sanitized out of error
-            logs) and supports scoped SAS rules over the namespace-wide root key. Permission
-            lockdown is configurable via the <code>RestrictToSystemAdmins</code> setting.
+            Azure Blob use either Azure Storage shared-key credentials or an Azure AD Service
+            Principal (client-credentials flow) over TLS-always endpoints; Azure Service Bus uses
+            either a SAS connection string (with SAS material sanitized out of error logs, and
+            scoped SAS rules supported over the namespace-wide root key) or an Azure AD Service
+            Principal. Service Principal mode allows credentials to be scoped via Azure RBAC and
+            rotated in Azure AD without touching plugin config; admin guidance for SP setup, the
+            minimum required data-plane roles, and Federal-grade secret indirection options
+            (<code>client_secret_env</code> and <code>client_secret_file</code>) are documented in
+            the admin guide. Permission lockdown is configurable via the
+            <code>RestrictToSystemAdmins</code> setting.
         </p>
         <p>
             This whitepaper provides a comprehensive technical analysis of Cross Guard's architecture,
