@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -58,12 +59,18 @@ func NewHarness(t *testing.T) *Harness {
 	portA := getenvInt(t, "MM_PORT_A", 8075)
 	portB := getenvInt(t, "MM_PORT_B", 8076)
 
+	// docker compose -f resolves the path relative to its cwd, which for
+	// `go test` is the test package directory. Anchor to the repo root so
+	// the compose file is found regardless of where the test is invoked.
+	composeFile := getenv("DOCKER_COMPOSE_FILE", "docker-compose.dev.yml")
+	if !filepath.IsAbs(composeFile) {
+		composeFile = RepoPath(t, composeFile)
+	}
+
 	h := &Harness{
-		A: Server{Name: "A", Host: host, Port: portA, Container: "mattermost-a"},
-		B: Server{Name: "B", Host: host, Port: portB, Container: "mattermost-b"},
-		Compose: &DockerCompose{
-			File: getenv("DOCKER_COMPOSE_FILE", "docker-compose.dev.yml"),
-		},
+		A:           Server{Name: "A", Host: host, Port: portA, Container: "mattermost-a"},
+		B:           Server{Name: "B", Host: host, Port: portB, Container: "mattermost-b"},
+		Compose:     &DockerCompose{File: composeFile},
 		userClients: make(map[string]*model.Client4),
 	}
 
