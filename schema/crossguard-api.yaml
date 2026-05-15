@@ -476,18 +476,106 @@ components:
     # ------------------------------------------------------------------
     # Azure provider configuration
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Shared Service Principal fields (used by all three Azure providers
+    # when auth_mode is "service-principal").
+    # ------------------------------------------------------------------
+    AzureServicePrincipalFields:
+      type: object
+      description: >
+        Fields shared by all three Azure provider schemas for Azure AD
+        Service Principal authentication. Required when `auth_mode` is
+        `"service-principal"`. The corresponding legacy fields
+        (`account_key`, `connection_string`) MUST be empty when SP mode
+        is selected; server-side validation rejects the save otherwise.
+      properties:
+        auth_mode:
+          type: string
+          description: >
+            Credential type discriminator. Empty defaults to the legacy
+            mode for that provider (`shared-key` for Queue/Blob,
+            `connection-string` for Service Bus).
+          enum:
+            - ""
+            - shared-key
+            - connection-string
+            - service-principal
+        azure_cloud:
+          type: string
+          description: >
+            Azure cloud environment. Empty defaults to `public`. Drives
+            the AAD authority host for credential acquisition and (for
+            Queue/Blob) the data-plane SDK client options. Service Bus
+            data-plane routing is determined by the FQDN namespace.
+          enum:
+            - ""
+            - public
+            - usgov
+            - china
+        tenant_id:
+          type: string
+          description: >
+            Azure AD tenant (directory) ID. Accepts either a GUID or an
+            FQDN-shaped domain (e.g., `contoso.onmicrosoft.com`).
+            Required when `auth_mode` is `service-principal`.
+          examples:
+            - "11111111-2222-3333-4444-555555555555"
+            - "contoso.onmicrosoft.com"
+        client_id:
+          type: string
+          description: >
+            Azure AD application (client) ID for the Service Principal.
+            Required when `auth_mode` is `service-principal`.
+        client_secret:
+          type: string
+          description: >
+            Inline client secret value. Mutually exclusive with
+            `client_secret_env` and `client_secret_file`; exactly one
+            must be set when `auth_mode` is `service-principal`. Treat
+            as a secret; never logged or exposed in admin status
+            responses. The webapp form sends the sentinel string
+            `__CROSSGUARD_SECRET_UNCHANGED__` for an unchanged value;
+            the server resolves this back to the stored value before
+            validation. An empty inbound value is honored as an explicit
+            clear so admins can delete a stored secret (e.g., when
+            switching from inline `client_secret` to `client_secret_env`).
+        client_secret_env:
+          type: string
+          description: >
+            Name of an environment variable on the Mattermost server
+            whose value is the client secret. Resolved at provider
+            construction time so rotation works without re-saving
+            plugin config. Recommended for Federal deployments using
+            Azure Key Vault. Mutually exclusive with `client_secret`
+            and `client_secret_file`.
+          examples:
+            - "AZURE_SP_SECRET"
+        client_secret_file:
+          type: string
+          description: >
+            Filesystem path to a file whose contents are the client
+            secret (typically a Key Vault CSI volume mount). A single
+            trailing newline is stripped. Mutually exclusive with
+            `client_secret` and `client_secret_env`.
+          examples:
+            - "/run/secrets/azure-sp-secret"
+
     AzureQueueProviderConfig:
       type: object
       description: >
         Configuration fields specific to the Azure Queue Storage transport
         provider. Azure uses polling-based delivery with a 5-second poll
         interval for queue messages and 15-second poll interval for blob
-        files. Queues and blob containers are auto-created on startup if
-        they do not exist.
+        files. In shared-key auth mode (the legacy default) queues and
+        blob containers are auto-created on startup if they do not
+        exist. In service-principal auth mode auto-creation is SKIPPED:
+        operators must pre-provision the queue and (optionally) blob
+        container so the SP can run with data-plane-only RBAC (Storage
+        Queue Data Contributor / Storage Blob Data Contributor).
+      allOf:
+        - $ref: "#/components/schemas/AzureServicePrincipalFields"
       required:
         - queue_service_url
-        - account_name
-        - account_key
         - queue_name
       properties:
         queue_service_url:
@@ -496,7 +584,8 @@ components:
             Azure Queue Storage service URL. For production Azure, the
             standard form is `https://<account>.queue.core.windows.net`.
             For Azurite (local emulator), use
-            `http://azurite:10001/devstoreaccount1`.
+            `http://azurite:10001/devstoreaccount1`. For Azure US
+            Government, use `*.queue.core.usgovcloudapi.net`.
           examples:
             - "https://myaccount.queue.core.windows.net"
         blob_service_url:
@@ -511,20 +600,22 @@ components:
           type: string
           description: >
             Azure Storage account name. Used with `account_key` to form a
-            shared-key credential.
+            shared-key credential. Required in shared-key auth mode.
           examples:
             - "myaccount"
         account_key:
           type: string
           description: >
             Azure Storage account shared access key (base64). Treat as a
-            secret.
+            secret. Required in shared-key auth mode. MUST be empty when
+            `auth_mode` is `service-principal`.
         queue_name:
           type: string
           description: >
-            Name of the Azure Queue. Auto-created on provider startup if
-            it does not exist. Must follow Azure Queue naming rules
-            (lowercase, 3-63 characters, letters/numbers/hyphens).
+            Name of the Azure Queue. Auto-created on provider startup in
+            shared-key mode; must be pre-provisioned in service-principal
+            mode. Must follow Azure Queue naming rules (lowercase, 3-63
+            characters, letters/numbers/hyphens).
           examples:
             - "crossguard-relay"
         blob_container_name:
@@ -532,7 +623,8 @@ components:
           description: >
             Name of the Azure Blob container for file transfer. Required
             when `file_transfer_enabled` is true. Auto-created on startup
-            if it does not exist.
+            in shared-key mode; pre-provisioned in service-principal
+            mode.
           examples:
             - "crossguard-files"
 
@@ -549,12 +641,14 @@ components:
         batch blob. The inbound side polls the container, takes a
         short-lived lease on each batch blob, processes it, and deletes
         it. File attachments are stored as deferred file blobs in the
-        same container. The container is auto-created on startup if it
-        does not exist.
+        same container. In shared-key mode the container is auto-created
+        on startup if it does not exist; in service-principal mode auto-
+        creation is SKIPPED (pre-provision the container so the SP can
+        run with Storage Blob Data Contributor only).
+      allOf:
+        - $ref: "#/components/schemas/AzureServicePrincipalFields"
       required:
         - service_url
-        - account_name
-        - account_key
         - blob_container_name
       properties:
         service_url:
@@ -563,21 +657,23 @@ components:
             Azure Blob Storage service URL. For production Azure, the
             standard form is `https://<account>.blob.core.windows.net`.
             For Azurite (local emulator), use
-            `http://azurite:10000/devstoreaccount1`.
+            `http://azurite:10000/devstoreaccount1`. For Azure US
+            Government, use `*.blob.core.usgovcloudapi.net`.
           examples:
             - "https://myaccount.blob.core.windows.net"
         account_name:
           type: string
           description: >
             Azure Storage account name. Used with `account_key` to form a
-            shared-key credential.
+            shared-key credential. Required in shared-key auth mode.
           examples:
             - "myaccount"
         account_key:
           type: string
           description: >
             Azure Storage account shared access key (base64). Treat as a
-            secret.
+            secret. Required in shared-key auth mode. MUST be empty when
+            `auth_mode` is `service-principal`.
         blob_container_name:
           type: string
           description: >
@@ -614,14 +710,16 @@ components:
         Configuration fields specific to the Azure Service Bus transport
         provider. Service Bus queues carry messages; file attachments
         (when `file_transfer_enabled` is true) flow through a separate
-        Azure Blob Storage container configured below with its own
-        credentials. Auth is via SAS connection string. The plugin does
+        Azure Blob Storage container configured below. The plugin does
         NOT auto-create queues; operators must pre-create the queue in
-        Azure with the desired `LockDuration` and `MaxDeliveryCount`
-        (typical Phase 1 deployment uses the Azure portal or ARM/
-        Terraform).
+        Azure with the desired `LockDuration` and `MaxDeliveryCount`.
+        Auth is via SAS connection string (legacy default) or Azure AD
+        Service Principal. In service-principal mode the blob sidecar
+        inherits the parent SP credential; `blob_account_name` and
+        `blob_account_key` must be empty.
+      allOf:
+        - $ref: "#/components/schemas/AzureServicePrincipalFields"
       required:
-        - connection_string
         - queue_name
       properties:
         connection_string:
@@ -630,7 +728,19 @@ components:
             Service Bus SAS connection string, e.g.
             `Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<rule>;SharedAccessKey=<key>`.
             Treat as a secret. Never logged or exposed in admin status
-            responses.
+            responses. Required in connection-string auth mode. MUST be
+            empty when `auth_mode` is `service-principal`.
+        service_bus_namespace:
+          type: string
+          description: >
+            Fully-qualified Service Bus namespace, e.g.,
+            `myns.servicebus.windows.net` for Public or
+            `myns.servicebus.usgovcloudapi.net` for US Government.
+            Required when `auth_mode` is `service-principal` (the SAS
+            connection string used to encode this for legacy mode). If
+            you accidentally include the `sb://` scheme, it is stripped.
+          examples:
+            - "myns.servicebus.windows.net"
         queue_name:
           type: string
           description: >
@@ -653,15 +763,19 @@ components:
           type: string
           description: >
             Storage account name for the blob sidecar. Required when
-            `file_transfer_enabled` is true. May differ from the Service
-            Bus namespace — Service Bus and Storage are independent
-            Azure resources.
+            `file_transfer_enabled` is true AND `auth_mode` is
+            `connection-string` (legacy). MUST be empty when `auth_mode`
+            is `service-principal`: the sidecar inherits the parent SP
+            credential and uses the same AAD identity for both the
+            Service Bus namespace and the blob storage account.
         blob_account_key:
           type: string
           description: >
             Shared access key for the blob sidecar storage account.
-            Required when `file_transfer_enabled` is true. Treat as a
-            secret. Never logged or exposed in admin status responses.
+            Required when `file_transfer_enabled` is true AND `auth_mode`
+            is `connection-string`. MUST be empty when `auth_mode` is
+            `service-principal`. Treat as a secret. Never logged or
+            exposed in admin status responses.
         blob_container_name:
           type: string
           description: >

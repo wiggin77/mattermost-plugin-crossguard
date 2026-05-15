@@ -695,3 +695,91 @@ test.describe('Missing response fields', () => {
         await expect(page.getByText('No connections available')).toBeVisible();
     });
 });
+
+// ---------------------------------------------------------------------------
+// Request approval flow
+// ---------------------------------------------------------------------------
+test.describe('Request approval flow edge cases', () => {
+    test('request_pending on unlinked connection renders disabled Request Pending button', async ({mount, page}) => {
+        const body = teamStatusResponse({
+            connections: [connStatus({name: 'pending-conn', linked: false, request_pending: true})],
+        });
+        await mountAndOpen(page, mount, 'team1', body);
+
+        const pendingBtn = page.getByRole('button', {name: 'Request Pending'});
+        await expect(pendingBtn).toBeVisible();
+        await expect(pendingBtn).toBeDisabled();
+        await expect(page.getByRole('button', {name: 'Link', exact: true})).not.toBeVisible();
+    });
+
+    test('requestMode=true changes the unlinked link button label to Request Link', async ({mount, page}) => {
+        const body = teamStatusResponse({
+            connections: [connStatus({name: 'req-conn', linked: false})],
+            request_mode: true,
+        });
+        await mountAndOpen(page, mount, 'team1', body);
+        await expect(page.getByRole('button', {name: 'Request Link', exact: true})).toBeVisible();
+    });
+
+    test('toggle response status=request_submitted with message shows that message', async ({mount, page}) => {
+        const body = teamStatusResponse({
+            connections: [connStatus({name: 'sub-conn', linked: false})],
+            request_mode: true,
+        });
+        await mountAndOpen(page, mount, 'team1', body);
+        await page.route('**/plugins/crossguard/api/v1/teams/team1/init*', (route: any) => {
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({status: 'request_submitted', message: 'Request awaiting admin.'}),
+            });
+        });
+        await setCsrfCookie(page);
+        await page.getByRole('button', {name: 'Request Link', exact: true}).click();
+        await expect(page.getByText('Request awaiting admin.')).toBeVisible();
+    });
+
+    test('toggle response status=request_submitted without message uses default text', async ({mount, page}) => {
+        const body = teamStatusResponse({
+            connections: [connStatus({name: 'sub-conn-2', linked: false})],
+            request_mode: true,
+        });
+        await mountAndOpen(page, mount, 'team1', body);
+        await page.route('**/plugins/crossguard/api/v1/teams/team1/init*', (route: any) => {
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({status: 'request_submitted'}),
+            });
+        });
+        await setCsrfCookie(page);
+        await page.getByRole('button', {name: 'Request Link', exact: true}).click();
+        await expect(page.getByText('Your request has been submitted for approval.')).toBeVisible();
+    });
+
+    test('rapid toggle clears the previous status timer before scheduling a new one', async ({mount, page}) => {
+        // Exercises the clearTimeout(statusTimerRef.current) branch in handleToggle
+        // by firing two toggle actions back-to-back while the first banner is still showing.
+        const body = teamStatusResponse({
+            connections: [
+                connStatus({name: 'first', linked: false}),
+                connStatus({name: 'second', direction: 'outbound', linked: true}),
+            ],
+        });
+        await mountAndOpen(page, mount, 'team1', body);
+        await page.route('**/plugins/crossguard/api/v1/teams/team1/init*', (route: any) => {
+            route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({status: 'ok'})});
+        });
+        await page.route('**/plugins/crossguard/api/v1/teams/team1/teardown*', (route: any) => {
+            route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({status: 'ok'})});
+        });
+        await setCsrfCookie(page);
+
+        await page.getByRole('button', {name: 'Link', exact: true}).click();
+        await expect(page.getByText('Connection "first" linked.')).toBeVisible();
+
+        await page.getByRole('button', {name: 'Unlink', exact: true}).click();
+        await expect(page.getByText('Connection "second" unlinked.')).toBeVisible();
+        await expect(page.getByText('Connection "first" linked.')).not.toBeVisible();
+    });
+});

@@ -795,7 +795,7 @@ func TestCreateProvider_AzureQueueInvalidCredential(t *testing.T) {
 	}
 	_, err := p.createProvider(cfg, "Outbound")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Azure Queue")
+	assert.Contains(t, err.Error(), "azure-queue")
 }
 
 func TestCreateProvider_AzureBlobInvalidCredential(t *testing.T) {
@@ -815,7 +815,7 @@ func TestCreateProvider_AzureBlobInvalidCredential(t *testing.T) {
 	}
 	_, err := p.createProvider(cfg, "Outbound")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Azure Blob")
+	assert.Contains(t, err.Error(), "azure-blob")
 }
 
 func TestCreateProvider_AzureBlobInboundDirection(t *testing.T) {
@@ -836,7 +836,7 @@ func TestCreateProvider_AzureBlobInboundDirection(t *testing.T) {
 	// Exercise the inbound direction path (isOutbound = false).
 	_, err := p.createProvider(cfg, "Inbound")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Azure Blob")
+	assert.Contains(t, err.Error(), "azure-blob")
 }
 
 func TestUploadPostFiles_NoFileEnabledConns(t *testing.T) {

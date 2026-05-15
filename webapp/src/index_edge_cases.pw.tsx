@@ -600,6 +600,28 @@ test.describe('Plugin - menu management', () => {
         expect(result).not.toContain('addMenu');
     });
 
+    test('addMainMenuAction is a no-op when registry is null (no throw)', async ({mount, page}) => {
+        await mount(<PluginTestHarness/>);
+        const result = await page.evaluate(async () => {
+            const Plugin = (window as any).__PluginClass;
+            const plugin = new Plugin();
+
+            // Plugin starts with registry undefined (no initialize called).
+            // Direct invocation must not throw, must not call registerMainMenuAction.
+            let threw = false;
+            try {
+                plugin.addMainMenuAction('team1');
+            } catch {
+                threw = true;
+            }
+            return {threw, mainMenuActionId: plugin.mainMenuActionId};
+        });
+        expect(result.threw).toBe(false);
+
+        // No registry means no registerMainMenuAction call, so mainMenuActionId stays null/undefined.
+        expect(result.mainMenuActionId).toBeFalsy();
+    });
+
     test('addMainMenuAction removes previous before adding new', async ({mount, page}) => {
         await mount(<PluginTestHarness/>);
         await page.route('**/api/v1/teams/*/status', (route) => {

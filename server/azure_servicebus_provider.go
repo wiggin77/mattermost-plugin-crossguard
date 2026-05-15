@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/mattermost/mattermost/server/public/plugin"
@@ -87,80 +87,113 @@ type azureServiceBusProvider struct {
 // Compile-time conformance check.
 var _ QueueProvider = (*azureServiceBusProvider)(nil)
 
-// sanitizeConnstrPattern strips `SharedAccessKey=<value>` fragments, `sig=…`
-// query-suffix values, and bare SAS tokens from error strings so that
-// user-facing error messages never leak secrets. We are intentionally
-// conservative: anything that looks like credential material is scrubbed.
-var (
-	sanitizeSharedAccessKey = regexp.MustCompile(`(?i)SharedAccessKey=[^;\s]+`)
-	sanitizeSigQuery        = regexp.MustCompile(`(?i)([?&])sig=[^&\s]+`)
-	sanitizeSharedAccessSig = regexp.MustCompile(`(?i)SharedAccessSignature=[^;\s]+`)
-)
-
-// sanitizeServiceBusError returns a safe-to-log rendering of an SDK error.
-// Called at every boundary where an SDK error flows into a log line or a
-// user-facing string: constructor, Publish, Subscribe ack sites, Close,
-// test-connection.
+// sanitizeServiceBusError delegates to the package-wide sanitizeAzureError
+// helper (server/azure_errors.go). Kept as a thin wrapper so existing call
+// sites in this file read naturally; the shared helper covers SAS material,
+// OAuth2 client-credentials form bodies, AAD bearer tokens, and access/
+// refresh token JSON.
 func sanitizeServiceBusError(err error) string {
-	if err == nil {
-		return ""
-	}
-	s := err.Error()
-	s = sanitizeSharedAccessKey.ReplaceAllString(s, "SharedAccessKey=REDACTED")
-	s = sanitizeSharedAccessSig.ReplaceAllString(s, "SharedAccessSignature=REDACTED")
-	s = sanitizeSigQuery.ReplaceAllString(s, "${1}sig=REDACTED")
-	return s
+	return sanitizeAzureError(err)
 }
 
-func newAzureServiceBusProvider(cfg AzureServiceBusProviderConfig, api plugin.API) (QueueProvider, error) {
-	client, err := azservicebus.NewClientFromConnectionString(cfg.ConnectionString, nil)
+// newAzureServiceBusProvider constructs the azure-servicebus provider. ctx
+// is the plugin-lifetime context; it threads through to the azidentity
+// credential's GetToken calls in SP mode and bounds the blob-sidecar
+// auto-Create probe in connection-string mode.
+//
+// Auth mode selection:
+//   - "" or "connection-string": legacy SAS-string flow.
+//   - "service-principal": azidentity ClientSecretCredential + namespace FQDN.
+//     The optional blob sidecar inherits the SAME SP credential; the per-
+//     sidecar BlobAccountName/BlobAccountKey fields are forbidden by the
+//     validator in SP mode (sidecar mixed-mode is Phase 2).
+//
+// Note: azservicebus.ClientOptions has NO Cloud field at v1.10.0 - data-plane
+// routing is determined by the FQDN namespace itself (e.g.
+// "myns.servicebus.usgovcloudapi.net"). Cloud is passed only to the AAD
+// credential options.
+func newAzureServiceBusProvider(ctx context.Context, cfg AzureServiceBusProviderConfig, api plugin.API) (QueueProvider, error) {
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return nil, fmt.Errorf("service bus client init: %s", sanitizeServiceBusError(err))
+		return nil, fmt.Errorf("azure-servicebus config: %w", err)
+	}
+
+	var (
+		client       *azservicebus.Client
+		spCredential azcore.TokenCredential // populated only in SP mode; reused for blob sidecar
+	)
+
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		secret, secErr := resolveAzureSecret(azureSecretSource{
+			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
+		})
+		if secErr != nil {
+			return nil, fmt.Errorf("azure-servicebus service principal: %w", secErr)
+		}
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			api.LogError("Service Bus: service principal credential failed",
+				"error_code", errcode.ServiceBusSPCredentialFailed,
+				"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(credErr))
+			return nil, credErr
+		}
+		logAzureAuthAudit(api, "azure-servicebus", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, secret)
+		spCredential = cred
+		// Service Bus has no Cloud option on ClientOptions; the namespace
+		// FQDN already encodes the routing for sovereign clouds.
+		namespace := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(cfg.ServiceBusNamespace), "sb://"), "/")
+		client, err = azservicebus.NewClient(namespace, cred, nil)
+		if err != nil {
+			return nil, fmt.Errorf("service bus NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthConnectionString:
+		client, err = azservicebus.NewClientFromConnectionString(cfg.ConnectionString, nil)
+		if err != nil {
+			return nil, fmt.Errorf("service bus client init: %s", sanitizeAzureError(err))
+		}
+	default:
+		return nil, fmt.Errorf("azure-servicebus: unknown auth_mode %q", authMode)
+	}
+
+	// closeWithTimeout bounds Service Bus / AMQP cleanup calls so a hung
+	// link during a failed activation cannot block plugin startup
+	// indefinitely. Mirrors the pattern used by the runtime Close().
+	type ctxCloser interface {
+		Close(context.Context) error
+	}
+	closeWithTimeout := func(c ctxCloser) {
+		closeCtx, cancel := context.WithTimeout(context.Background(), serviceBusAckTimeout)
+		defer cancel()
+		_ = c.Close(closeCtx)
 	}
 
 	sender, err := client.NewSender(cfg.QueueName, nil)
 	if err != nil {
-		_ = client.Close(context.Background())
-		return nil, fmt.Errorf("service bus sender init: %s", sanitizeServiceBusError(err))
+		closeWithTimeout(client)
+		return nil, fmt.Errorf("service bus sender init: %s", sanitizeAzureError(err))
 	}
 
 	receiver, err := client.NewReceiverForQueue(cfg.QueueName, &azservicebus.ReceiverOptions{
 		ReceiveMode: azservicebus.ReceiveModePeekLock,
 	})
 	if err != nil {
-		_ = sender.Close(context.Background())
-		_ = client.Close(context.Background())
-		return nil, fmt.Errorf("service bus receiver init: %s", sanitizeServiceBusError(err))
+		closeWithTimeout(sender)
+		closeWithTimeout(client)
+		return nil, fmt.Errorf("service bus receiver init: %s", sanitizeAzureError(err))
 	}
 
 	var blobOps azureBlobOps
 	if cfg.BlobContainerName != "" {
-		blobCred, credErr := container.NewSharedKeyCredential(cfg.BlobAccountName, cfg.BlobAccountKey)
-		if credErr != nil {
-			_ = receiver.Close(context.Background())
-			_ = sender.Close(context.Background())
-			_ = client.Close(context.Background())
-			return nil, fmt.Errorf("service bus blob credential: %s", sanitizeServiceBusError(credErr))
-		}
-		containerClient, clientErr := container.NewClientWithSharedKeyCredential(
-			buildBlobContainerURL(cfg.BlobServiceURL, cfg.BlobContainerName), blobCred, nil)
-		if clientErr != nil {
-			_ = receiver.Close(context.Background())
-			_ = sender.Close(context.Background())
-			_ = client.Close(context.Background())
-			return nil, fmt.Errorf("service bus blob client: %s", sanitizeServiceBusError(clientErr))
-		}
-		blobOps = &containerClientAdapter{client: containerClient}
-
-		blobCtx, blobCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer blobCancel()
-		if createErr := blobOps.CreateContainer(blobCtx); createErr != nil {
-			if !strings.Contains(createErr.Error(), azureSBErrContainerAlreadyExists) {
-				api.LogWarn("Service Bus: could not create blob container (may already exist)",
-					"error_code", errcode.ServiceBusSendFailed, // reuse existing; create-container rarely fails
-					"container", cfg.BlobContainerName,
-					"error", sanitizeServiceBusError(createErr))
-			}
+		blobOps, err = newServiceBusBlobSidecar(ctx, cfg, authMode, azCloud, spCredential, api)
+		if err != nil {
+			closeWithTimeout(receiver)
+			closeWithTimeout(sender)
+			closeWithTimeout(client)
+			return nil, err
 		}
 	}
 
@@ -183,6 +216,61 @@ func newAzureServiceBusProvider(cfg AzureServiceBusProviderConfig, api plugin.AP
 		maxMsgSize:      maxMsgSize,
 		blobPoll:        blobPoll,
 	}, nil
+}
+
+// newServiceBusBlobSidecar constructs the optional blob container client
+// for Service Bus file transfer. In connection-string mode the sidecar
+// uses independent shared-key credentials (BlobAccountName/Key on the
+// config). In SP mode the sidecar inherits the parent SP credential;
+// validation forbids BlobAccountName/Key in that mode so this branch
+// never reads them.
+func newServiceBusBlobSidecar(ctx context.Context, cfg AzureServiceBusProviderConfig, authMode string, azCloud azcoreCloudConfig, spCredential azcore.TokenCredential, api plugin.API) (azureBlobOps, error) {
+	containerURL := buildBlobContainerURL(cfg.BlobServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	var err error
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		if spCredential == nil {
+			return nil, errors.New("service bus blob sidecar: SP credential is nil (internal bug)")
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClient(containerURL, spCredential, opts)
+		if err != nil {
+			return nil, fmt.Errorf("service bus blob sidecar NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthConnectionString:
+		blobCred, credErr := container.NewSharedKeyCredential(cfg.BlobAccountName, cfg.BlobAccountKey)
+		if credErr != nil {
+			return nil, fmt.Errorf("service bus blob sidecar shared key: %s", sanitizeAzureError(credErr))
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClientWithSharedKeyCredential(containerURL, blobCred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("service bus blob sidecar NewClientWithSharedKeyCredential: %s", sanitizeAzureError(err))
+		}
+	default:
+		return nil, fmt.Errorf("service bus blob sidecar: unknown auth_mode %q", authMode)
+	}
+
+	blobOps := &containerClientAdapter{client: containerClient}
+
+	// Auto-Create runs only in connection-string mode (shared-key has full
+	// control plane). SP mode requires pre-provisioned container.
+	if authMode != AzureAuthServicePrincipal {
+		blobCtx, blobCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer blobCancel()
+		if createErr := blobOps.CreateContainer(blobCtx); createErr != nil {
+			if !strings.Contains(createErr.Error(), azureSBErrContainerAlreadyExists) {
+				api.LogWarn("Service Bus: could not create blob container (may already exist)",
+					"error_code", errcode.ServiceBusSendFailed,
+					"container", cfg.BlobContainerName,
+					"error", sanitizeAzureError(createErr))
+			}
+		}
+	}
+
+	return blobOps, nil
 }
 
 func (a *azureServiceBusProvider) Publish(ctx context.Context, data []byte) error {
@@ -447,10 +535,41 @@ func (a *azureServiceBusProvider) Close() error {
 // not increment DeliveryCount), so repeated test-connection clicks have no
 // side effect on queue state.
 func testAzureServiceBusConnection(cfg AzureServiceBusProviderConfig) error {
-	client, err := azservicebus.NewClientFromConnectionString(cfg.ConnectionString, nil)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return fmt.Errorf("service bus client init: %s", sanitizeServiceBusError(err))
+		return fmt.Errorf("azure-servicebus config: %w", err)
 	}
+
+	var client *azservicebus.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		secret, secErr := resolveAzureSecret(azureSecretSource{
+			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
+		})
+		if secErr != nil {
+			return fmt.Errorf("azure-servicebus service principal: %w", secErr)
+		}
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			return credErr
+		}
+		namespace := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(cfg.ServiceBusNamespace), "sb://"), "/")
+		client, err = azservicebus.NewClient(namespace, cred, nil)
+		if err != nil {
+			return fmt.Errorf("service bus NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthConnectionString:
+		client, err = azservicebus.NewClientFromConnectionString(cfg.ConnectionString, nil)
+		if err != nil {
+			return fmt.Errorf("service bus client init: %s", sanitizeAzureError(err))
+		}
+	default:
+		return fmt.Errorf("azure-servicebus: unknown auth_mode %q", authMode)
+	}
+
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), serviceBusAckTimeout)
 		_ = client.Close(closeCtx)
@@ -461,7 +580,7 @@ func testAzureServiceBusConnection(cfg AzureServiceBusProviderConfig) error {
 		ReceiveMode: azservicebus.ReceiveModePeekLock,
 	})
 	if err != nil {
-		return fmt.Errorf("service bus receiver init: %s", sanitizeServiceBusError(err))
+		return fmt.Errorf("service bus receiver init: %s", sanitizeAzureError(err))
 	}
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), serviceBusAckTimeout)
@@ -477,12 +596,18 @@ func testAzureServiceBusConnection(cfg AzureServiceBusProviderConfig) error {
 		if errors.As(peekErr, &sbErr) {
 			switch sbErr.Code {
 			case azservicebus.CodeNotFound:
+				if authMode == AzureAuthServicePrincipal {
+					return fmt.Errorf("service bus queue %q not found: in service-principal mode, the plugin does not auto-create resources. Pre-provision via the Azure portal or ARM template, then retry", cfg.QueueName)
+				}
 				return fmt.Errorf("queue %q not found (pre-create it in Azure portal or ARM template)", cfg.QueueName)
 			case azservicebus.CodeUnauthorizedAccess:
+				if authMode == AzureAuthServicePrincipal {
+					return fmt.Errorf("unauthorized: verify the Service Principal has 'Azure Service Bus Data Sender' and 'Receiver' roles on queue %q", cfg.QueueName)
+				}
 				return fmt.Errorf("unauthorized: check connection string SAS rule and permissions")
 			}
 		}
-		return fmt.Errorf("service bus connection test failed: %s", sanitizeServiceBusError(peekErr))
+		return fmt.Errorf("service bus connection test failed: %s", sanitizeAzureError(peekErr))
 	}
 	return nil
 }

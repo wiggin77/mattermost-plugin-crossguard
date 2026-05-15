@@ -590,3 +590,62 @@ test.describe('Status timer behavior', () => {
         await expect(component.getByText('Connection "first-action" linked.')).not.toBeVisible();
     });
 });
+
+// ---------------------------------------------------------------------------
+// 12. Pending and request-submitted branches
+// ---------------------------------------------------------------------------
+test.describe('Request approval flow', () => {
+    test('request_pending=true on unlinked connection renders a disabled Request Pending button', async ({mount, page}) => {
+        const body = statusResponse({
+            team_connections: [connStatus({name: 'pending-conn', linked: false, request_pending: true})],
+        });
+        await routeStatusOk(page, body);
+        const component = await mount(<CrossguardChannelModal/>);
+        await openModal(page, 'ch1');
+
+        const pendingBtn = component.getByRole('button', {name: 'Request Pending'});
+        await expect(pendingBtn).toBeVisible();
+        await expect(pendingBtn).toBeDisabled();
+        await expect(component.getByRole('button', {name: 'Link', exact: true})).not.toBeVisible();
+    });
+
+    test('toggle response with status=request_submitted shows submitted message banner', async ({mount, page}) => {
+        const body = statusResponse({
+            team_connections: [connStatus({name: 'req-conn', linked: false})],
+            channel_request_mode: true,
+        });
+        await routeStatusOk(page, body);
+        await page.route('**/plugins/crossguard/api/v1/channels/ch1/init*', (route: any) => {
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({status: 'request_submitted', message: 'Your request has been queued.'}),
+            });
+        });
+        await setCsrfCookie(page);
+        const component = await mount(<CrossguardChannelModal/>);
+        await openModal(page, 'ch1');
+        await component.getByRole('button', {name: /Request Link|Link/}).first().click();
+        await expect(component.getByText('Your request has been queued.')).toBeVisible();
+    });
+
+    test('toggle response with status=request_submitted but no message falls back to default text', async ({mount, page}) => {
+        const body = statusResponse({
+            team_connections: [connStatus({name: 'req-conn-2', linked: false})],
+            channel_request_mode: true,
+        });
+        await routeStatusOk(page, body);
+        await page.route('**/plugins/crossguard/api/v1/channels/ch1/init*', (route: any) => {
+            route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({status: 'request_submitted'}),
+            });
+        });
+        await setCsrfCookie(page);
+        const component = await mount(<CrossguardChannelModal/>);
+        await openModal(page, 'ch1');
+        await component.getByRole('button', {name: /Request Link|Link/}).first().click();
+        await expect(component.getByText('Your request has been submitted for approval.')).toBeVisible();
+    });
+});
