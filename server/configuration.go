@@ -411,20 +411,25 @@ func (c *configuration) GetOutboundConnections() ([]ConnectionConfig, error) {
 
 func (c *configuration) validate() error {
 	var errs []string
-	allNames := make(map[string]bool)
 
+	// Uniqueness is per-direction, not global. The operative identifier
+	// everywhere (slash commands, kvstore keys at the service layer,
+	// status responses) is the direction-qualified "outbound:name" /
+	// "inbound:name" pair, so the same bare name in both lists is a
+	// legitimate loopback configuration where a server publishes and
+	// subscribes on a single subject (see the loopback integration test).
 	inbound, err := c.GetInboundConnections()
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("inbound connections: %s", err.Error()))
 	} else {
-		errs = append(errs, validateConnectionList(inbound, "inbound", allNames)...)
+		errs = append(errs, validateConnectionList(inbound, "inbound", make(map[string]bool))...)
 	}
 
 	outbound, err := c.GetOutboundConnections()
 	if err != nil {
 		errs = append(errs, fmt.Sprintf("outbound connections: %s", err.Error()))
 	} else {
-		errs = append(errs, validateConnectionList(outbound, "outbound", allNames)...)
+		errs = append(errs, validateConnectionList(outbound, "outbound", make(map[string]bool))...)
 	}
 
 	if len(errs) > 0 {

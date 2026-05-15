@@ -315,12 +315,17 @@ func TestConfigurationValidate(t *testing.T) {
 		assert.Contains(t, err.Error(), "inbound connections")
 	})
 
-	t.Run("duplicate names across inbound and outbound fail validation", func(t *testing.T) {
+	t.Run("same name across inbound and outbound is allowed (loopback configuration)", func(t *testing.T) {
+		// The operative identifier everywhere is the direction-qualified
+		// "outbound:name" / "inbound:name" pair, so the same bare name
+		// in both lists is a legitimate loopback configuration (server
+		// publishes and subscribes on a single NATS subject). Uniqueness
+		// is enforced within each direction, not across them.
 		inbound := []ConnectionConfig{
-			{Name: "shared-name", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host1:4222", Subject: "crossguard.sub1", AuthType: "none"}},
+			{Name: "loopback", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host1:4222", Subject: "crossguard.loopback", AuthType: "none"}},
 		}
 		outbound := []ConnectionConfig{
-			{Name: "shared-name", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host2:4222", Subject: "crossguard.sub2", AuthType: "none"}},
+			{Name: "loopback", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://host1:4222", Subject: "crossguard.loopback", AuthType: "none"}},
 		}
 		inData, _ := json.Marshal(inbound)
 		outData, _ := json.Marshal(outbound)
@@ -329,8 +334,7 @@ func TestConfigurationValidate(t *testing.T) {
 			OutboundConnections: string(outData),
 		}
 		err := cfg.validate()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "duplicate name")
+		require.NoError(t, err)
 	})
 
 	t.Run("errors from both directions are aggregated", func(t *testing.T) {
