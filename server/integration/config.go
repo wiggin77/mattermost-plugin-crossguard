@@ -93,7 +93,11 @@ func (h *Harness) ResetPlugin(t *testing.T, s Server) {
 }
 
 // WaitPluginReady polls GetPluginStatuses until crossguard is reported as
-// running on the given server, or fails the test after 30s.
+// running on the given server, or fails the test after 30s. After the
+// plugin reports running we add a short settle window so the inbound
+// elector has time to acquire its KV lease and (re)subscribe to the
+// transport. Without this, a Subscribe race causes the first post after a
+// reset to be lost. The shell tests had a 3s sleep here; we match that.
 func (h *Harness) WaitPluginReady(t *testing.T, s Server) {
 	t.Helper()
 	client := h.AdminFor(s)
@@ -111,7 +115,14 @@ func (h *Harness) WaitPluginReady(t *testing.T, s Server) {
 		}
 		return struct{}{}, false
 	})
+	time.Sleep(pluginReadySettle)
 }
+
+// pluginReadySettle is the additional delay after the plugin state goes to
+// "running" before we treat the plugin as fully ready. It covers the
+// inbound elector's first lease acquisition and the framework's
+// shared-channels remote-id handshake.
+const pluginReadySettle = 3 * time.Second
 
 func cloneSettings(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
