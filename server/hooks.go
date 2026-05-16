@@ -163,7 +163,7 @@ func (p *Plugin) augmentSyncMsgUsers(msg *mmModel.SyncMsg) *mmModel.SyncMsg {
 
 	added := 0
 	for uid := range referenced {
-		user, appErr := p.API.GetUser(uid)
+		user, appErr := p.getUser(uid)
 		if appErr != nil || user == nil {
 			p.API.LogWarn("Cannot fetch local user for outbound sync augmentation",
 				"error_code", errcode.OutboundSyncMsgUserLookupFailed,

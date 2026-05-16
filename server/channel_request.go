@@ -17,7 +17,7 @@ import (
 // a sysadmin or team admin) and the plugin is configured for channel request
 // mode. System admins and team admins always have higher authority.
 func (p *Plugin) isChannelAdminInRequestMode(userID, channelID, teamID string) bool {
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		return false
 	}
@@ -63,7 +63,7 @@ func (p *Plugin) canDirectlyManageChannelConns(userID, teamID string) bool {
 // Unlike isTeamAdminOrSystemAdmin, this does NOT check RestrictToSystemAdmins,
 // so team admins can approve/deny channel requests even when restricted.
 func (p *Plugin) isTeamAdminDirect(userID, teamID string) bool {
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		return false
 	}
@@ -97,7 +97,7 @@ func (p *Plugin) getTeamAdmins(teamID string) ([]*model.User, error) {
 			break
 		}
 		for _, m := range members {
-			user, uErr := p.API.GetUser(m.UserId)
+			user, uErr := p.getUser(m.UserId)
 			if uErr != nil {
 				p.API.LogWarn("Failed to get user during team admin lookup",
 					"error_code", errcode.ChanRequestGetTeamAdminsFailed,
@@ -308,7 +308,7 @@ func (p *Plugin) handleChannelRequestApprove(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -426,7 +426,7 @@ func (p *Plugin) handleChannelRequestDeny(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -484,7 +484,7 @@ func (p *Plugin) handleChannelRequestDenySubmit(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

@@ -132,7 +132,7 @@ func (p *Plugin) handlePromptAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -191,7 +191,7 @@ func (p *Plugin) handlePromptBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -337,7 +337,7 @@ func (p *Plugin) handleChannelPromptAccept(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -402,7 +402,7 @@ func (p *Plugin) handleChannelPromptBlock(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return

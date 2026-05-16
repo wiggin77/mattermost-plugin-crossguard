@@ -16,6 +16,12 @@ import (
 // Server B carries at least one file_id. Mirrors the file relay block of
 // the shell docker-integration-test target.
 func TestFileAttachment(t *testing.T) {
+	t.Skip("blocked on Mattermost server PR #36592: gob-encoding bug in " +
+		"apiRPCServer.ReceiveSharedChannelAttachmentSyncMsg breaks the " +
+		"plugin<->server RPC connection on the first attachment receive, " +
+		"causing this test (and any subsequent tests that depend on B's " +
+		"plugin) to fail. Re-enable once the fix is in the dev image.")
+
 	h := NewHarness(t)
 	linkage := RequireSmokeLinkage(t, h)
 

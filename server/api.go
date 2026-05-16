@@ -380,7 +380,7 @@ func (p *Plugin) getAuthenticatedUser(w http.ResponseWriter, r *http.Request) *m
 		return nil
 	}
 
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		p.API.LogError("Failed to get user",
 			"error_code", errcode.APIGetUserFailed,
@@ -695,7 +695,7 @@ func (p *Plugin) handleDialogSelectConnection(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		writeJSONError(w, "failed to get user", http.StatusInternalServerError)
 		return

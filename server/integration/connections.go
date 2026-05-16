@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+// configChangeSettle is the wait after a successful UpdateConfig before
+// callers may rely on the plugin having picked up the new settings. The
+// platform calls OnConfigurationChange asynchronously; the plugin then
+// runs reconnectOutbound, reconnectInbound, and reconcileRemotes. In
+// practice this is sub-second on a healthy server; we leave generous
+// headroom because the cost of guessing too short is a flaky test.
+const configChangeSettle = 2 * time.Second
+
+func waitForConfigChangeSettle() {
+	time.Sleep(configChangeSettle)
+}
+
 // ConnectionDirection identifies which list of connections a mutator
 // targets in the plugin's settings sub-map.
 type ConnectionDirection string
@@ -70,7 +82,7 @@ func (h *Harness) PatchConnection(t *testing.T, s Server, dir ConnectionDirectio
 	if _, _, err := client.UpdateConfig(ctx, cfg); err != nil {
 		t.Fatalf("UpdateConfig on %s: %v", s.Name, err)
 	}
-	h.ResetPlugin(t, s)
+	waitForConfigChangeSettle()
 
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -93,7 +105,7 @@ func (h *Harness) PatchConnection(t *testing.T, s Server, dir ConnectionDirectio
 			t.Logf("restore PatchConnection: UpdateConfig on %s: %v", s.Name, err)
 			return
 		}
-		h.ResetPlugin(t, s)
+		waitForConfigChangeSettle()
 	}
 }
 

@@ -360,11 +360,15 @@ docker-stop:
 docker-down:
 	@$(DOCKER_COMPOSE) down
 
-## Remove containers and all data
+## Remove containers and all data. The postgres and azurite data dirs are
+## populated by container processes running as non-host UIDs, so host-side
+## `rm -rf` would need sudo. Delete from inside a throwaway container that
+## runs as root to keep the target sudo-free.
 .PHONY: docker-clean
 docker-clean:
 	@$(DOCKER_COMPOSE) down -v
-	@rm -rf docker/postgres-a-data docker/postgres-b-data docker/mattermost-a docker/mattermost-b docker/azurite-data docker/servicebus-mssql-data
+	@docker run --rm -v "$(CURDIR)/docker:/d" alpine sh -c \
+		"rm -rf /d/postgres-a-data /d/postgres-b-data /d/mattermost-a /d/mattermost-b /d/azurite-data /d/servicebus-mssql-data"
 	@echo "Containers and data removed"
 
 ## Kill orphaned Docker containers on the MM ports (useful after deleting a worktree)
@@ -533,19 +537,21 @@ docker-deploy: docker-check dist
 	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	PATCH_A=$$(go run ./build/configure-baseline -side a) && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
-		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"xml-low-to-high\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.xml\",\"auth_type\":\"none\"}}]","inboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
-	echo "Server A configured with outbound:low-to-high(files),xml-low-to-high(xml) + inbound:high-to-low(files)"
+		-d "$$PATCH_A" >/dev/null && \
+	echo "Server A configured: 5 outbound (NATS x2, Azure Queue, Azure Blob, Service Bus) + 1 inbound (high-to-low)"
 	@TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	PATCH_B=$$(go run ./build/configure-baseline -side b) && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_B" \
 		-H "Content-Type: application/json" \
-		-d '{"PluginSettings":{"Plugins":{"crossguard":{"inboundconnections":"[{\"name\":\"low-to-high\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay\",\"auth_type\":\"none\"}},{\"name\":\"xml-low-to-high\",\"provider\":\"nats\",\"message_format\":\"xml\",\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.xml\",\"auth_type\":\"none\"}}]","outboundconnections":"[{\"name\":\"high-to-low\",\"provider\":\"nats\",\"file_transfer_enabled\":true,\"nats\":{\"address\":\"nats://nats:4222\",\"subject\":\"crossguard.relay.reverse\",\"auth_type\":\"none\"}}]"}}}}' >/dev/null && \
-	echo "Server B configured with inbound:low-to-high(files),xml-low-to-high(xml) + outbound:high-to-low(files)"
+		-d "$$PATCH_B" >/dev/null && \
+	echo "Server B configured: 5 inbound (NATS x2, Azure Queue, Azure Blob, Service Bus) + 1 outbound (high-to-low)"
 
 ## Disable and re-enable plugin on both servers
 .PHONY: docker-reset

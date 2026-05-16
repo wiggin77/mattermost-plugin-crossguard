@@ -146,13 +146,30 @@ docker-smoke-test: docker-check
 	echo "Smoke test result: $$FOUND" || \
 	{ echo "Smoke test FAILED: message smoke-test:$$SMOKE_ID not found on Server B low-to-high"; exit 1; }
 
-## Go-driven integration tests (Phase 1 of the makefile-to-Go migration).
-## Runs only the tests that have been ported to server/integration/.
+## Go-driven integration tests (Phases 1 through 4 of the makefile-to-Go
+## migration). Runs every test that has been ported to server/integration/.
 ## See implementation-plans/26-05-11-01-migrate-integration-tests-to-go.md.
-## Containers must already be up (make docker-setup) and the plugin deployed
-## (make deploy).
+##
+## Dependencies (handled automatically, in order):
+##   - docker-check: containers must already be up (run `make docker-setup`)
+##   - servicebus-probe-run: brings up the Service Bus emulator (profiled)
+##     and probes it via AMQP until ready. Must run BEFORE docker-deploy
+##     so that when the plugin starts up with servicebus-low-to-high in
+##     its config, the AMQP connection succeeds on the first try instead
+##     of logging warnings while it retries against a not-yet-running
+##     emulator.
+##   - docker-deploy: builds dist/, deploys to both servers, sets the
+##     baseline connection config: NATS (low-to-high, xml-low-to-high,
+##     high-to-low), Azure Queue (azure-low-to-high), Azure Blob
+##     (azure-blob-low-to-high), and Service Bus (servicebus-low-to-high).
+##     One connection per transport, configured once at deploy. Tests do
+##     not mutate the connection set; they exercise their assigned
+##     transport via dedicated channels and dedicated users (per-test
+##     isolation lives at the channel + user level).
+##     We depend on docker-deploy (not `deploy`) to avoid duplicating the
+##     shell smoke test, which is covered by Go TestSmoke.
 .PHONY: docker-integration-test-go
-docker-integration-test-go: docker-check
+docker-integration-test-go: docker-check servicebus-probe-run docker-deploy
 	@echo ""
 	@echo "Running Go-driven integration tests (server/integration/)..."
 	@MM_HOST=$(MM_HOST) MM_PORT_A=$(MM_PORT_A) MM_PORT_B=$(MM_PORT_B) \

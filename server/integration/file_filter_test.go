@@ -48,6 +48,12 @@ func postMetadataFiles(t *testing.T, h *Harness, channelID, postID string) []*mo
 // the plugin reads the server's global FileSettings.MaxFileSize, not a
 // per-connection field.
 func TestFileFilter(t *testing.T) {
+	t.Skip("blocked on Mattermost server PR #36592: every sub-test uploads " +
+		"a file and triggers the gob-encoding bug in " +
+		"apiRPCServer.ReceiveSharedChannelAttachmentSyncMsg, breaking the " +
+		"plugin<->server RPC connection. Re-enable once the fix is in the " +
+		"dev image.")
+
 	h := NewHarness(t)
 	linkage := RequireSmokeLinkage(t, h)
 

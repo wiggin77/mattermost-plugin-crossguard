@@ -1,6 +1,6 @@
 module github.com/MattermostFederal/mattermost-plugin-crossguard
 
-go 1.26.1
+go 1.26.2
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus v1.10.0

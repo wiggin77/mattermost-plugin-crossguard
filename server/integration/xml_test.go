@@ -60,7 +60,12 @@ func TestXMLRelay(t *testing.T) {
 			marker := fmt.Sprintf("%s:%d-%d", tc.marker, time.Now().UnixNano(), os.Getpid())
 
 			CreatePost(t, usercClient, channelA.Id, marker)
-			h.FindRelayedPost(t, h.B, channelB.Id, marker, 20*time.Second)
+			// 60s because TestXMLRelay sorts after the provider tests
+			// alphabetically; their cleanups reset both plugins multiple
+			// times, and the xml-low-to-high subscription on B can take
+			// noticeable time to come back. 20s (the old shell value)
+			// was tight even before that.
+			h.FindRelayedPost(t, h.B, channelB.Id, marker, 60*time.Second)
 		})
 	}
 }

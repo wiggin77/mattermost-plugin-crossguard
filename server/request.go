@@ -17,7 +17,7 @@ import (
 // sysadmin) and the plugin is configured for request mode. System admins
 // always have direct permission so this returns false for them.
 func (p *Plugin) isTeamAdminInRequestMode(userID, teamID string) bool {
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		return false
 	}
@@ -201,7 +201,7 @@ func (p *Plugin) handleRequestApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -286,7 +286,7 @@ func (p *Plugin) handleRequestDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		writePostActionResponse(w, "Failed to look up user.")
 		return
@@ -344,7 +344,7 @@ func (p *Plugin) handleRequestDenySubmit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	user, appErr := p.API.GetUser(req.UserId)
+	user, appErr := p.getUser(req.UserId)
 	if appErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

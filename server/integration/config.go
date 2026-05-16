@@ -122,7 +122,11 @@ func (h *Harness) WaitPluginReady(t *testing.T, s Server) {
 // "running" before we treat the plugin as fully ready. It covers the
 // inbound elector's first lease acquisition and the framework's
 // shared-channels remote-id handshake.
-const pluginReadySettle = 3 * time.Second
+//
+// 5 seconds is the empirical floor that keeps the suite stable when the
+// Azure provider tests run their many plugin resets back-to-back. The
+// original shell tests slept 3, but they also did fewer resets per run.
+const pluginReadySettle = 5 * time.Second
 
 func cloneSettings(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))

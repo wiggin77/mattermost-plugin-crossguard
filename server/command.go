@@ -279,7 +279,7 @@ func (p *Plugin) executeInitTeam(args *model.CommandArgs) *model.CommandResponse
 		return respondEphemeral("You don't have permissions to run this command. You must be a team admin or system admin.")
 	}
 
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -315,7 +315,7 @@ func (p *Plugin) executeInitTeam(args *model.CommandArgs) *model.CommandResponse
 }
 
 func (p *Plugin) executeInitTeamRequest(args *model.CommandArgs) *model.CommandResponse {
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -347,7 +347,7 @@ func (p *Plugin) executeInitTeamRequest(args *model.CommandArgs) *model.CommandR
 }
 
 func (p *Plugin) executeStatus(args *model.CommandArgs) *model.CommandResponse {
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user: %s", appErr.Error())
 	}
@@ -509,7 +509,7 @@ func (p *Plugin) executeStatusSystemAdmin(channelID string) *model.CommandRespon
 }
 
 func (p *Plugin) isTeamAdminOrSystemAdmin(userID, teamID string) bool {
-	user, appErr := p.API.GetUser(userID)
+	user, appErr := p.getUser(userID)
 	if appErr != nil {
 		return false
 	}
@@ -543,7 +543,7 @@ func (p *Plugin) executeInitChannel(args *model.CommandArgs) *model.CommandRespo
 		}
 	}
 
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -606,7 +606,7 @@ func (p *Plugin) executeTeardownChannel(args *model.CommandArgs) *model.CommandR
 		}
 	}
 
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -644,7 +644,7 @@ func (p *Plugin) executeTeardownChannel(args *model.CommandArgs) *model.CommandR
 }
 
 func (p *Plugin) executeInitChannelRequest(args *model.CommandArgs) *model.CommandResponse {
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -690,7 +690,7 @@ func (p *Plugin) executeTeardownTeam(args *model.CommandArgs) *model.CommandResp
 		}
 	}
 
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Failed to look up user.")
 	}
@@ -823,7 +823,7 @@ func (p *Plugin) executeRewriteTeam(args *model.CommandArgs) *model.CommandRespo
 		}
 	}
 
-	user, appErr := p.API.GetUser(args.UserId)
+	user, appErr := p.getUser(args.UserId)
 	if appErr != nil {
 		return respondEphemeral("Rewrite updated but failed to post audit message.")
 	}
