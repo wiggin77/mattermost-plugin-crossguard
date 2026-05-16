@@ -154,19 +154,13 @@ func newAzureProvider(ctx context.Context, cfg AzureQueueProviderConfig, api plu
 	}, nil
 }
 
-// newAzureProviderSPCredential resolves the Service Principal secret source
-// and constructs an azidentity ClientSecretCredential. Emits an audit log
-// line on success so operators have a record of which AAD identity is
-// authenticating each connection.
+// newAzureProviderSPCredential constructs an azidentity ClientSecretCredential
+// from the inline cfg.ClientSecret. Emits an audit log line on success so
+// operators have a record of which AAD identity is authenticating each
+// connection.
 func newAzureProviderSPCredential(cfg AzureQueueProviderConfig, azCloud azcoreCloudConfig, api plugin.API) (azcore.TokenCredential, error) {
-	secret, err := resolveAzureSecret(azureSecretSource{
-		Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("azure-queue service principal: %w", err)
-	}
 	cred, err := buildClientSecretCredential(azureServicePrincipalParams{
-		TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+		TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 	})
 	if err != nil {
 		api.LogError("Azure Queue: service principal credential failed",
@@ -174,7 +168,7 @@ func newAzureProviderSPCredential(cfg AzureQueueProviderConfig, azCloud azcoreCl
 			"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(err))
 		return nil, err
 	}
-	logAzureAuthAudit(api, "azure-queue", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, secret)
+	logAzureAuthAudit(api, "azure-queue", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
 	return cred, nil
 }
 
@@ -188,14 +182,8 @@ func newAzureProviderBlobSidecar(ctx context.Context, cfg AzureQueueProviderConf
 	var containerClient *container.Client
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, err := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("azure-queue blob sidecar SP secret: %w", err)
-		}
 		cred, err := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("azure-queue blob sidecar SP credential: %w", err)
@@ -439,14 +427,8 @@ func testAzureQueueConnection(cfg AzureQueueProviderConfig) error {
 	var queueClient *azqueue.QueueClient
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, secErr := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if secErr != nil {
-			return fmt.Errorf("azure-queue service principal: %w", secErr)
-		}
 		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if credErr != nil {
 			return credErr

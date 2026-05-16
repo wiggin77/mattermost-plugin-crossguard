@@ -41,8 +41,8 @@ func TestMergeConnectionSecretsJSON_Sentinel_PreservesStored(t *testing.T) {
 
 func TestMergeConnectionSecretsJSON_EmptyInbound_ClearsStored(t *testing.T) {
 	// Empty inbound is now honored as an explicit clear so admins can
-	// actually delete a stored secret (e.g., when switching from inline
-	// client_secret to client_secret_env). The webapp uses the sentinel
+	// actually delete a stored secret (e.g., when switching from
+	// shared-key to service-principal). The webapp uses the sentinel
 	// for "no change"; empty truly means "I cleared this field".
 	prev := []ConnectionConfig{{
 		Name:     "q1",
@@ -201,15 +201,13 @@ func TestRedactConnection_NoSecretsExposed_AzureQueue(t *testing.T) {
 		Name:     "q1",
 		Provider: ProviderAzureQueue,
 		AzureQueue: &AzureQueueProviderConfig{
-			AccountName:      "acct",
-			AccountKey:       "SECRET-account-key",
-			AuthMode:         AzureAuthServicePrincipal,
-			TenantID:         "11111111-2222-3333-4444-555555555555",
-			ClientID:         "client-uuid",
-			ClientSecret:     "SECRET-client-secret",
-			ClientSecretEnv:  "SECRET-env-name",
-			ClientSecretFile: "/path/to/secret",
-			QueueName:        "q",
+			AccountName:  "acct",
+			AccountKey:   "SECRET-account-key",
+			AuthMode:     AzureAuthServicePrincipal,
+			TenantID:     "11111111-2222-3333-4444-555555555555",
+			ClientID:     "client-uuid",
+			ClientSecret: "SECRET-client-secret",
+			QueueName:    "q",
 		},
 	}
 	rc := redactConnection(conn, "outbound")
@@ -218,8 +216,6 @@ func TestRedactConnection_NoSecretsExposed_AzureQueue(t *testing.T) {
 	s := string(out)
 	assert.NotContains(t, s, "SECRET-account-key")
 	assert.NotContains(t, s, "SECRET-client-secret")
-	assert.NotContains(t, s, "SECRET-env-name", "env var name is operational metadata; must not leak")
-	assert.NotContains(t, s, "/path/to/secret", "file path is operational metadata; must not leak")
 	// Safe fields are present.
 	assert.Contains(t, s, "service-principal")
 	assert.Contains(t, s, "11111111-2222-3333-4444-555555555555")

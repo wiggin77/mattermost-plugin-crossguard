@@ -885,14 +885,6 @@ func TestNewAzureProvider_SPMode_BadCloud(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown azure_cloud")
 }
 
-func TestNewAzureProvider_SPMode_NoSecretSource(t *testing.T) {
-	cfg := validSPQueueCfg()
-	cfg.ClientSecret = ""
-	_, err := newAzureProvider(t.Context(), cfg, &plugintest.API{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "azure-queue service principal")
-}
-
 func TestNewAzureProvider_SPMode_BadTenant(t *testing.T) {
 	api := &plugintest.API{}
 	api.On("LogError", "Azure Queue: service principal credential failed",
@@ -936,19 +928,6 @@ func TestNewAzureProviderBlobSidecar_SPMode_NoAutoCreate(t *testing.T) {
 	ops, err := newAzureProviderBlobSidecar(t.Context(), cfg, AzureAuthServicePrincipal, cloud.AzurePublic, api)
 	require.NoError(t, err)
 	require.NotNil(t, ops)
-}
-
-func TestNewAzureProviderBlobSidecar_SPMode_NoSecretSource(t *testing.T) {
-	cfg := AzureQueueProviderConfig{
-		BlobServiceURL:    "https://acct.blob.core.windows.net",
-		BlobContainerName: "c1",
-		TenantID:          "11111111-2222-3333-4444-555555555555",
-		ClientID:          "client-uuid",
-		// ClientSecret intentionally empty
-	}
-	_, err := newAzureProviderBlobSidecar(t.Context(), cfg, AzureAuthServicePrincipal, cloud.AzurePublic, &plugintest.API{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "azure-queue blob sidecar SP secret")
 }
 
 func TestNewAzureProviderBlobSidecar_SPMode_BadTenant(t *testing.T) {
@@ -995,14 +974,6 @@ func TestTestAzureQueueConnection_BadCloud(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "azure-queue config")
 	assert.Contains(t, err.Error(), "unknown azure_cloud")
-}
-
-func TestTestAzureQueueConnection_SPMode_NoSecretSource(t *testing.T) {
-	cfg := validSPQueueCfg()
-	cfg.ClientSecret = ""
-	err := testAzureQueueConnection(cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "azure-queue service principal")
 }
 
 func TestTestAzureQueueConnection_SPMode_BadTenant(t *testing.T) {

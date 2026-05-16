@@ -72,10 +72,10 @@
             scoped SAS rules supported over the namespace-wide root key) or an Azure AD Service
             Principal. Service Principal mode allows credentials to be scoped via Azure RBAC and
             rotated in Azure AD without touching plugin config; admin guidance for SP setup, the
-            minimum required data-plane roles, and Federal-grade secret indirection options
-            (<code>client_secret_env</code> and <code>client_secret_file</code>) are documented in
-            the admin guide. Permission lockdown is configurable via the
-            <code>RestrictToSystemAdmins</code> setting.
+            minimum required data-plane roles, and the Federal-grade pattern for keeping the
+            <code>client_secret</code> out of plugin config (Mattermost env-var substitution of
+            the connections JSON) are documented in the admin guide. Permission lockdown is
+            configurable via the <code>RestrictToSystemAdmins</code> setting.
         </p>
         <p>
             This whitepaper provides a comprehensive technical analysis of Cross Guard's architecture,

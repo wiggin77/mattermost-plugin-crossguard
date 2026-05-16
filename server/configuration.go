@@ -73,10 +73,14 @@ func validateAzureCloud(s string) string {
 	return fmt.Sprintf("azure_cloud must be one of %s, %s, or %s", AzureCloudPublic, AzureCloudUSGov, AzureCloudChina)
 }
 
-// validateAzureServicePrincipalFields checks the SP credential triple plus
-// secret-source mutual exclusion. Returns a slice of human-readable errors
-// (empty if all good).
-func validateAzureServicePrincipalFields(tenantID, clientID, secret, secretEnv, secretFile, prefix string) []string {
+// validateAzureServicePrincipalFields checks the SP credential triple.
+// Returns a slice of human-readable errors (empty if all good).
+//
+// Inline-only by design: operators who want to keep the secret out of
+// plugin config use Mattermost's MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_*
+// env-var substitution on the whole connections JSON, which is the
+// same mechanism every other plugin secret in Mattermost uses.
+func validateAzureServicePrincipalFields(tenantID, clientID, secret, prefix string) []string {
 	var errs []string
 	if msg := validateAzureTenantID(tenantID); msg != "" {
 		errs = append(errs, fmt.Sprintf("%s: %s", prefix, msg))
@@ -84,23 +88,8 @@ func validateAzureServicePrincipalFields(tenantID, clientID, secret, secretEnv, 
 	if strings.TrimSpace(clientID) == "" {
 		errs = append(errs, fmt.Sprintf("%s: client_id is required", prefix))
 	}
-	sources := 0
-	if strings.TrimSpace(secret) != "" {
-		sources++
-	}
-	if strings.TrimSpace(secretEnv) != "" {
-		sources++
-	}
-	if strings.TrimSpace(secretFile) != "" {
-		sources++
-	}
-	switch sources {
-	case 0:
-		errs = append(errs, fmt.Sprintf("%s: one of client_secret, client_secret_env, or client_secret_file is required", prefix))
-	case 1:
-		// good
-	default:
-		errs = append(errs, fmt.Sprintf("%s: set exactly one of client_secret, client_secret_env, or client_secret_file (got %d)", prefix, sources))
+	if strings.TrimSpace(secret) == "" {
+		errs = append(errs, fmt.Sprintf("%s: client_secret is required", prefix))
 	}
 	return errs
 }
@@ -221,12 +210,12 @@ type AzureQueueProviderConfig struct {
 	AzureCloud string `json:"azure_cloud,omitempty"`
 
 	// Service Principal fields (required when AuthMode == "service-principal").
-	// Exactly one of ClientSecret, ClientSecretEnv, ClientSecretFile must be set.
-	TenantID         string `json:"tenant_id,omitempty"`
-	ClientID         string `json:"client_id,omitempty"`
-	ClientSecret     string `json:"client_secret,omitempty"`
-	ClientSecretEnv  string `json:"client_secret_env,omitempty"`  // env var name holding the secret
-	ClientSecretFile string `json:"client_secret_file,omitempty"` // file path holding the secret
+	// ClientSecret is the inline secret value. To keep the secret out of
+	// plugin config on disk, inject the whole connections JSON via the
+	// MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS env var.
+	TenantID     string `json:"tenant_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 // AzureServiceBusProviderConfig holds Azure Service Bus queue + optional Azure Blob file transfer settings.
@@ -234,7 +223,7 @@ type AzureQueueProviderConfig struct {
 // Auth shape: AuthMode selects between connection-string (legacy default,
 // SAS-based) and service-principal. In service-principal mode the
 // ConnectionString field must be empty and ServiceBusNamespace +
-// TenantID/ClientID/ClientSecret* are required. The blob sidecar inherits
+// TenantID/ClientID/ClientSecret are required. The blob sidecar inherits
 // the parent SP credential when AuthMode == "service-principal"; in that
 // case BlobAccountName and BlobAccountKey must be empty (mixed-mode is
 // Phase 2). Message lock duration is NOT a client knob (it is an Azure
@@ -272,19 +261,16 @@ type AzureServiceBusProviderConfig struct {
 	ServiceBusNamespace string `json:"service_bus_namespace,omitempty"`
 
 	// Service Principal fields (required when AuthMode == "service-principal").
-	// Exactly one of ClientSecret, ClientSecretEnv, ClientSecretFile must be set.
-	TenantID         string `json:"tenant_id,omitempty"`
-	ClientID         string `json:"client_id,omitempty"`
-	ClientSecret     string `json:"client_secret,omitempty"`
-	ClientSecretEnv  string `json:"client_secret_env,omitempty"`
-	ClientSecretFile string `json:"client_secret_file,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 // AzureBlobProviderConfig holds Azure Blob Storage provider settings for batch message relay.
 //
 // Auth shape: AuthMode selects between shared-key (legacy default) and
 // service-principal (Client Secret). In service-principal mode AccountKey
-// must be empty and TenantID/ClientID/ClientSecret* are required.
+// must be empty and TenantID/ClientID/ClientSecret are required.
 type AzureBlobProviderConfig struct {
 	ServiceURL               string `json:"service_url"`
 	AccountName              string `json:"account_name"`
@@ -596,13 +582,13 @@ func validateAzureQueueConnection(conn ConnectionConfig, prefix string) []string
 		if strings.TrimSpace(az.AccountKey) == "" {
 			errs = append(errs, fmt.Sprintf("%s: account_key is required for shared-key auth_mode", prefix))
 		}
-		errs = append(errs, azureForbidSPFields(az.TenantID, az.ClientID, az.ClientSecret, az.ClientSecretEnv, az.ClientSecretFile, prefix, "shared-key")...)
+		errs = append(errs, azureForbidSPFields(az.TenantID, az.ClientID, az.ClientSecret, prefix, "shared-key")...)
 	case AzureAuthServicePrincipal:
 		// SP mode: SP triple required; shared-key fields must be empty.
 		if strings.TrimSpace(az.AccountKey) != "" {
 			errs = append(errs, fmt.Sprintf("%s: account_key must be empty when auth_mode is service-principal", prefix))
 		}
-		errs = append(errs, validateAzureServicePrincipalFields(az.TenantID, az.ClientID, az.ClientSecret, az.ClientSecretEnv, az.ClientSecretFile, prefix)...)
+		errs = append(errs, validateAzureServicePrincipalFields(az.TenantID, az.ClientID, az.ClientSecret, prefix)...)
 	default:
 		errs = append(errs, fmt.Sprintf("%s: auth_mode must be %q or %q (got %q)", prefix, AzureAuthSharedKey, AzureAuthServicePrincipal, az.AuthMode))
 	}
@@ -616,7 +602,7 @@ func validateAzureQueueConnection(conn ConnectionConfig, prefix string) []string
 // azureForbidSPFields returns an error for every populated SP field. Used in
 // legacy auth-mode branches to enforce mutual exclusion: leftover SP creds
 // in shared-key mode is silent stale-state that the plan explicitly forbids.
-func azureForbidSPFields(tenantID, clientID, secret, secretEnv, secretFile, prefix, mode string) []string {
+func azureForbidSPFields(tenantID, clientID, secret, prefix, mode string) []string {
 	var errs []string
 	check := func(field, value string) {
 		if strings.TrimSpace(value) != "" {
@@ -626,8 +612,6 @@ func azureForbidSPFields(tenantID, clientID, secret, secretEnv, secretFile, pref
 	check("tenant_id", tenantID)
 	check("client_id", clientID)
 	check("client_secret", secret)
-	check("client_secret_env", secretEnv)
-	check("client_secret_file", secretFile)
 	return errs
 }
 
@@ -683,12 +667,12 @@ func validateAzureBlobConnection(conn ConnectionConfig, prefix string) []string 
 		if strings.TrimSpace(ab.AccountKey) == "" {
 			errs = append(errs, fmt.Sprintf("%s: account_key is required for shared-key auth_mode", prefix))
 		}
-		errs = append(errs, azureForbidSPFields(ab.TenantID, ab.ClientID, ab.ClientSecret, ab.ClientSecretEnv, ab.ClientSecretFile, prefix, "shared-key")...)
+		errs = append(errs, azureForbidSPFields(ab.TenantID, ab.ClientID, ab.ClientSecret, prefix, "shared-key")...)
 	case AzureAuthServicePrincipal:
 		if strings.TrimSpace(ab.AccountKey) != "" {
 			errs = append(errs, fmt.Sprintf("%s: account_key must be empty when auth_mode is service-principal", prefix))
 		}
-		errs = append(errs, validateAzureServicePrincipalFields(ab.TenantID, ab.ClientID, ab.ClientSecret, ab.ClientSecretEnv, ab.ClientSecretFile, prefix)...)
+		errs = append(errs, validateAzureServicePrincipalFields(ab.TenantID, ab.ClientID, ab.ClientSecret, prefix)...)
 	default:
 		errs = append(errs, fmt.Sprintf("%s: auth_mode must be %q or %q (got %q)", prefix, AzureAuthSharedKey, AzureAuthServicePrincipal, ab.AuthMode))
 	}
@@ -764,7 +748,7 @@ func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []s
 		if strings.TrimSpace(sb.ServiceBusNamespace) != "" {
 			errs = append(errs, fmt.Sprintf("%s: service_bus_namespace must be empty when auth_mode is connection-string", prefix))
 		}
-		errs = append(errs, azureForbidSPFields(sb.TenantID, sb.ClientID, sb.ClientSecret, sb.ClientSecretEnv, sb.ClientSecretFile, prefix, "connection-string")...)
+		errs = append(errs, azureForbidSPFields(sb.TenantID, sb.ClientID, sb.ClientSecret, prefix, "connection-string")...)
 	case AzureAuthServicePrincipal:
 		if strings.TrimSpace(sb.ConnectionString) != "" {
 			errs = append(errs, fmt.Sprintf("%s: connection_string must be empty when auth_mode is service-principal", prefix))
@@ -774,7 +758,7 @@ func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []s
 			errs = append(errs, fmt.Sprintf("%s: %s", prefix, msg))
 		}
 		_ = cleanedNs // normalization applied at construction time
-		errs = append(errs, validateAzureServicePrincipalFields(sb.TenantID, sb.ClientID, sb.ClientSecret, sb.ClientSecretEnv, sb.ClientSecretFile, prefix)...)
+		errs = append(errs, validateAzureServicePrincipalFields(sb.TenantID, sb.ClientID, sb.ClientSecret, prefix)...)
 	default:
 		errs = append(errs, fmt.Sprintf("%s: auth_mode must be %q or %q (got %q)", prefix, AzureAuthConnectionString, AzureAuthServicePrincipal, sb.AuthMode))
 	}
@@ -1050,7 +1034,6 @@ func mergeOneConnectionSecrets(inbound, stored *ConnectionConfig) {
 //
 // Note: empty inbound means "the admin cleared this field" - we honor that
 // so an admin can actually delete a stored secret (e.g., when transitioning
-// from inline client_secret to client_secret_env / client_secret_file, or
 // from shared-key to service-principal). Because the webapp uses the
 // sentinel for "no change" via loadConnectionForEdit, an empty inbound
 // here is an explicit clear, not an accident.

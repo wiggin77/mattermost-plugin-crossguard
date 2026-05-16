@@ -317,14 +317,8 @@ func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api 
 	var containerClient *container.Client
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, secErr := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if secErr != nil {
-			return nil, fmt.Errorf("azure-blob service principal: %w", secErr)
-		}
 		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if credErr != nil {
 			api.LogError("Azure Blob: service principal credential failed",
@@ -332,7 +326,7 @@ func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api 
 				"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(credErr))
 			return nil, credErr
 		}
-		logAzureAuthAudit(api, "azure-blob", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, secret)
+		logAzureAuthAudit(api, "azure-blob", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
 		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
 		containerClient, err = container.NewClient(containerURL, cred, opts)
 		if err != nil {
@@ -1517,14 +1511,8 @@ func testAzureBlobConnection(cfg AzureBlobProviderConfig) error {
 	var containerClient *container.Client
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, secErr := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if secErr != nil {
-			return fmt.Errorf("azure-blob service principal: %w", secErr)
-		}
 		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if credErr != nil {
 			return credErr

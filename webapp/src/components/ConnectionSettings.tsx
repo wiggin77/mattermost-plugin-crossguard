@@ -43,16 +43,15 @@ interface NATSProviderConfig {
 }
 
 // Shared Azure Service Principal fields. Mirrors the Go-side flat fields
-// added to each provider config in Pass 1. Exactly one of client_secret,
-// client_secret_env, or client_secret_file must be set in SP mode.
+// added to each provider config. client_secret is required in SP mode.
+// To keep the secret out of plugin config, inject the whole connections
+// JSON via the MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_* env var.
 interface AzureSPFields {
     auth_mode?: string; // typed as string here for TS variance across providers
     azure_cloud?: AzureCloud;
     tenant_id?: string;
     client_id?: string;
     client_secret?: string;
-    client_secret_env?: string;
-    client_secret_file?: string;
 }
 
 interface AzureQueueProviderConfig extends AzureSPFields {
@@ -152,8 +151,6 @@ const emptyAzureQueueConfig: AzureQueueProviderConfig = {
     tenant_id: '',
     client_id: '',
     client_secret: '',
-    client_secret_env: '',
-    client_secret_file: '',
 };
 
 const emptyAzureBlobConfig: AzureBlobProviderConfig = {
@@ -167,8 +164,6 @@ const emptyAzureBlobConfig: AzureBlobProviderConfig = {
     tenant_id: '',
     client_id: '',
     client_secret: '',
-    client_secret_env: '',
-    client_secret_file: '',
 };
 
 const emptyAzureServiceBusConfig: AzureServiceBusProviderConfig = {
@@ -184,8 +179,6 @@ const emptyAzureServiceBusConfig: AzureServiceBusProviderConfig = {
     tenant_id: '',
     client_id: '',
     client_secret: '',
-    client_secret_env: '',
-    client_secret_file: '',
 };
 
 const emptyConnection: Connection = {
@@ -235,9 +228,8 @@ function validateAzureAuthFields(
             }
 
         // Cross-mode leakage: SP fields must not be set in legacy mode.
-        if (cfg.tenant_id || cfg.client_id || cfg.client_secret ||
-            cfg.client_secret_env || cfg.client_secret_file) {
-            return `Service Principal fields (tenant_id / client_id / client_secret*) must be empty when auth_mode is ${legacyMode}.`;
+        if (cfg.tenant_id || cfg.client_id || cfg.client_secret) {
+            return `Service Principal fields (tenant_id / client_id / client_secret) must be empty when auth_mode is ${legacyMode}.`;
         }
         return null;
     }
@@ -252,16 +244,8 @@ function validateAzureAuthFields(
         if (!cfg.client_id || !cfg.client_id.trim()) {
             return 'Client ID is required for service-principal auth mode.';
         }
-        const secretSources = [
-            cfg.client_secret,
-            cfg.client_secret_env,
-            cfg.client_secret_file,
-        ].filter((v) => v && v.trim()).length;
-        if (secretSources === 0) {
-            return 'One of Client Secret, Client Secret Env, or Client Secret File is required.';
-        }
-        if (secretSources > 1) {
-            return 'Set exactly one of Client Secret, Client Secret Env, or Client Secret File.';
+        if (!cfg.client_secret || !cfg.client_secret.trim()) {
+            return 'Client Secret is required for service-principal auth mode.';
         }
 
         // Cross-mode leakage: legacy secrets must be empty in SP mode.
@@ -305,11 +289,10 @@ function isValidAzureTenantID(s: string): boolean {
 }
 
 // ServicePrincipalFields renders the shared SP credential inputs
-// (tenant_id, client_id, client_secret, client_secret_env, client_secret_file).
-// Reused across all three Azure provider forms so the UI is consistent.
-// Styles are read from the lexically-enclosed `styles` object; this
-// component is intentionally declared inside the same module to avoid
-// duplicating the styles object.
+// (tenant_id, client_id, client_secret). Reused across all three Azure
+// provider forms so the UI is consistent. Styles are read from the
+// lexically-enclosed `styles` object; this component is intentionally
+// declared inside the same module to avoid duplicating the styles object.
 function ServicePrincipalFieldsComponent({
     ariaPrefix,
     cfg,
@@ -361,40 +344,10 @@ function ServicePrincipalFieldsComponent({
                         value={cfg.client_secret || ''}
                         onChange={(e) => onChange('client_secret', e.target.value)}
                         disabled={disabled}
-                        placeholder='Leave blank to use an env var or file path below'
+                        placeholder='Azure AD application client secret'
                     />
                     <div style={styles.helpText}>
-                        {'Inline secret value. Mutually exclusive with the env-var and file alternatives below. For Federal/Key Vault deployments, prefer one of those.'}
-                    </div>
-                </div>
-                <div style={styles.inputGroup}>
-                    <label style={styles.label}>{'Client Secret Env Var'}</label>
-                    <input
-                        aria-label={`${ariaPrefix} Client Secret Env Var`}
-                        style={styles.input}
-                        type='text'
-                        value={cfg.client_secret_env || ''}
-                        onChange={(e) => onChange('client_secret_env', e.target.value)}
-                        disabled={disabled}
-                        placeholder='AZURE_SP_SECRET'
-                    />
-                    <div style={styles.helpText}>
-                        {'Name of an environment variable on the Mattermost server holding the secret.'}
-                    </div>
-                </div>
-                <div style={styles.inputGroup}>
-                    <label style={styles.label}>{'Client Secret File Path'}</label>
-                    <input
-                        aria-label={`${ariaPrefix} Client Secret File`}
-                        style={styles.input}
-                        type='text'
-                        value={cfg.client_secret_file || ''}
-                        onChange={(e) => onChange('client_secret_file', e.target.value)}
-                        disabled={disabled}
-                        placeholder='/run/secrets/azure-sp-secret'
-                    />
-                    <div style={styles.helpText}>
-                        {'Path to a file (typically a CSI volume mount from Azure Key Vault) whose contents are the secret. Newlines are trimmed.'}
+                        {'To keep the secret out of plugin config on disk, inject the whole connections JSON via the MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS / INBOUNDCONNECTIONS env var (Kubernetes Secret, CSI volume + init container, systemd LoadCredential=, or Vault).'}
                     </div>
                 </div>
             </div>
@@ -1307,20 +1260,6 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                     </div>
                                 </div>
                                 <div style={styles.inputGroup}>
-                                    <label style={styles.label}>{'Blob Service URL'}</label>
-                                    <input
-                                        style={styles.input}
-                                        type='text'
-                                        value={editForm.azure_queue?.blob_service_url || ''}
-                                        onChange={(e) => handleAzureQueueChange('blob_service_url', e.target.value)}
-                                        disabled={disabled}
-                                        placeholder='https://myaccount.blob.core.windows.net'
-                                    />
-                                    <div style={styles.helpText}>
-                                        {'Azure Blob Storage service endpoint. Required when file transfer is enabled. For example, https://myaccount.blob.core.windows.net.'}
-                                    </div>
-                                </div>
-                                <div style={styles.inputGroup}>
                                     <label style={styles.label}>{'Account Name'}</label>
                                     <input
                                         style={styles.input}
@@ -1812,20 +1751,37 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                         </div>
                     </div>
                     {editForm.file_transfer_enabled && editForm.provider === 'azure-queue' && (
-                        <div style={styles.inputGroup}>
-                            <label style={styles.label}>{'Blob Container Name'}</label>
-                            <input
-                                style={styles.input}
-                                type='text'
-                                value={editForm.azure_queue?.blob_container_name || ''}
-                                onChange={(e) => handleAzureQueueChange('blob_container_name', e.target.value)}
-                                disabled={disabled}
-                                placeholder='crossguard-files'
-                            />
-                            <div style={styles.helpText}>
-                                {'Azure Blob Storage container for file attachments.'}
+                        <>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Blob Service URL'}</label>
+                                <input
+                                    aria-label='Azure Queue Blob Service URL'
+                                    style={styles.input}
+                                    type='text'
+                                    value={editForm.azure_queue?.blob_service_url || ''}
+                                    onChange={(e) => handleAzureQueueChange('blob_service_url', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='https://myaccount.blob.core.windows.net'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Azure Blob Storage service endpoint. For example, https://myaccount.blob.core.windows.net.'}
+                                </div>
                             </div>
-                        </div>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Blob Container Name'}</label>
+                                <input
+                                    style={styles.input}
+                                    type='text'
+                                    value={editForm.azure_queue?.blob_container_name || ''}
+                                    onChange={(e) => handleAzureQueueChange('blob_container_name', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='crossguard-files'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Azure Blob Storage container for file attachments.'}
+                                </div>
+                            </div>
+                        </>
                     )}
                     {editForm.file_transfer_enabled && (
                         <>

@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -37,11 +35,6 @@ const (
 	// azureCredentialProbeTimeout bounds the save-time GetToken call so a
 	// hung AAD endpoint cannot block plugin config save indefinitely.
 	azureCredentialProbeTimeout = 10 * time.Second
-
-	// secretSourceMaxFileSize is the upper bound for client_secret_file
-	// contents; well above any realistic AAD secret length and defends
-	// against an operator pointing the plugin at a 10 GB log file.
-	secretSourceMaxFileSize = 64 * 1024
 )
 
 // resolveAzureCloud maps the configured azure_cloud string to the SDK's
@@ -59,79 +52,6 @@ func resolveAzureCloud(name string) (cloud.Configuration, error) {
 		return cloud.Configuration{}, fmt.Errorf("unknown azure_cloud %q (allowed: %s, %s, %s)",
 			name, AzureCloudPublic, AzureCloudUSGov, AzureCloudChina)
 	}
-}
-
-// azureSecretSource captures the three mutually-exclusive ways to supply
-// a Service Principal client secret. The validator enforces that exactly
-// one is set in SP mode; resolveAzureSecret turns the source into a
-// plaintext secret at construction time.
-type azureSecretSource struct {
-	Inline   string
-	EnvVar   string
-	FilePath string
-}
-
-// resolveAzureSecret returns the resolved secret value or an error. Mutual
-// exclusion is enforced (zero or multiple sources -> error). Resolution
-// happens at construction time so secret rotation in a Key Vault / CSI
-// mount works without plugin config rewrites.
-func resolveAzureSecret(src azureSecretSource) (string, error) {
-	count := 0
-	if src.Inline != "" {
-		count++
-	}
-	if src.EnvVar != "" {
-		count++
-	}
-	if src.FilePath != "" {
-		count++
-	}
-
-	switch count {
-	case 0:
-		return "", errors.New("no client secret source set; provide exactly one of client_secret, client_secret_env, or client_secret_file")
-	case 1:
-		// fall through to resolution
-	default:
-		return "", errors.New("multiple client secret sources set; provide exactly one of client_secret, client_secret_env, or client_secret_file")
-	}
-
-	switch {
-	case src.Inline != "":
-		return src.Inline, nil
-	case src.EnvVar != "":
-		v, ok := os.LookupEnv(src.EnvVar)
-		if !ok {
-			return "", fmt.Errorf("client_secret_env %q is not set in the environment", src.EnvVar)
-		}
-		if v == "" {
-			return "", fmt.Errorf("client_secret_env %q is set but empty", src.EnvVar)
-		}
-		return v, nil
-	case src.FilePath != "":
-		info, err := os.Stat(src.FilePath)
-		if err != nil {
-			return "", fmt.Errorf("client_secret_file: %w", err)
-		}
-		if info.Size() > secretSourceMaxFileSize {
-			return "", fmt.Errorf("client_secret_file: file is larger than %d bytes (got %d)", secretSourceMaxFileSize, info.Size())
-		}
-		raw, err := os.ReadFile(src.FilePath)
-		if err != nil {
-			return "", fmt.Errorf("client_secret_file: %w", err)
-		}
-		// Strip a single trailing newline (common with `echo "secret" > file`).
-		// Do NOT trim all whitespace: leading/trailing whitespace inside the
-		// actual secret would be a config bug, not something the plugin
-		// should silently fix.
-		v := strings.TrimRight(string(raw), "\n\r")
-		if v == "" {
-			return "", fmt.Errorf("client_secret_file %q is empty", src.FilePath)
-		}
-		return v, nil
-	}
-	// Unreachable: count == 1 already gated all three.
-	return "", errors.New("internal: unreachable secret source")
 }
 
 // azureServicePrincipalParams holds the inputs needed to construct a
@@ -187,43 +107,36 @@ func probeAzureConnectionSP(ctx context.Context, conn ConnectionConfig) error {
 			return nil
 		}
 		return probeAzureSP(ctx,
-			conn.AzureQueue.TenantID, conn.AzureQueue.ClientID,
-			conn.AzureQueue.ClientSecret, conn.AzureQueue.ClientSecretEnv, conn.AzureQueue.ClientSecretFile,
+			conn.AzureQueue.TenantID, conn.AzureQueue.ClientID, conn.AzureQueue.ClientSecret,
 			conn.AzureQueue.AzureCloud, azureStorageScope, conn.Name)
 	case ProviderAzureBlob:
 		if conn.AzureBlob == nil || normalizeAzureAuthMode(conn.AzureBlob.AuthMode) != AzureAuthServicePrincipal {
 			return nil
 		}
 		return probeAzureSP(ctx,
-			conn.AzureBlob.TenantID, conn.AzureBlob.ClientID,
-			conn.AzureBlob.ClientSecret, conn.AzureBlob.ClientSecretEnv, conn.AzureBlob.ClientSecretFile,
+			conn.AzureBlob.TenantID, conn.AzureBlob.ClientID, conn.AzureBlob.ClientSecret,
 			conn.AzureBlob.AzureCloud, azureStorageScope, conn.Name)
 	case ProviderAzureServiceBus:
 		if conn.AzureServiceBus == nil || normalizeAzureAuthMode(conn.AzureServiceBus.AuthMode) != AzureAuthServicePrincipal {
 			return nil
 		}
 		return probeAzureSP(ctx,
-			conn.AzureServiceBus.TenantID, conn.AzureServiceBus.ClientID,
-			conn.AzureServiceBus.ClientSecret, conn.AzureServiceBus.ClientSecretEnv, conn.AzureServiceBus.ClientSecretFile,
+			conn.AzureServiceBus.TenantID, conn.AzureServiceBus.ClientID, conn.AzureServiceBus.ClientSecret,
 			conn.AzureServiceBus.AzureCloud, azureServiceBusScope, conn.Name)
 	}
 	return nil
 }
 
-// probeAzureSP resolves the secret, builds the credential, and runs the
-// GetToken probe. Used by probeAzureConnectionSP; broken out so the four
-// per-provider branches share the same code path.
-func probeAzureSP(ctx context.Context, tenantID, clientID, secret, secretEnv, secretFile, cloudName, scope, connName string) error {
-	resolved, err := resolveAzureSecret(azureSecretSource{Inline: secret, EnvVar: secretEnv, FilePath: secretFile})
-	if err != nil {
-		return fmt.Errorf("connection %q: %w", connName, err)
-	}
+// probeAzureSP builds the credential and runs the GetToken probe. Used by
+// probeAzureConnectionSP; broken out so the three per-provider branches share
+// the same code path.
+func probeAzureSP(ctx context.Context, tenantID, clientID, secret, cloudName, scope, connName string) error {
 	azCloud, err := resolveAzureCloud(cloudName)
 	if err != nil {
 		return fmt.Errorf("connection %q: %w", connName, err)
 	}
 	cred, err := buildClientSecretCredential(azureServicePrincipalParams{
-		TenantID: tenantID, ClientID: clientID, Secret: resolved, Cloud: azCloud,
+		TenantID: tenantID, ClientID: clientID, Secret: secret, Cloud: azCloud,
 	})
 	if err != nil {
 		return fmt.Errorf("connection %q: %w", connName, err)

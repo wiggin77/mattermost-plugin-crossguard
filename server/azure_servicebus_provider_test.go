@@ -867,14 +867,6 @@ func TestNewAzureServiceBusProvider_SPMode_BadCloud(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown azure_cloud")
 }
 
-func TestNewAzureServiceBusProvider_SPMode_NoSecretSource(t *testing.T) {
-	cfg := validSPServiceBusCfg()
-	cfg.ClientSecret = ""
-	_, err := newAzureServiceBusProvider(t.Context(), cfg, &plugintest.API{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "azure-servicebus service principal")
-}
-
 func TestNewAzureServiceBusProvider_SPMode_BadTenant(t *testing.T) {
 	api := &plugintest.API{}
 	api.On("LogError", "Service Bus: service principal credential failed",
@@ -942,14 +934,6 @@ func TestTestAzureServiceBusConnection_BadCloud(t *testing.T) {
 	err := testAzureServiceBusConnection(cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "azure-servicebus config")
-}
-
-func TestTestAzureServiceBusConnection_SPMode_NoSecretSource(t *testing.T) {
-	cfg := validSPServiceBusCfg()
-	cfg.ClientSecret = ""
-	err := testAzureServiceBusConnection(cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "azure-servicebus service principal")
 }
 
 func TestTestAzureServiceBusConnection_SPMode_BadTenant(t *testing.T) {

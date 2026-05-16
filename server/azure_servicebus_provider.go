@@ -126,14 +126,8 @@ func newAzureServiceBusProvider(ctx context.Context, cfg AzureServiceBusProvider
 
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, secErr := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if secErr != nil {
-			return nil, fmt.Errorf("azure-servicebus service principal: %w", secErr)
-		}
 		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if credErr != nil {
 			api.LogError("Service Bus: service principal credential failed",
@@ -141,7 +135,7 @@ func newAzureServiceBusProvider(ctx context.Context, cfg AzureServiceBusProvider
 				"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(credErr))
 			return nil, credErr
 		}
-		logAzureAuthAudit(api, "azure-servicebus", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, secret)
+		logAzureAuthAudit(api, "azure-servicebus", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
 		spCredential = cred
 		// Service Bus has no Cloud option on ClientOptions; the namespace
 		// FQDN already encodes the routing for sovereign clouds.
@@ -544,14 +538,8 @@ func testAzureServiceBusConnection(cfg AzureServiceBusProviderConfig) error {
 	var client *azservicebus.Client
 	switch authMode {
 	case AzureAuthServicePrincipal:
-		secret, secErr := resolveAzureSecret(azureSecretSource{
-			Inline: cfg.ClientSecret, EnvVar: cfg.ClientSecretEnv, FilePath: cfg.ClientSecretFile,
-		})
-		if secErr != nil {
-			return fmt.Errorf("azure-servicebus service principal: %w", secErr)
-		}
 		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
-			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: secret, Cloud: azCloud,
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
 		})
 		if credErr != nil {
 			return credErr

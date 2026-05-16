@@ -146,7 +146,7 @@
                     <li><code>azure_servicebus.blob_poll_interval_seconds</code> (optional) must be at least 1 when set</li>
                 </ul>
                 <h5>Service Principal Auth (all three Azure providers)</h5>
-                <p>When the per-provider <code>auth_mode</code> is <code>service-principal</code>, the request body must additionally include the shared SP fields (<code>tenant_id</code>, <code>client_id</code>, exactly one of <code>client_secret</code>/<code>client_secret_env</code>/<code>client_secret_file</code>, and optionally <code>azure_cloud</code>). See the <a href="admin.html#service-principal">Azure Service Principal Authentication</a> section in the admin guide for the full field reference and minimum RBAC roles. A 400 response is returned when SP validation fails (bad tenant format, missing client_id, zero or multiple secret sources, or cross-mode field leakage).</p>
+                <p>When the per-provider <code>auth_mode</code> is <code>service-principal</code>, the request body must additionally include the shared SP fields (<code>tenant_id</code>, <code>client_id</code>, <code>client_secret</code>, and optionally <code>azure_cloud</code>). See the <a href="admin.html#service-principal">Azure Service Principal Authentication</a> section in the admin guide for the full field reference and minimum RBAC roles. A 400 response is returned when SP validation fails (bad tenant format, missing client_id, missing client_secret, or cross-mode field leakage).</p>
 
                 <h4>Success Response (outbound) - 200</h4>
 <pre><code>{"status": "ok", "message": "Test message sent with ID: abc123", "id": "abc123"}</code></pre>

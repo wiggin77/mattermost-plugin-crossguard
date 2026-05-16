@@ -421,12 +421,12 @@
         <p>This release supports the <strong>Client Secret</strong> flow only. Client certificate auth and Managed Identity are tracked as later phases. From a compliance / threat-model perspective:</p>
         <ul>
             <li><strong>Acceptable for:</strong> development, staging, and production environments paired with a strict secret-rotation policy (90-day maximum). Federal customers using Azure Government with rotation tooling can deploy Phase 1 in production.</li>
-            <li><strong>Not the recommended posture for:</strong> high-side ATO environments where shared-secret material at rest is a finding. For those environments, wait for Phase 2 (certificate auth via Azure Key Vault + CSI driver) or use the <code>client_secret_file</code> indirection described below to keep the secret out of plugin config entirely.</li>
+            <li><strong>Not the recommended posture for:</strong> high-side ATO environments where shared-secret material at rest is a finding. For those environments, wait for Phase 2 (certificate auth via Azure Key Vault + CSI driver) or use the Mattermost env-var substitution mechanism described below to keep the secret out of plugin config entirely.</li>
         </ul>
 
         <h4>Known Exposure: Secret in Plugin Config (Phase 1B Follow-Up)</h4>
         <p>The Mattermost <code>GET /api/v4/config</code> endpoint returns plugin custom-settings as cleartext to any System Admin. This affects <strong>all</strong> Crossguard secret fields (<code>account_key</code>, <code>connection_string</code>, <code>blob_account_key</code>, <code>client_secret</code>): an admin opening the System Console will see the secret value in their browser's network tab and any <code>mmctl config show</code> output will include it. A structural fix that replaces the cleartext with a reference is tracked as Phase 1B.</p>
-        <p><strong>Immediate Federal mitigation:</strong> use <code>client_secret_env</code> or <code>client_secret_file</code> instead of inline <code>client_secret</code>. The secret then lives in an environment variable or a file (typically a Key Vault CSI volume mount) on the Mattermost server and is never written to plugin config or returned to the browser.</p>
+        <p><strong>Immediate Federal mitigation:</strong> inject the entire connections JSON via Mattermost's plugin-settings env-var substitution. Setting <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> (and the inbound counterpart) overrides whatever is stored in plugin config at load time; the value can come from a Kubernetes Secret, a CSI volume + init container, systemd <code>LoadCredential=</code>, or HashiCorp Vault. The credential then lives only in the Mattermost process environment, not in <code>config.json</code> on disk, not in the configuration database, and not in <code>GET /api/v4/config</code> responses. This is the same mechanism Mattermost uses for every other plugin secret.</p>
 
         <h4>Common Service Principal Fields</h4>
         <p>The following fields are shared across all three Azure providers when <code>auth_mode</code> is <code>service-principal</code>:</p>
@@ -461,21 +461,9 @@
                 </tr>
                 <tr>
                     <td><code>client_secret</code></td>
-                    <td>One of three</td>
+                    <td>Yes (SP)</td>
                     <td>String (secret).</td>
-                    <td>Inline client secret value. Mutually exclusive with <code>client_secret_env</code> and <code>client_secret_file</code>; exactly one of the three must be set in SP mode.</td>
-                </tr>
-                <tr>
-                    <td><code>client_secret_env</code></td>
-                    <td>One of three</td>
-                    <td>String (env var name).</td>
-                    <td>Name of an environment variable on the Mattermost server whose value is the client secret. The plugin reads the env var at provider construction time, so rotation works without re-saving plugin config (restart or plugin reload picks up the new value). Recommended for Federal deployments.</td>
-                </tr>
-                <tr>
-                    <td><code>client_secret_file</code></td>
-                    <td>One of three</td>
-                    <td>String (filesystem path).</td>
-                    <td>Path to a file whose contents are the client secret. A single trailing newline is stripped. Typically a CSI volume mount from Azure Key Vault. Recommended for Federal deployments.</td>
+                    <td>Inline client secret value. Required in SP mode. To keep the secret out of plugin config on disk, inject the whole connections JSON via the <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> / <code>INBOUNDCONNECTIONS</code> env var (see Phase 1B mitigation above).</td>
                 </tr>
             </tbody>
         </table>
@@ -524,7 +512,7 @@
         <ul>
             <li><strong>To rotate a secret:</strong> paste the new value into the field and save.</li>
             <li><strong>To leave a secret unchanged:</strong> do nothing &mdash; do not delete the field contents.</li>
-            <li><strong>To clear a stored secret</strong> (for example, when switching from inline <code>client_secret</code> to <code>client_secret_env</code>, or migrating from shared-key to service-principal): clear the field and save. An empty inbound value is honored as an explicit clear.</li>
+            <li><strong>To clear a stored secret</strong> (for example, when migrating from shared-key to service-principal): clear the field and save. An empty inbound value is honored as an explicit clear.</li>
         </ul>
 
         <!-- Validation Rules -->
@@ -543,7 +531,7 @@
             <li>Azure Service Bus connections require <code>queue_name</code>; connection-string mode additionally requires <code>connection_string</code>; service-principal mode additionally requires <code>service_bus_namespace</code></li>
             <li>Azure Service Bus <code>queue_name</code> is capped at 260 characters and allows only <code>A-Z a-z 0-9 . _ - /</code></li>
             <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code> and <code>blob_container_name</code>; in connection-string mode also <code>blob_account_name</code> and <code>blob_account_key</code>; in service-principal mode <code>blob_account_name</code> and <code>blob_account_key</code> must be <strong>empty</strong> (sidecar inherits parent SP)</li>
-            <li>When <code>auth_mode</code> is <code>service-principal</code>: <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and exactly one of (<code>client_secret</code>, <code>client_secret_env</code>, <code>client_secret_file</code>) are required; the corresponding legacy field (<code>account_key</code> / <code>connection_string</code>) must be empty</li>
+            <li>When <code>auth_mode</code> is <code>service-principal</code>: <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and <code>client_secret</code> are required; the corresponding legacy field (<code>account_key</code> / <code>connection_string</code>) must be empty</li>
             <li>When <code>auth_mode</code> is set, <code>azure_cloud</code> must be one of <code>public</code>, <code>usgov</code>, or <code>china</code> when present; empty defaults to <code>public</code></li>
         </ol>
 

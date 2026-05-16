@@ -529,36 +529,18 @@ components:
         client_secret:
           type: string
           description: >
-            Inline client secret value. Mutually exclusive with
-            `client_secret_env` and `client_secret_file`; exactly one
-            must be set when `auth_mode` is `service-principal`. Treat
-            as a secret; never logged or exposed in admin status
-            responses. The webapp form sends the sentinel string
-            `__CROSSGUARD_SECRET_UNCHANGED__` for an unchanged value;
-            the server resolves this back to the stored value before
-            validation. An empty inbound value is honored as an explicit
-            clear so admins can delete a stored secret (e.g., when
-            switching from inline `client_secret` to `client_secret_env`).
-        client_secret_env:
-          type: string
-          description: >
-            Name of an environment variable on the Mattermost server
-            whose value is the client secret. Resolved at provider
-            construction time so rotation works without re-saving
-            plugin config. Recommended for Federal deployments using
-            Azure Key Vault. Mutually exclusive with `client_secret`
-            and `client_secret_file`.
-          examples:
-            - "AZURE_SP_SECRET"
-        client_secret_file:
-          type: string
-          description: >
-            Filesystem path to a file whose contents are the client
-            secret (typically a Key Vault CSI volume mount). A single
-            trailing newline is stripped. Mutually exclusive with
-            `client_secret` and `client_secret_env`.
-          examples:
-            - "/run/secrets/azure-sp-secret"
+            Inline client secret value. Required when `auth_mode` is
+            `service-principal`. Treat as a secret; never logged or
+            exposed in admin status responses. The webapp form sends the
+            sentinel string `__CROSSGUARD_SECRET_UNCHANGED__` for an
+            unchanged value; the server resolves this back to the stored
+            value before validation. An empty inbound value is honored
+            as an explicit clear so admins can delete a stored secret.
+            To keep the secret out of plugin config on disk, inject the
+            whole connections JSON via the
+            `MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS`
+            (or inbound counterpart) env var; Mattermost substitutes
+            plugin settings from env vars at config load.
 
     AzureQueueProviderConfig:
       type: object

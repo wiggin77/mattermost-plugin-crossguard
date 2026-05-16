@@ -952,8 +952,6 @@ test.describe('ConnectionSettings Edge Cases', () => {
                 tenant_id: '',
                 client_id: '',
                 client_secret: '',
-                client_secret_env: '',
-                client_secret_file: '',
             },
         };
 
@@ -1140,12 +1138,12 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await component.locator('input[placeholder="my-connection"]').fill('qft2');
             await component.locator('select').first().selectOption('azure-queue');
             await component.locator('input[placeholder="https://myaccount.queue.core.windows.net"]').fill('https://x.queue.core.windows.net');
-            await component.locator('input[placeholder="https://myaccount.blob.core.windows.net"]').fill('https://x.blob.core.windows.net');
             await component.locator('input[placeholder="myaccount"]').fill('acct');
             await component.locator('input[placeholder="Paste key from Azure portal"]').fill('a2V5');
             await component.locator('input[placeholder="crossguard-messages"]').fill('q2');
             const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
             await fileCheckbox.check();
+            await component.getByLabel('Azure Queue Blob Service URL').fill('https://x.blob.core.windows.net');
             await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
             await expect(component.getByText('Blob Container Name is required when file transfer is enabled.')).toBeVisible();
         });
@@ -1242,8 +1240,6 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await expect(component.getByLabel('Azure Queue Tenant ID')).toBeVisible();
             await expect(component.getByLabel('Azure Queue Client ID')).toBeVisible();
             await expect(component.getByLabel('Azure Queue Client Secret', {exact: true})).toBeVisible();
-            await expect(component.getByLabel('Azure Queue Client Secret Env Var')).toBeVisible();
-            await expect(component.getByLabel('Azure Queue Client Secret File')).toBeVisible();
         });
 
         test('Azure Blob SP toggle reveals SP form fields and hides Account Key', async ({mount}) => {
@@ -1353,7 +1349,7 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await expect(component.getByText('Client ID is required for service-principal auth mode.')).toBeVisible();
         });
 
-        test('SP save with zero secret sources shows secret-source required error', async ({mount}) => {
+        test('SP save with empty Client Secret shows required error', async ({mount}) => {
             const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
             await openBlobForm(component);
             await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
@@ -1362,21 +1358,7 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
             await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
             await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
-            await expect(component.getByText('One of Client Secret, Client Secret Env, or Client Secret File is required.')).toBeVisible();
-        });
-
-        test('SP save with two secret sources shows exactly-one error', async ({mount}) => {
-            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
-            await openBlobForm(component);
-            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
-            await component.getByLabel('Azure Blob Account Name').fill('acct');
-            await component.getByLabel('Azure Blob Container Name').fill('cont');
-            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
-            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
-            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('inline-secret');
-            await component.getByLabel('Azure Blob Client Secret Env Var').fill('AZURE_SP_SECRET');
-            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
-            await expect(component.getByText('Set exactly one of Client Secret, Client Secret Env, or Client Secret File.')).toBeVisible();
+            await expect(component.getByText('Client Secret is required for service-principal auth mode.')).toBeVisible();
         });
 
         test('SP mode with non-empty Account Key in state shows cross-mode leakage error (Blob)', async ({mount}) => {
@@ -1475,7 +1457,7 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
             await component.getByLabel('Azure Blob Auth Mode').selectOption('shared-key');
             await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
-            await expect(component.getByText('Service Principal fields (tenant_id / client_id / client_secret*) must be empty when auth_mode is shared-key.')).toBeVisible();
+            await expect(component.getByText('Service Principal fields (tenant_id / client_id / client_secret) must be empty when auth_mode is shared-key.')).toBeVisible();
         });
 
         test('SP happy path round-trips azure-blob JSON with auth_mode and SP credentials', async ({mount, page}) => {
@@ -1495,8 +1477,8 @@ test.describe('ConnectionSettings Edge Cases', () => {
             expect(saved[0].azure_blob.tenant_id).toBe(VALID_TENANT);
             expect(saved[0].azure_blob.client_id).toBe('client-id-abc');
             expect(saved[0].azure_blob.client_secret).toBe('inline-secret');
-            expect(saved[0].azure_blob.client_secret_env).toBe('');
-            expect(saved[0].azure_blob.client_secret_file).toBe('');
+            expect(saved[0].azure_blob.client_secret_env).toBeUndefined();
+            expect(saved[0].azure_blob.client_secret_file).toBeUndefined();
         });
     });
 });

@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,70 +37,6 @@ func (s stubTokenCredential) GetToken(ctx context.Context, _ policy.TokenRequest
 		return azcore.AccessToken{}, s.err
 	}
 	return azcore.AccessToken{Token: "stub-token", ExpiresOn: time.Now().Add(time.Hour)}, nil
-}
-
-// ----- resolveAzureSecret -----
-
-func TestResolveAzureSecret_Inline(t *testing.T) {
-	got, err := resolveAzureSecret(azureSecretSource{Inline: "topsec"})
-	require.NoError(t, err)
-	assert.Equal(t, "topsec", got)
-}
-
-func TestResolveAzureSecret_EnvVar(t *testing.T) {
-	t.Setenv("CG_TEST_SECRET", "from-env")
-	got, err := resolveAzureSecret(azureSecretSource{EnvVar: "CG_TEST_SECRET"})
-	require.NoError(t, err)
-	assert.Equal(t, "from-env", got)
-}
-
-func TestResolveAzureSecret_EnvVarMissing(t *testing.T) {
-	require.NoError(t, os.Unsetenv("CG_TEST_SECRET_MISSING"))
-	_, err := resolveAzureSecret(azureSecretSource{EnvVar: "CG_TEST_SECRET_MISSING"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not set")
-}
-
-func TestResolveAzureSecret_EnvVarEmpty(t *testing.T) {
-	t.Setenv("CG_TEST_SECRET_EMPTY", "")
-	_, err := resolveAzureSecret(azureSecretSource{EnvVar: "CG_TEST_SECRET_EMPTY"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty")
-}
-
-func TestResolveAzureSecret_File(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secret")
-	require.NoError(t, os.WriteFile(path, []byte("from-file\n"), 0o600))
-	got, err := resolveAzureSecret(azureSecretSource{FilePath: path})
-	require.NoError(t, err)
-	assert.Equal(t, "from-file", got, "trailing newline stripped")
-}
-
-func TestResolveAzureSecret_FileMissing(t *testing.T) {
-	_, err := resolveAzureSecret(azureSecretSource{FilePath: "/nonexistent/secret"})
-	require.Error(t, err)
-}
-
-func TestResolveAzureSecret_FileTooLarge(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "huge")
-	require.NoError(t, os.WriteFile(path, make([]byte, secretSourceMaxFileSize+1), 0o600))
-	_, err := resolveAzureSecret(azureSecretSource{FilePath: path})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "larger than")
-}
-
-func TestResolveAzureSecret_NoSourcesIsError(t *testing.T) {
-	_, err := resolveAzureSecret(azureSecretSource{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no client secret source")
-}
-
-func TestResolveAzureSecret_MultipleSourcesIsError(t *testing.T) {
-	_, err := resolveAzureSecret(azureSecretSource{Inline: "a", EnvVar: "X"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multiple")
 }
 
 // ----- resolveAzureCloud -----
@@ -236,25 +170,6 @@ func TestValidateAzureQueueConnection_TenantID_FQDNAccepted(t *testing.T) {
 	assert.Empty(t, errs, "FQDN tenant_id should be accepted")
 }
 
-func TestValidateAzureQueueConnection_MultipleSecretSourcesIsError(t *testing.T) {
-	conn := ConnectionConfig{
-		Name:     "q",
-		Provider: ProviderAzureQueue,
-		AzureQueue: &AzureQueueProviderConfig{
-			QueueServiceURL: "https://a.queue.core.windows.net",
-			QueueName:       "myqueue",
-			AuthMode:        AzureAuthServicePrincipal,
-			TenantID:        "11111111-2222-3333-4444-555555555555",
-			ClientID:        "c",
-			ClientSecret:    "inline",
-			ClientSecretEnv: "X",
-		},
-	}
-	errs := validateAzureQueueConnection(conn, "test")
-	require.NotEmpty(t, errs)
-	assert.Contains(t, strings.Join(errs, " "), "exactly one")
-}
-
 // ----- validateAzureBlobConnection matrix (mirrors Queue/SB) -----
 
 func TestValidateAzureBlobConnection_SPMode_Valid(t *testing.T) {
@@ -341,25 +256,6 @@ func TestValidateAzureBlobConnection_SPMode_MissingFields(t *testing.T) {
 	assert.Contains(t, joined, "tenant_id is required")
 	assert.Contains(t, joined, "client_id is required")
 	assert.Contains(t, joined, "client_secret")
-}
-
-func TestValidateAzureBlobConnection_MultipleSecretSourcesIsError(t *testing.T) {
-	conn := ConnectionConfig{
-		Name:     "b",
-		Provider: ProviderAzureBlob,
-		AzureBlob: &AzureBlobProviderConfig{
-			ServiceURL:        "https://a.blob.core.windows.net",
-			BlobContainerName: "container",
-			AuthMode:          AzureAuthServicePrincipal,
-			TenantID:          "11111111-2222-3333-4444-555555555555",
-			ClientID:          "c",
-			ClientSecret:      "inline",
-			ClientSecretEnv:   "X",
-		},
-	}
-	errs := validateAzureBlobConnection(conn, "test")
-	require.NotEmpty(t, errs)
-	assert.Contains(t, strings.Join(errs, " "), "exactly one")
 }
 
 func TestValidateAzureServiceBusConnection_SPMode_Valid(t *testing.T) {
@@ -594,19 +490,10 @@ func TestProbeAzureConnectionSP_ServiceBusSPMode_ProbesWithServiceBusScope(t *te
 
 // ----- probeAzureSP error wrapping -----
 
-func TestProbeAzureSP_NoSecretSource_WrappedWithConnName(t *testing.T) {
-	err := probeAzureSP(t.Context(),
-		"11111111-2222-3333-4444-555555555555", "client-uuid",
-		"", "", "", "", azureStorageScope, "my-conn")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `connection "my-conn"`)
-	assert.Contains(t, err.Error(), "no client secret source")
-}
-
 func TestProbeAzureSP_BadCloud_WrappedWithConnName(t *testing.T) {
 	err := probeAzureSP(t.Context(),
-		"11111111-2222-3333-4444-555555555555", "client-uuid",
-		"topsec", "", "", "atlantis", azureStorageScope, "my-conn")
+		"11111111-2222-3333-4444-555555555555", "client-uuid", "topsec",
+		"atlantis", azureStorageScope, "my-conn")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `connection "my-conn"`)
 	assert.Contains(t, err.Error(), "unknown azure_cloud")
@@ -614,8 +501,8 @@ func TestProbeAzureSP_BadCloud_WrappedWithConnName(t *testing.T) {
 
 func TestProbeAzureSP_BadTenant_WrappedWithConnName(t *testing.T) {
 	err := probeAzureSP(t.Context(),
-		"", "client-uuid", // empty tenant_id triggers azidentity error
-		"topsec", "", "", "public", azureStorageScope, "my-conn")
+		"", "client-uuid", "topsec",
+		"public", azureStorageScope, "my-conn") // empty tenant_id triggers azidentity error
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `connection "my-conn"`)
 }
@@ -624,8 +511,8 @@ func TestProbeAzureSP_CancelledContext_ProbeFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := probeAzureSP(ctx,
-		"11111111-2222-3333-4444-555555555555", "client-uuid",
-		"topsec", "", "", "public", azureStorageScope, "my-conn")
+		"11111111-2222-3333-4444-555555555555", "client-uuid", "topsec",
+		"public", azureStorageScope, "my-conn")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `connection "my-conn"`)
 }
