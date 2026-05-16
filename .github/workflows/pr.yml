@@ -116,4 +116,4 @@ jobs:
           docker compose -f docker-compose.dev.yml --profile servicebus logs servicebus-emulator 2>&1 | tail -80 || true
           echo ""
           echo "=== servicebus-mssql container state ==="
-          docker inspect mattermost-plugin-crossguard-servicebus-mssql-1 --format '{{json .State}}' 2>&1 | python3 -m json.tool 2>&1 || true
+          docker inspect mattermost-plugin-crossguard-servicebus-mssql-1 --format '{{json .State}}' 2>&1 | jq . 2>&1 || true

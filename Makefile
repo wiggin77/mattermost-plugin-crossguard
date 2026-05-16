@@ -471,9 +471,9 @@ docker-setup: docker-start
 		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
 		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
 	ADMIN_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/username/admin \
-		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+		-H "Authorization: Bearer $$TOKEN_B" | jq -r .id) && \
 	USERB_ID=$$(curl -sf http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/username/userb \
-		-H "Authorization: Bearer $$TOKEN_B" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])") && \
+		-H "Authorization: Bearer $$TOKEN_B" | jq -r .id) && \
 	ONYX_ESCAPED=$$(echo '{"sidebarBg":"#202228","sidebarText":"#ffffff","sidebarUnreadText":"#ffffff","sidebarTextHoverBg":"#25262a","sidebarTextActiveBorder":"#4a7ce8","sidebarTextActiveColor":"#ffffff","sidebarHeaderBg":"#24272d","sidebarHeaderTextColor":"#ffffff","sidebarTeamBarBg":"#292c33","onlineIndicator":"#3db887","awayIndicator":"#f5ab00","dndIndicator":"#d24b4e","mentionBg":"#4b7ce7","mentionColor":"#ffffff","centerChannelBg":"#191b1f","centerChannelColor":"#e3e4e8","newMessageSeparator":"#1adbdb","linkColor":"#5d89ea","buttonBg":"#4a7ce8","buttonColor":"#ffffff","errorTextColor":"#da6c6e","mentionHighlightBg":"#0d6e6e","mentionHighlightLink":"#a4f4f4","codeTheme":"monokai"}' | sed 's/"/\\"/g') && \
 	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/$$ADMIN_ID/preferences \
 		-H "Authorization: Bearer $$TOKEN_B" -H "Content-Type: application/json" \
@@ -719,7 +719,7 @@ security-gate:
 	@failed=0; \
 	for sarif in dist/codeql-*.sarif; do \
 		[ -f "$$sarif" ] || continue; \
-		count=$$(python3 -c "import json,sys;data=json.load(open(sys.argv[1]));print(sum(1 for run in data.get('runs',[]) for result in run.get('results',[]) if result.get('level')=='error'))" "$$sarif"); \
+		count=$$(jq '[.runs[]?.results[]? | select(.level=="error")] | length' "$$sarif"); \
 		if [ "$$count" -gt 0 ]; then \
 			echo "ERROR: $$sarif contains $$count critical/high severity issue(s)."; \
 			failed=1; \
