@@ -104,6 +104,36 @@ cd webapp && npm run test              # Unit tests
 cd webapp && npm run test:pw-ct        # Playwright component tests
 ```
 
+### Integration Tests
+
+End-to-end integration tests live in `server/integration/` and are gated
+by the `//go:build integration` tag. The tests drive the dual-server
+Docker dev environment over HTTP via the upstream Mattermost Client4
+typed API.
+
+```bash
+make docker-integration-test                 # Full suite (recommended)
+make docker-smoke-test                       # Single-test wrappers
+make docker-azure-smoke-test
+# ...etc; see the Docker Commands table below.
+```
+
+The full-suite target is self-contained: it builds and deploys the
+plugin, brings up the Service Bus emulator, configures the baseline
+connection set, and then runs every Go test in the package. The
+baseline connection definitions live in `build/devbaseline/` (shared
+by the build-time helper `build/configure-baseline/` and the test
+code). Provider tests use dedicated channels and dedicated users
+per-transport so per-transport sync paths (user-sync, membership-sync,
+post-sync, file-sync) are exercised on first contact for each
+transport.
+
+The first test alphabetically, `TestAARemoteWarmup_RegisterPluginPingRace`,
+is a TEMPORARY workaround that sleeps ~130s to absorb an upstream
+framework race in `RegisterPluginForSharedChannels`. Delete that file
+and the four `t.Skip` calls referencing PR #36592 once the upstream
+fixes ship in the dev container image.
+
 ## Architecture
 
 ### Backend Message Flow
@@ -257,11 +287,15 @@ After setup:
 | `make docker-logs` | Follow Server A logs |
 | `make docker-logs-b` | Follow Server B logs |
 | `make docker-reset` | Disable and re-enable plugin on both servers |
-| `make docker-smoke-test` | Quick NATS relay smoke test |
-| `make docker-integration-test` | Full integration suite (loopback, files, XML, Azure) |
-| `make docker-azure-smoke-test` | Run Azure Queue/Blob relay smoke test via Azurite |
-| `make docker-azure-blob-smoke-test` | Run Azure Blob batched (WAL + deferred file) smoke test via Azurite |
-| `make docker-servicebus-smoke-test` | Run Azure Service Bus relay smoke test via the Service Bus emulator (+ SQL Server Linux sidecar). Readiness gated by `servicebus-probe`. |
+| `make docker-integration-test` | Full integration suite: self-contained, builds + deploys plugin, runs every Go test in `server/integration/`. Use this to validate the plugin end-to-end. |
+| `make docker-smoke-test` | Single-test wrapper: `go test -run TestSmoke` |
+| `make docker-post-lifecycle-test` | Single-test wrapper: `go test -run TestPostLifecycle` |
+| `make docker-profile-image-test` | Single-test wrapper: `go test -run TestProfileImage` |
+| `make docker-file-filter-test` | Single-test wrapper: `go test -run TestFileFilter` |
+| `make docker-prompt-test` | Single-test wrapper: `go test -run TestPromptChannel` |
+| `make docker-azure-smoke-test` | Single-test wrapper: `go test -run TestAzureQueue` |
+| `make docker-azure-blob-smoke-test` | Single-test wrapper: `go test -run TestAzureBlob` |
+| `make docker-servicebus-smoke-test` | Single-test wrapper: `go test -run TestServiceBus`. Service Bus emulator readiness gated by `servicebus-probe`. |
 | `make docker-disable` | Disable plugin on both servers |
 | `make docker-enable` | Enable plugin on both servers |
 | `make docker-plugin-list` | List installed plugins on both servers |

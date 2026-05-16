@@ -44,9 +44,9 @@ After `make docker-setup`:
 - **NATS**: `nats://localhost:4222` (monitor: http://localhost:8222)
 - **Azurite Queue**: `http://localhost:10001`
 - **Azurite Blob**: `http://localhost:10000`
-- **Service Bus emulator (AMQP)**: `sb://localhost:5672` (opt-in, started via `make docker-servicebus-smoke-test`)
+- **Service Bus emulator (AMQP)**: `sb://localhost:5672` (opt-in, started via `make docker-servicebus-smoke-test` or as a dependency of `make docker-integration-test`)
 
-`make deploy` automatically configures Server A with an outbound connection and Server B with an inbound connection, then runs a quick NATS smoke test. Use `make docker-integration-test` for the full test suite (loopback, file relay, XML, Azure Queue, Azure Blob, Azure Service Bus).
+`make deploy` builds the plugin, deploys it to both servers, configures the baseline connection set (NATS + Azure Queue + Azure Blob + Service Bus), then runs a quick smoke test. Use `make docker-integration-test` for the full Go test suite (smoke, post lifecycle, profile image, file filter, prompt accept/block, rewrite team, XML format, and all four transport providers).
 
 ### Transport Providers
 
@@ -127,11 +127,15 @@ Typical workflow: `init-team <connection-name>` first, then `init-channel <conne
 | `make docker-disable` | Disable plugin on both servers |
 | `make docker-enable` | Enable plugin on both servers |
 | `make docker-plugin-list` | List installed plugins on both servers |
-| `make docker-smoke-test` | Quick NATS relay smoke test (single low-to-high message) |
-| `make docker-integration-test` | Full integration suite (loopback, files, XML, Azure Queue, Azure Blob, Azure Service Bus) |
-| `make docker-azure-smoke-test` | Run Azure Queue/Blob relay smoke test via Azurite |
-| `make docker-azure-blob-smoke-test` | Run Azure Blob batched (WAL + deferred file) smoke test via Azurite |
-| `make docker-servicebus-smoke-test` | Run Azure Service Bus relay smoke test via the Service Bus emulator (starts the emulator + SQL Server sidecar on demand) |
+| `make docker-integration-test` | Full Go integration suite (smoke, post lifecycle, profile image, file filter, prompt accept/block, rewrite team, XML, Azure Queue, Azure Blob, Azure Service Bus). Self-contained: builds + deploys plugin and brings up the SB emulator. |
+| `make docker-smoke-test` | Single-test wrapper: `go test -run TestSmoke` |
+| `make docker-post-lifecycle-test` | Single-test wrapper: `go test -run TestPostLifecycle` |
+| `make docker-profile-image-test` | Single-test wrapper: `go test -run TestProfileImage` |
+| `make docker-file-filter-test` | Single-test wrapper: `go test -run TestFileFilter` |
+| `make docker-prompt-test` | Single-test wrapper: `go test -run TestPromptChannel` |
+| `make docker-azure-smoke-test` | Single-test wrapper: `go test -run TestAzureQueue` |
+| `make docker-azure-blob-smoke-test` | Single-test wrapper: `go test -run TestAzureBlob` |
+| `make docker-servicebus-smoke-test` | Single-test wrapper: `go test -run TestServiceBus` (also brings up the Service Bus emulator) |
 | `make docker-kill-orphans` | Kill orphaned containers on MM ports |
 
 ### Release

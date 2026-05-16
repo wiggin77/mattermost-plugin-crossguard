@@ -28,9 +28,9 @@ import (
 // We log only to local stdout, but avoid leaking secrets when the probe is
 // wired into CI or shared consoles.
 var (
-	probeSharedAccessKey       = regexp.MustCompile(`(?i)SharedAccessKey=[^;\s]+`)
-	probeSharedAccessSig       = regexp.MustCompile(`(?i)SharedAccessSignature=[^;\s]+`)
-	probeSigQuery              = regexp.MustCompile(`(?i)([?&])sig=[^&\s]+`)
+	probeSharedAccessKey = regexp.MustCompile(`(?i)SharedAccessKey=[^;\s]+`)
+	probeSharedAccessSig = regexp.MustCompile(`(?i)SharedAccessSignature=[^;\s]+`)
+	probeSigQuery        = regexp.MustCompile(`(?i)([?&])sig=[^&\s]+`)
 )
 
 func sanitize(err error) string {
@@ -56,22 +56,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *deadline)
+	if err := run(*connStr, *queue, *deadline, *interval); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+// run drives the probe loop and returns an error on timeout. Keeping
+// os.Exit at the top of main() and `defer cancel()` inside run() lets
+// the deferred cancel actually fire, which gocritic's exitAfterDefer
+// check enforces.
+func run(connStr, queue string, deadline, interval time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
 	for {
-		if err := probeOnce(ctx, *connStr, *queue); err == nil {
-			log.Printf("servicebus-probe: emulator is ready (queue=%q)", *queue)
-			return
+		if err := probeOnce(ctx, connStr, queue); err == nil {
+			log.Printf("servicebus-probe: emulator is ready (queue=%q)", queue)
+			return nil
 		} else {
 			log.Printf("servicebus-probe: not ready yet: %s", sanitize(err))
 		}
 
 		select {
 		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "servicebus-probe: deadline reached without a successful peek\n")
-			os.Exit(1)
-		case <-time.After(*interval):
+			return fmt.Errorf("servicebus-probe: deadline reached without a successful peek")
+		case <-time.After(interval):
 		}
 	}
 }
