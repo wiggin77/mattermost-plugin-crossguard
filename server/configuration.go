@@ -287,12 +287,9 @@ type AzureBlobProviderConfig struct {
 	AzureCloud string `json:"azure_cloud,omitempty"`
 
 	// Service Principal fields (required when AuthMode == "service-principal").
-	// Exactly one of ClientSecret, ClientSecretEnv, ClientSecretFile must be set.
-	TenantID         string `json:"tenant_id,omitempty"`
-	ClientID         string `json:"client_id,omitempty"`
-	ClientSecret     string `json:"client_secret,omitempty"`
-	ClientSecretEnv  string `json:"client_secret_env,omitempty"`
-	ClientSecretFile string `json:"client_secret_file,omitempty"`
+	TenantID     string `json:"tenant_id,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ClientSecret string `json:"client_secret,omitempty"`
 }
 
 func isFileAllowed(filename, filterMode, filterTypes string) bool {
@@ -772,24 +769,30 @@ func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []s
 		if strings.TrimSpace(sb.BlobContainerName) == "" {
 			errs = append(errs, fmt.Sprintf("%s: blob_container_name is required when file_transfer_enabled is true", prefix))
 		}
-		// Blob sidecar credential model depends on the parent auth_mode:
-		// - connection-string: independent shared-key (blob_account_name + blob_account_key required)
-		// - service-principal: inherits parent SP (blob_account_name + blob_account_key must be EMPTY)
-		switch authMode {
-		case "", AzureAuthConnectionString:
+		// connection-string mode requires an independent blob shared-key
+		// credential when file transfer is on. SP mode inherits the parent
+		// SP credential, so the blob_account_* fields are forbidden in SP
+		// mode regardless of file_transfer_enabled (see the SP block below).
+		if authMode == "" || authMode == AzureAuthConnectionString {
 			if strings.TrimSpace(sb.BlobAccountName) == "" {
 				errs = append(errs, fmt.Sprintf("%s: blob_account_name is required when file_transfer_enabled is true", prefix))
 			}
 			if strings.TrimSpace(sb.BlobAccountKey) == "" {
 				errs = append(errs, fmt.Sprintf("%s: blob_account_key is required when file_transfer_enabled is true", prefix))
 			}
-		case AzureAuthServicePrincipal:
-			if strings.TrimSpace(sb.BlobAccountName) != "" {
-				errs = append(errs, fmt.Sprintf("%s: blob_account_name must be empty when auth_mode is service-principal (sidecar inherits parent SP credential)", prefix))
-			}
-			if strings.TrimSpace(sb.BlobAccountKey) != "" {
-				errs = append(errs, fmt.Sprintf("%s: blob_account_key must be empty when auth_mode is service-principal (sidecar inherits parent SP credential)", prefix))
-			}
+		}
+	}
+
+	// SP-mode forbid check for the blob sidecar shared-key fields applies
+	// even when file_transfer_enabled is false. Otherwise an admin who
+	// switches off file transfer leaves stale BlobAccountKey material in
+	// stored config (the sentinel-merge path would even rehydrate it).
+	if authMode == AzureAuthServicePrincipal {
+		if strings.TrimSpace(sb.BlobAccountName) != "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_account_name must be empty when auth_mode is service-principal (sidecar inherits parent SP credential)", prefix))
+		}
+		if strings.TrimSpace(sb.BlobAccountKey) != "" {
+			errs = append(errs, fmt.Sprintf("%s: blob_account_key must be empty when auth_mode is service-principal (sidecar inherits parent SP credential)", prefix))
 		}
 	}
 

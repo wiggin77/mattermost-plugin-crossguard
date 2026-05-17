@@ -228,10 +228,7 @@ const (
 	AzureBlobFileDeleteFailed              = 18048
 
 	// Service Principal auth (Phase 1).
-	AzureBlobSPCredentialFailed    = 18049 // azidentity NewClientSecretCredential failed
-	AzureBlobSPProbeFailed         = 18050 // save-time GetToken probe failed
-	AzureBlobAuthzMismatchOnCreate = 18051 // 403 AuthorizationPermissionMismatch distinguished from 409 AlreadyExists
-	AzureBlobResourceNotFound      = 18052 // first-use 404; queue/container must be pre-provisioned in SP mode
+	AzureBlobSPCredentialFailed = 18049 // azidentity NewClientSecretCredential failed
 )
 
 // azure_provider.go (19000-19999)
@@ -248,10 +245,7 @@ const (
 	AzureQueueBlobDeleteFailed    = 19009
 
 	// Service Principal auth (Phase 1).
-	AzureQueueSPCredentialFailed    = 19010 // azidentity NewClientSecretCredential failed
-	AzureQueueSPProbeFailed         = 19011 // save-time GetToken probe failed
-	AzureQueueAuthzMismatchOnCreate = 19012 // 403 distinguished from 409 AlreadyExists
-	AzureQueueResourceNotFound      = 19013 // first-use 404; resource must be pre-provisioned in SP mode
+	AzureQueueSPCredentialFailed = 19010 // azidentity NewClientSecretCredential failed
 )
 
 // nats_provider.go (20000-20999)
@@ -351,8 +345,6 @@ const (
 
 	// Service Principal auth (Phase 1).
 	ServiceBusSPCredentialFailed = 26007 // azidentity NewClientSecretCredential failed
-	ServiceBusSPProbeFailed      = 26008 // save-time GetToken probe failed
-	ServiceBusResourceNotFound   = 26009 // first-use 404; queue/container must be pre-provisioned in SP mode
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -548,9 +540,6 @@ var AllCodes = []int{
 	AzureBlobFileHandlerError,
 	AzureBlobFileDeleteFailed,
 	AzureBlobSPCredentialFailed,
-	AzureBlobSPProbeFailed,
-	AzureBlobAuthzMismatchOnCreate,
-	AzureBlobResourceNotFound,
 
 	AzureQueueCreateQueueFailed,
 	AzureQueueCreateContainerFail,
@@ -563,9 +552,6 @@ var AllCodes = []int{
 	AzureQueueBlobHandlerError,
 	AzureQueueBlobDeleteFailed,
 	AzureQueueSPCredentialFailed,
-	AzureQueueSPProbeFailed,
-	AzureQueueAuthzMismatchOnCreate,
-	AzureQueueResourceNotFound,
 
 	NATSDownloadFileFailed,
 	NATSFileHandlerError,
@@ -643,6 +629,4 @@ var AllCodes = []int{
 	ServiceBusMalformedBody,
 	APIAzureServiceBusTestFailed,
 	ServiceBusSPCredentialFailed,
-	ServiceBusSPProbeFailed,
-	ServiceBusResourceNotFound,
 }

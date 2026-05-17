@@ -213,7 +213,12 @@ function validateAzureAuthFields(
     },
     legacyMode: 'shared-key' | 'connection-string',
 ): string | null {
-    const mode = (cfg.auth_mode || legacyMode) as string;
+    // Mirror the server's normalizeAzureAuthMode (trim + lowercase). A
+    // hand-edited config with "Service-Principal" would otherwise fall
+    // through to the "Invalid auth_mode" branch even though the server
+    // accepts it.
+    const rawMode = (cfg.auth_mode || legacyMode).trim().toLowerCase();
+    const mode = rawMode || legacyMode;
 
     if (mode === legacyMode) {
         if (legacyMode === 'shared-key') {
@@ -259,8 +264,17 @@ function validateAzureAuthFields(
             return 'Connection String must be empty when auth_mode is service-principal.';
         }
         if (legacyMode === 'connection-string') {
-            if (!cfg.service_bus_namespace || !cfg.service_bus_namespace.trim()) {
+            const ns = (cfg.service_bus_namespace || '').trim();
+            if (!ns) {
                 return 'Service Bus Namespace is required for service-principal auth mode (e.g. myns.servicebus.windows.net).';
+            }
+
+            // Mirror server-side validateServiceBusNamespace: strip sb:// and
+            // trailing /, then require FQDN-shape (dot, no whitespace, no path,
+            // no other scheme).
+            const stripped = ns.replace(/^sb:\/\//i, '').replace(/\/$/, '');
+            if (!stripped.includes('.') || (/[\s/\\]/).test(stripped) || stripped.includes('://')) {
+                return 'Service Bus Namespace must be a fully-qualified namespace (e.g. myns.servicebus.windows.net).';
             }
         }
         return null;
@@ -840,6 +854,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 nats: {...nats, subject: trimmedSubject},
                 azure_queue: undefined,
                 azure_blob: undefined,
+                azure_servicebus: undefined,
             };
         } else if (editForm.provider === 'azure-queue') {
             const azureQueue = editForm.azure_queue || emptyAzureQueueConfig;

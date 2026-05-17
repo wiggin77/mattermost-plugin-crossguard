@@ -116,7 +116,7 @@
                     <td><strong>Name</strong></td>
                     <td><code>name</code></td>
                     <td>Yes</td>
-                    <td>Lowercase letters, numbers, and hyphens only. Pattern: <code>^[a-z0-9]+(-[a-z0-9]+)*$</code>. Must be unique across ALL connections.</td>
+                    <td>Lowercase letters, numbers, and hyphens only. Pattern: <code>^[a-z0-9]+(-[a-z0-9]+)*$</code>. Must be unique within its direction (inbound or outbound). The same name may appear in both an inbound and an outbound entry, which is the loopback configuration.</td>
                     <td>Human-readable identifier. Used in all commands and API calls. Examples: <code>relay-to-b</code>, <code>high-side</code>, <code>nats-prod</code></td>
                 </tr>
                 <tr>
@@ -493,7 +493,7 @@
         <p><strong>Owner-tier roles are NOT required.</strong> If you see startup errors about <code>AuthorizationPermissionMismatch</code> on a Create call, double-check that the queue/container has been pre-provisioned and that the SP has the correct data-plane role.</p>
 
         <h4>Service Bus Blob Sidecar Credential Inheritance (SP Mode)</h4>
-        <p>When Azure Service Bus is in SP mode and file transfer is enabled, the blob sidecar <strong>inherits the parent SP credential</strong>: do NOT set <code>blob_account_name</code> or <code>blob_account_key</code> &mdash; validation rejects the save if you do. Provide only <code>blob_service_url</code> and <code>blob_container_name</code>. This means the same Service Principal must have the appropriate roles on both the Service Bus namespace and the blob storage account. Mixed-credential deployments (one SP for AMQP, a different SP or shared key for blob) are deferred to Phase 2.</p>
+        <p>When Azure Service Bus is in SP mode the blob sidecar <strong>inherits the parent SP credential</strong>: do NOT set <code>blob_account_name</code> or <code>blob_account_key</code>, validation rejects the save if you do. This empty-fields rule applies unconditionally in SP mode, even when <code>file_transfer_enabled</code> is false, so a stored shared-key cannot linger across a file-transfer toggle. When file transfer is enabled, provide <code>blob_service_url</code> and <code>blob_container_name</code>. The same Service Principal must have the appropriate roles on both the Service Bus namespace and the blob storage account. Mixed-credential deployments (one SP for AMQP, a different SP or shared key for blob) are deferred to Phase 2.</p>
 
         <h4>Azure Government (Sovereign Cloud) Setup</h4>
         <p>To configure a connection for Azure US Government:</p>
@@ -518,7 +518,7 @@
         <!-- Validation Rules -->
         <h3>Validation Rules Summary</h3>
         <ol>
-            <li>Names must be globally unique across inbound AND outbound connections</li>
+            <li>Names must be unique within each direction (inbound or outbound). The same bare name may appear in both lists, which is the loopback configuration where one server is both publishing and subscribing on the same transport</li>
             <li>Names must be lowercase alphanumeric with hyphens (no spaces, underscores, uppercase)</li>
             <li>Subject must always start with <code>crossguard.</code></li>
             <li>Both sides of a relay must use the same NATS subject</li>
@@ -530,7 +530,7 @@
             <li>Azure Blob <code>flush_interval_seconds</code> must be at least 5 when set; <code>blob_lock_max_age_seconds</code> must be at least 30 when set</li>
             <li>Azure Service Bus connections require <code>queue_name</code>; connection-string mode additionally requires <code>connection_string</code>; service-principal mode additionally requires <code>service_bus_namespace</code></li>
             <li>Azure Service Bus <code>queue_name</code> is capped at 260 characters and allows only <code>A-Z a-z 0-9 . _ - /</code></li>
-            <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code> and <code>blob_container_name</code>; in connection-string mode also <code>blob_account_name</code> and <code>blob_account_key</code>; in service-principal mode <code>blob_account_name</code> and <code>blob_account_key</code> must be <strong>empty</strong> (sidecar inherits parent SP)</li>
+            <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code> and <code>blob_container_name</code>; in connection-string mode also <code>blob_account_name</code> and <code>blob_account_key</code>. In service-principal mode <code>blob_account_name</code> and <code>blob_account_key</code> must be <strong>empty</strong> (sidecar inherits parent SP); this empty-fields rule applies unconditionally in SP mode, including when file transfer is disabled, so stale shared-key material cannot survive a file-transfer toggle</li>
             <li>When <code>auth_mode</code> is <code>service-principal</code>: <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and <code>client_secret</code> are required; the corresponding legacy field (<code>account_key</code> / <code>connection_string</code>) must be empty</li>
             <li>When <code>auth_mode</code> is set, <code>azure_cloud</code> must be one of <code>public</code>, <code>usgov</code>, or <code>china</code> when present; empty defaults to <code>public</code></li>
         </ol>

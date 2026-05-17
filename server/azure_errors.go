@@ -137,13 +137,21 @@ var (
 	sanitizeSharedAccessKey = regexp.MustCompile(`(?i)SharedAccessKey=[^;\s]+`)
 	sanitizeSharedAccessSig = regexp.MustCompile(`(?i)SharedAccessSignature=[^;\s]+`)
 	sanitizeSigQuery        = regexp.MustCompile(`(?i)([?&])sig=[^&\s]+`)
+	// User-delegation SAS object/tenant identifiers (signedoid / signedtid
+	// in the canonical form; skoid / sktid in the URL-encoded form). These
+	// are not secrets in the SAS-signature sense but pivot to tenant
+	// enumeration, and AAD object IDs are PII-adjacent. Redact for the
+	// same defense-in-depth reasons as the other SAS params.
+	sanitizeSASOid = regexp.MustCompile(`(?i)([?&])(skoid|sktid|signedoid|signedtid)=[^&\s]+`)
 
 	// OAuth2 client-credentials form body. The azidentity SDK posts
 	// `client_id=...&client_secret=...` to the AAD token endpoint; on
 	// transport-layer failures (TLS, DNS, 5xx) the buffered request body
 	// can appear inside the wrapped error.
-	sanitizeClientSecret = regexp.MustCompile(`(?i)client_secret=[^&\s"]+`)
-	sanitizeAssertion    = regexp.MustCompile(`(?i)assertion=[^&\s"]+`)
+	sanitizeClientSecret    = regexp.MustCompile(`(?i)client_secret=[^&\s"]+`)
+	sanitizeAssertion       = regexp.MustCompile(`(?i)\bassertion=[^&\s"]+`)
+	sanitizeClientAssertion = regexp.MustCompile(`(?i)client_assertion=[^&\s"]+`)
+	sanitizePasswordForm    = regexp.MustCompile(`(?i)\bpassword=[^&\s"]+`)
 
 	// AAD bearer tokens (B64-encoded JWT or opaque) carried in
 	// Authorization headers or echoed in error context.
@@ -153,6 +161,7 @@ var (
 	// echoed.
 	sanitizeAccessTokenJSON  = regexp.MustCompile(`"access_token"\s*:\s*"[^"]*"`)
 	sanitizeRefreshTokenJSON = regexp.MustCompile(`"refresh_token"\s*:\s*"[^"]*"`)
+	sanitizeIDTokenJSON      = regexp.MustCompile(`"id_token"\s*:\s*"[^"]*"`)
 )
 
 // sanitizeAzureError returns a safe-to-log rendering of an Azure SDK error.
@@ -176,10 +185,14 @@ func sanitizeAzureString(s string) string {
 	s = sanitizeSharedAccessKey.ReplaceAllString(s, "SharedAccessKey=REDACTED")
 	s = sanitizeSharedAccessSig.ReplaceAllString(s, "SharedAccessSignature=REDACTED")
 	s = sanitizeSigQuery.ReplaceAllString(s, "${1}sig=REDACTED")
+	s = sanitizeSASOid.ReplaceAllString(s, "${1}${2}=REDACTED")
+	s = sanitizeClientAssertion.ReplaceAllString(s, "client_assertion=REDACTED")
 	s = sanitizeClientSecret.ReplaceAllString(s, "client_secret=REDACTED")
 	s = sanitizeAssertion.ReplaceAllString(s, "assertion=REDACTED")
+	s = sanitizePasswordForm.ReplaceAllString(s, "password=REDACTED")
 	s = sanitizeBearer.ReplaceAllString(s, "Bearer REDACTED")
 	s = sanitizeAccessTokenJSON.ReplaceAllString(s, `"access_token":"REDACTED"`)
 	s = sanitizeRefreshTokenJSON.ReplaceAllString(s, `"refresh_token":"REDACTED"`)
+	s = sanitizeIDTokenJSON.ReplaceAllString(s, `"id_token":"REDACTED"`)
 	return s
 }
