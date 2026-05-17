@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -300,23 +301,62 @@ type azureBlobProvider struct {
 // newAzureBlobProvider constructs an azure-blob provider. If isOutbound is
 // true, the provider immediately runs WAL crash recovery and starts the flush
 // loop using the supplied ctx (which should be the plugin lifetime context).
+//
+// In service-principal auth_mode the container auto-create call is skipped:
+// the operator is expected to pre-provision the container so the SP can
+// run with data-plane-only RBAC (Storage Blob Data Contributor).
 func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, getFile getFileFunc, isOutbound bool) (*azureBlobProvider, error) {
-	cred, err := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Blob shared key credential: %w", err)
+		return nil, fmt.Errorf("azure-blob config: %w", err)
 	}
-	containerClient, err := container.NewClientWithSharedKeyCredential(buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName), cred, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Blob container client: %w", err)
+
+	containerURL := buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			api.LogError("Azure Blob: service principal credential failed",
+				"error_code", errcode.AzureBlobSPCredentialFailed,
+				"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(credErr))
+			return nil, credErr
+		}
+		logAzureAuthAudit(api, "azure-blob", cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClient(containerURL, cred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("azure-blob NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		cred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return nil, fmt.Errorf("azure-blob shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClientWithSharedKeyCredential(containerURL, cred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("azure-blob NewClientWithSharedKeyCredential: %s", sanitizeAzureError(err))
+		}
+	default:
+		return nil, fmt.Errorf("azure-blob: unknown auth_mode %q", authMode)
 	}
 
 	ops := &containerClientAdapter{client: containerClient}
 
-	// Ensure container exists (idempotent). Retry with exponential backoff on
-	// transient errors so a brief Azure blip at plugin activation does not
-	// prevent startup.
-	if err := ensureContainerWithRetry(ctx, ops, api, cfg.BlobContainerName); err != nil {
-		return nil, err
+	// In SP mode the container must be pre-provisioned (data-plane-only RBAC
+	// cannot create containers). Skip the ensure-exists probe entirely.
+	if authMode != AzureAuthServicePrincipal {
+		// Ensure container exists (idempotent). Retry with exponential backoff on
+		// transient errors so a brief Azure blip at plugin activation does not
+		// prevent startup.
+		if err := ensureContainerWithRetry(ctx, ops, api, cfg.BlobContainerName); err != nil {
+			return nil, err
+		}
 	}
 
 	return newAzureBlobProviderFromOps(ctx, cfg, api, kv, nodeID, connName, getFile, isOutbound, ops)
@@ -344,7 +384,7 @@ func ensureContainerWithRetry(ctx context.Context, ops azureBlobOps, api plugin.
 		delay := containerCreateRetryBase << attempt
 		api.LogWarn("Azure Blob: transient container create error, retrying",
 			"error_code", errcode.AzureBlobContainerCreateRetry,
-			"container", containerName, "attempt", attempt+1, "delay", delay.String(), "error", err.Error())
+			"container", containerName, "attempt", attempt+1, "delay", delay.String(), "error", sanitizeAzureError(err))
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
@@ -532,7 +572,7 @@ func (a *azureBlobProvider) QueueFileRef(postID, fileID, filename string) {
 	if err != nil {
 		a.api.LogWarn("Azure Blob: failed to marshal pending files",
 			"error_code", errcode.AzureBlobMarshalPendingFailed,
-			"error", err.Error())
+			"error", sanitizeAzureError(err))
 		return
 	}
 	a.companionMu.Lock()
@@ -540,7 +580,7 @@ func (a *azureBlobProvider) QueueFileRef(postID, fileID, filename string) {
 	if err := os.WriteFile(companion, data, 0o600); err != nil {
 		a.api.LogError("Azure Blob: failed to write companion files.json",
 			"error_code", errcode.AzureBlobWriteCompanionFailed,
-			"path", companion, "error", err.Error())
+			"path", companion, "error", sanitizeAzureError(err))
 	}
 }
 
@@ -616,12 +656,12 @@ func (a *azureBlobProvider) flush(ctx context.Context) {
 		if err := oldFile.Sync(); err != nil {
 			a.api.LogWarn("Azure Blob: WAL fsync failed during rotation",
 				"error_code", errcode.AzureBlobWALFsyncRotationFailed,
-				"path", oldWALPath, "error", err.Error())
+				"path", oldWALPath, "error", sanitizeAzureError(err))
 		}
 		if err := oldFile.Close(); err != nil {
 			a.api.LogError("Azure Blob: WAL close failed during rotation, skipping upload",
 				"error_code", errcode.AzureBlobWALCloseRotationFailed,
-				"path", oldWALPath, "error", err.Error())
+				"path", oldWALPath, "error", sanitizeAzureError(err))
 			oldWALPath = ""
 		}
 	}
@@ -631,13 +671,13 @@ func (a *azureBlobProvider) flush(ctx context.Context) {
 		if err := a.uploadWALFile(ctx, oldWALPath); err != nil {
 			a.api.LogError("Azure Blob: WAL upload failed, leaving for recovery",
 				"error_code", errcode.AzureBlobWALUploadFailed,
-				"path", oldWALPath, "error", err.Error())
+				"path", oldWALPath, "error", sanitizeAzureError(err))
 			return
 		}
 		if err := os.Remove(oldWALPath); err != nil && !os.IsNotExist(err) {
 			a.api.LogWarn("Azure Blob: failed to delete WAL after upload",
 				"error_code", errcode.AzureBlobDeleteWALFailed,
-				"path", oldWALPath, "error", err.Error())
+				"path", oldWALPath, "error", sanitizeAzureError(err))
 		}
 	}
 
@@ -671,7 +711,7 @@ func (a *azureBlobProvider) flush(ctx context.Context) {
 			if err := os.Remove(companion); err != nil && !os.IsNotExist(err) {
 				a.api.LogWarn("Azure Blob: failed to delete companion files.json",
 					"error_code", errcode.AzureBlobDeleteCompanionFailed,
-					"path", companion, "error", err.Error())
+					"path", companion, "error", sanitizeAzureError(err))
 			}
 		}
 		a.companionMu.Unlock()
@@ -713,7 +753,7 @@ func (a *azureBlobProvider) flushPendingFilesList(ctx context.Context, refs []pe
 		if err != nil {
 			a.api.LogError("Azure Blob: deferred file fetch failed",
 				"error_code", errcode.AzureBlobDeferredFileFetchFailed,
-				"file_id", ref.FileID, "post_id", ref.PostID, "error", err.Error())
+				"file_id", ref.FileID, "post_id", ref.PostID, "error", sanitizeAzureError(err))
 			continue
 		}
 		key := ref.PostID + "/" + ref.FileID
@@ -725,7 +765,7 @@ func (a *azureBlobProvider) flushPendingFilesList(ctx context.Context, refs []pe
 		if err := a.UploadFile(ctx, key, data, headers); err != nil {
 			a.api.LogError("Azure Blob: deferred file upload failed",
 				"error_code", errcode.AzureBlobDeferredFileUploadFailed,
-				"file_id", ref.FileID, "post_id", ref.PostID, "error", err.Error())
+				"file_id", ref.FileID, "post_id", ref.PostID, "error", sanitizeAzureError(err))
 			failed = append(failed, ref)
 		}
 	}
@@ -756,13 +796,13 @@ func (a *azureBlobProvider) persistShutdownResidue() {
 	if err != nil {
 		a.api.LogError("Azure Blob: shutdown: failed to marshal residual pending files",
 			"error_code", errcode.AzureBlobShutdownMarshalResidualFailed,
-			"count", len(refs), "error", err.Error())
+			"count", len(refs), "error", sanitizeAzureError(err))
 		return
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		a.api.LogError("Azure Blob: shutdown: failed to persist residual pending files",
 			"error_code", errcode.AzureBlobShutdownPersistResidualFailed,
-			"count", len(refs), "path", path, "error", err.Error())
+			"count", len(refs), "path", path, "error", sanitizeAzureError(err))
 		return
 	}
 	a.api.LogWarn("Azure Blob: shutdown persisted residual pending files for recovery",
@@ -820,7 +860,7 @@ func (a *azureBlobProvider) pollBlobs(ctx context.Context) {
 			}
 			a.api.LogError("Azure Blob: list failed",
 				"error_code", errcode.AzureBlobListFailed,
-				"container", a.cfg.BlobContainerName, "error", err.Error())
+				"container", a.cfg.BlobContainerName, "error", sanitizeAzureError(err))
 			backoff = nextListBackoff(backoff, a.batchPoll)
 			continue
 		}
@@ -868,7 +908,7 @@ func (a *azureBlobProvider) processBlob(ctx context.Context, blobName string) {
 		if err := a.containerClient.DeleteBlob(ctx, blobName); err != nil {
 			a.api.LogWarn("Azure Blob: delete retry failed (marker present)",
 				"error_code", errcode.AzureBlobDeleteRetryFailed,
-				"blob", blobName, "error", err.Error())
+				"blob", blobName, "error", sanitizeAzureError(err))
 			return
 		}
 		a.clearBlobProcessed(blobName)
@@ -881,7 +921,7 @@ func (a *azureBlobProvider) processBlob(ctx context.Context, blobName string) {
 	if err != nil {
 		a.api.LogWarn("Azure Blob: download failed",
 			"error_code", errcode.AzureBlobDownloadFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return
 	}
 
@@ -892,7 +932,7 @@ func (a *azureBlobProvider) processBlob(ctx context.Context, blobName string) {
 		if err := a.handler(line); err != nil {
 			a.api.LogWarn("Azure Blob: handler error, will retry blob",
 				"error_code", errcode.AzureBlobHandlerError,
-				"blob", blobName, "error", err.Error())
+				"blob", blobName, "error", sanitizeAzureError(err))
 			return
 		}
 	}
@@ -904,7 +944,7 @@ func (a *azureBlobProvider) processBlob(ctx context.Context, blobName string) {
 	if err := a.containerClient.DeleteBlob(ctx, blobName); err != nil {
 		a.api.LogWarn("Azure Blob: delete failed",
 			"error_code", errcode.AzureBlobDeleteFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return
 	}
 
@@ -924,7 +964,7 @@ func (a *azureBlobProvider) markBlobProcessed(blobName string) {
 	if _, err := a.kv.Set(key, []byte{1}, pluginapi.SetExpiry(time.Duration(blobProcessedMarkerTTLSeconds)*time.Second)); err != nil {
 		a.api.LogWarn("Azure Blob: failed to write processed marker",
 			"error_code", errcode.AzureBlobWriteProcessedMarkerFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 	}
 }
 
@@ -940,7 +980,7 @@ func (a *azureBlobProvider) clearBlobProcessed(blobName string) {
 	if err := a.kv.Delete(blobProcessedKey(blobName)); err != nil {
 		a.api.LogWarn("Azure Blob: failed to clear processed marker",
 			"error_code", errcode.AzureBlobClearProcessedMarkerFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 	}
 }
 
@@ -955,7 +995,7 @@ func (a *azureBlobProvider) tryAcquireBlobLock(blobName string) bool {
 	if err := a.kv.Get(key, &raw); err != nil {
 		a.api.LogWarn("Azure Blob: lock get failed",
 			"error_code", errcode.AzureBlobLockGetFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return false
 	}
 
@@ -963,7 +1003,7 @@ func (a *azureBlobProvider) tryAcquireBlobLock(blobName string) bool {
 	if err != nil {
 		a.api.LogWarn("Azure Blob: lock token generation failed",
 			"error_code", errcode.AzureBlobLockTokenGenFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return false
 	}
 	newLock := blobLock{Node: a.nodeID, Acquired: time.Now().UnixMilli(), Token: token}
@@ -1007,7 +1047,7 @@ func (a *azureBlobProvider) tryAcquireBlobLock(blobName string) bool {
 	if err != nil {
 		a.api.LogWarn("Azure Blob: stale lock reclaim failed",
 			"error_code", errcode.AzureBlobStaleLockReclaimFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return false
 	}
 	if ok {
@@ -1077,7 +1117,7 @@ func (a *azureBlobProvider) releaseBlobLock(blobName string) {
 		if err := a.kv.Delete(key); err != nil {
 			a.api.LogWarn("Azure Blob: lock release failed",
 				"error_code", errcode.AzureBlobLockReleaseFailed,
-				"blob", blobName, "error", err.Error())
+				"blob", blobName, "error", sanitizeAzureError(err))
 		}
 		return
 	}
@@ -1086,7 +1126,7 @@ func (a *azureBlobProvider) releaseBlobLock(blobName string) {
 	if err := a.kv.Get(key, &raw); err != nil {
 		a.api.LogWarn("Azure Blob: lock release get failed",
 			"error_code", errcode.AzureBlobLockReleaseGetFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return
 	}
 	if len(raw) == 0 {
@@ -1098,7 +1138,7 @@ func (a *azureBlobProvider) releaseBlobLock(blobName string) {
 		// Corrupt lock value: safer to leave it for the stale-reclaim path.
 		a.api.LogWarn("Azure Blob: lock release saw corrupt value, leaving",
 			"error_code", errcode.AzureBlobLockReleaseCorrupt,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 		return
 	}
 	if current.Token != ourToken {
@@ -1110,7 +1150,7 @@ func (a *azureBlobProvider) releaseBlobLock(blobName string) {
 	if err := a.kv.Delete(key); err != nil {
 		a.api.LogWarn("Azure Blob: conditional lock release failed",
 			"error_code", errcode.AzureBlobLockReleaseConditionalFailed,
-			"blob", blobName, "error", err.Error())
+			"blob", blobName, "error", sanitizeAzureError(err))
 	}
 }
 
@@ -1133,7 +1173,7 @@ func (a *azureBlobProvider) recoverWALOnStartup(ctx context.Context) {
 		if !os.IsNotExist(err) {
 			a.api.LogWarn("Azure Blob: WAL recovery: failed to scan root",
 				"error_code", errcode.AzureBlobWALRecoveryScanRootFailed,
-				"root", root, "error", err.Error())
+				"root", root, "error", sanitizeAzureError(err))
 		}
 		return
 	}
@@ -1170,7 +1210,7 @@ func (a *azureBlobProvider) recoverDirectory(ctx context.Context, dir string, is
 	if err != nil {
 		a.api.LogWarn("Azure Blob: WAL recovery: failed to scan directory",
 			"error_code", errcode.AzureBlobWALRecoveryScanDirFailed,
-			"dir", dir, "error", err.Error())
+			"dir", dir, "error", sanitizeAzureError(err))
 		return
 	}
 
@@ -1200,13 +1240,13 @@ func (a *azureBlobProvider) recoverDirectory(ctx context.Context, dir string, is
 			if err := a.uploadWALFile(ctx, path); err != nil {
 				a.api.LogError("Azure Blob: WAL recovery upload failed",
 					"error_code", errcode.AzureBlobWALRecoveryUploadFailed,
-					"path", path, "error", err.Error())
+					"path", path, "error", sanitizeAzureError(err))
 				continue
 			}
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				a.api.LogWarn("Azure Blob: WAL recovery delete failed",
 					"error_code", errcode.AzureBlobWALRecoveryDeleteFailed,
-					"path", path, "error", err.Error())
+					"path", path, "error", sanitizeAzureError(err))
 			}
 		case strings.HasSuffix(name, walFilesExt):
 			a.recoverCompanionFiles(ctx, path)
@@ -1228,7 +1268,7 @@ func (a *azureBlobProvider) recoverCompanionFiles(ctx context.Context, path stri
 	if err != nil {
 		a.api.LogWarn("Azure Blob: WAL recovery: failed to read companion file",
 			"error_code", errcode.AzureBlobWALRecoveryReadCompanionFail,
-			"path", path, "error", err.Error())
+			"path", path, "error", sanitizeAzureError(err))
 		return
 	}
 	var refs []pendingFileRef
@@ -1255,13 +1295,13 @@ func (a *azureBlobProvider) recoverCompanionFiles(ctx context.Context, path stri
 	if err != nil {
 		a.api.LogWarn("Azure Blob: WAL recovery: failed to marshal remaining refs",
 			"error_code", errcode.AzureBlobWALRecoveryMarshalRemaining,
-			"path", path, "count", len(failed), "error", err.Error())
+			"path", path, "count", len(failed), "error", sanitizeAzureError(err))
 		return
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		a.api.LogWarn("Azure Blob: WAL recovery: failed to rewrite companion file",
 			"error_code", errcode.AzureBlobWALRecoveryRewriteCompanion,
-			"path", path, "count", len(failed), "error", err.Error())
+			"path", path, "count", len(failed), "error", sanitizeAzureError(err))
 	}
 }
 
@@ -1320,7 +1360,7 @@ func (a *azureBlobProvider) WatchFiles(ctx context.Context, handler func(key str
 			}
 			a.api.LogError("Azure Blob: file list failed",
 				"error_code", errcode.AzureBlobFileListFailed,
-				"container", a.cfg.BlobContainerName, "error", err.Error())
+				"container", a.cfg.BlobContainerName, "error", sanitizeAzureError(err))
 			backoff = nextListBackoff(backoff, a.batchPoll)
 			continue
 		}
@@ -1349,7 +1389,7 @@ func (a *azureBlobProvider) WatchFiles(ctx context.Context, handler func(key str
 					if err := a.containerClient.DeleteBlob(ctx, blob.Name); err != nil {
 						a.api.LogWarn("Azure Blob: file delete retry failed (marker present)",
 							"error_code", errcode.AzureBlobFileDeleteRetryFailed,
-							"blob", blob.Name, "error", err.Error())
+							"blob", blob.Name, "error", sanitizeAzureError(err))
 						return
 					}
 					a.clearBlobProcessed(blob.Name)
@@ -1363,7 +1403,7 @@ func (a *azureBlobProvider) WatchFiles(ctx context.Context, handler func(key str
 				if err != nil {
 					a.api.LogWarn("Azure Blob: file download failed",
 						"error_code", errcode.AzureBlobFileDownloadFailed,
-						"blob", blob.Name, "error", err.Error())
+						"blob", blob.Name, "error", sanitizeAzureError(err))
 					return
 				}
 				// Strip the files/ prefix when passing key to handler to match azureProvider behaviour.
@@ -1371,14 +1411,14 @@ func (a *azureBlobProvider) WatchFiles(ctx context.Context, handler func(key str
 				if err := handler(key, data, headers); err != nil {
 					a.api.LogWarn("Azure Blob: file handler error",
 						"error_code", errcode.AzureBlobFileHandlerError,
-						"blob", blob.Name, "error", err.Error())
+						"blob", blob.Name, "error", sanitizeAzureError(err))
 					return
 				}
 				a.markBlobProcessed(blob.Name)
 				if err := a.containerClient.DeleteBlob(ctx, blob.Name); err != nil {
 					a.api.LogWarn("Azure Blob: file delete failed",
 						"error_code", errcode.AzureBlobFileDeleteFailed,
-						"blob", blob.Name, "error", err.Error())
+						"blob", blob.Name, "error", sanitizeAzureError(err))
 					return
 				}
 				a.clearBlobProcessed(blob.Name)
@@ -1454,37 +1494,62 @@ func isContainerAlreadyExists(err error) bool {
 	return strings.Contains(err.Error(), azureErrContainerAlreadyExists)
 }
 
-// testAzureBlobConnection probes an azure-blob connection by creating a test
-// blob and deleting it.
+// testAzureBlobConnection probes an azure-blob connection using the
+// configured auth_mode. The probe is non-destructive (ListBlobs with a
+// prefix that never matches), so it works under data-plane-only RBAC
+// (Storage Blob Data Reader/Contributor); the container must be
+// pre-provisioned in SP mode.
 func testAzureBlobConnection(cfg AzureBlobProviderConfig) error {
-	cred, err := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return fmt.Errorf("failed to create shared key credential: %w", err)
+		return fmt.Errorf("azure-blob config: %w", err)
 	}
-	containerClient, err := container.NewClientWithSharedKeyCredential(buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName), cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create container client: %w", err)
+
+	containerURL := buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			return credErr
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClient(containerURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("azure-blob NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		cred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return fmt.Errorf("azure-blob shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClientWithSharedKeyCredential(containerURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("azure-blob NewClientWithSharedKeyCredential: %s", sanitizeAzureError(err))
+		}
+	default:
+		return fmt.Errorf("azure-blob: unknown auth_mode %q", authMode)
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return testAzureBlobConnectionOps(ctx, &containerClientAdapter{client: containerClient})
+	return testAzureBlobConnectionOps(ctx, &containerClientAdapter{client: containerClient}, cfg.BlobContainerName, authMode)
 }
 
 // testAzureBlobConnectionOps contains the provider-agnostic core of the
 // connection test. Extracted so tests can inject a fake azureBlobOps.
-func testAzureBlobConnectionOps(ctx context.Context, ops azureBlobOps) error {
-	if createErr := ops.CreateContainer(ctx); createErr != nil {
-		if !isContainerAlreadyExists(createErr) {
-			return fmt.Errorf("failed to create container: %w", createErr)
-		}
-	}
-
-	key := fmt.Sprintf("crossguard-test-%d", time.Now().UnixMilli())
-	if err := ops.UploadBlob(ctx, key, []byte("ok"), nil); err != nil {
-		return fmt.Errorf("failed to upload test blob: %w", err)
-	}
-	if err := ops.DeleteBlob(ctx, key); err != nil {
-		return fmt.Errorf("failed to delete test blob: %w", err)
+// Uses a read-only ListBlobs probe with a sentinel prefix that will not
+// match any real blob; the call confirms the container exists AND the
+// credential authorizes the data-plane List operation.
+func testAzureBlobConnectionOps(ctx context.Context, ops azureBlobOps, containerName, authMode string) error {
+	_, err := ops.ListBlobs(ctx, "crossguard-probe-prefix-never-matches", false)
+	if err != nil {
+		return wrapAzureResourceError(err, "container", containerName, authMode)
 	}
 	return nil
 }

@@ -61,9 +61,9 @@
                 <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
                 <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td><td>Same container as WAL (deferred file blobs)</td><td>Azure Blob Storage sidecar (15s poll, independent credentials)</td></tr>
                 <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td><td>TLS always (Azure endpoint)</td><td>TLS always (AMQP over TLS)</td></tr>
-                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Connection string (shared key)</td><td>Connection string (shared key)</td><td>SAS connection string</td></tr>
+                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>SAS connection string, or Service Principal (Azure AD client secret)</td></tr>
                 <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td><td>Length-prefixed batch within the blob</td><td>AMQP message body (raw bytes)</td></tr>
-                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes (queue and container auto-created)</td><td>Yes (container auto-created)</td><td>No (queue must be pre-created with chosen LockDuration and MaxDeliveryCount)</td></tr>
+                <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes in shared-key mode (queue and container auto-created); no in Service Principal mode (pre-provision required)</td><td>Yes in shared-key mode (container auto-created); no in Service Principal mode (pre-provision required)</td><td>No (queue must be pre-created with chosen LockDuration and MaxDeliveryCount)</td></tr>
             </tbody>
         </table>
 
@@ -1192,6 +1192,13 @@ done</code></pre>
             for file transfer. Unlike NATS pub/sub, Azure uses a polling model where the inbound side
             periodically checks the queue for new messages.
         </p>
+        <p>
+            Auth is via an Azure Storage shared-key credential (legacy default) or an Azure AD
+            Service Principal (Phase 1 supports the client-credentials / client-secret flow). See
+            <a href="admin.html#service-principal">Azure Service Principal Authentication</a> in the
+            admin guide for the SP field reference, the minimum RBAC roles, and the deployment
+            guidance (including the no-auto-create rule in SP mode).
+        </p>
 
         <h3>Message Flow</h3>
         <div class="diagram-box">
@@ -1340,6 +1347,13 @@ done</code></pre>
             per-message queue charges, or when the queue service is unavailable in your environment.
             Expected end-to-end latency is bounded by <code>flush_interval_seconds</code>.
         </p>
+        <p>
+            Auth is via an Azure Storage shared-key credential (legacy default) or an Azure AD
+            Service Principal. See
+            <a href="admin.html#service-principal">Azure Service Principal Authentication</a> in the
+            admin guide for the SP field reference, the minimum RBAC role
+            (<code>Storage Blob Data Contributor</code>), and the no-auto-create rule in SP mode.
+        </p>
 
         <h3>Message Lifecycle</h3>
         <ol>
@@ -1423,8 +1437,18 @@ done</code></pre>
             and an optional Azure Blob Storage sidecar container for file transfer. Unlike the Azure
             Queue provider, Service Bus uses PeekLock receive semantics with server-side delivery
             counts and a native dead-letter queue (DLQ). Authentication is via a SAS connection
-            string. Service Bus and Azure Storage are independent Azure resources, so the blob
-            sidecar takes its own credentials separate from the Service Bus namespace.
+            string (legacy default) or an Azure AD Service Principal. In connection-string mode the
+            blob sidecar takes its own shared-key credential separate from the Service Bus
+            namespace; in Service Principal mode the blob sidecar inherits the parent SP credential
+            so a single AAD identity covers both AMQP and blob access.
+        </p>
+        <p>
+            See <a href="admin.html#service-principal">Azure Service Principal Authentication</a> in
+            the admin guide for the SP field reference (including the additional
+            <code>service_bus_namespace</code> required in SP mode), the minimum RBAC roles
+            (<code>Azure Service Bus Data Sender</code> + <code>Azure Service Bus Data Receiver</code>
+            on the queue, plus <code>Storage Blob Data Contributor</code> on the blob account when
+            file transfer is enabled), and the credential-inheritance rule for the blob sidecar.
         </p>
         <p>
             The plugin does <em>not</em> auto-create queues. Pre-create the queue in the Azure

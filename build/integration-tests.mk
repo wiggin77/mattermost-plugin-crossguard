@@ -426,10 +426,10 @@ docker-azure-smoke-test: docker-check
 	echo "Adding Azure loopback connections to Server A config..." && \
 	EXISTING=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
-	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing.append({\"name\":\"azure-loopback\",\"provider\":\"azure-queue\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_queue\":{\"queue_service_url\":\"$(AZURITE_QUEUE_URL)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"queue_name\":\"$(AZURITE_QUEUE)\",\"blob_container_name\":\"$(AZURITE_BLOB)\",\"poll_interval_seconds\":1,\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
+	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing=[c for c in existing if c.get('name')!='azure-loopback']; existing.append({\"name\":\"azure-loopback\",\"provider\":\"azure-queue\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_queue\":{\"queue_service_url\":\"$(AZURITE_QUEUE_URL)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"queue_name\":\"$(AZURITE_QUEUE)\",\"blob_container_name\":\"$(AZURITE_BLOB)\",\"poll_interval_seconds\":1,\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	EXISTING_IB=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
-	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing.append({\"name\":\"azure-loopback\",\"provider\":\"azure-queue\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_queue\":{\"queue_service_url\":\"$(AZURITE_QUEUE_URL)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"queue_name\":\"$(AZURITE_QUEUE)\",\"blob_container_name\":\"$(AZURITE_BLOB)\",\"poll_interval_seconds\":1,\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
+	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing=[c for c in existing if c.get('name')!='azure-loopback']; existing.append({\"name\":\"azure-loopback\",\"provider\":\"azure-queue\",\"message_format\":\"xml\",\"file_transfer_enabled\":True,\"azure_queue\":{\"queue_service_url\":\"$(AZURITE_QUEUE_URL)\",\"blob_service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"queue_name\":\"$(AZURITE_QUEUE)\",\"blob_container_name\":\"$(AZURITE_BLOB)\",\"poll_interval_seconds\":1,\"blob_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	curl -sf -X PUT http://localhost:$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
@@ -560,15 +560,15 @@ docker-azure-blob-smoke-test: docker-check
 	echo "Adding azure-blob loopback connections to Server A config..." && \
 	EXISTING=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
-	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing=[c for c in existing if c.get('name')!='azure-blob-loopback']; existing.append({\"name\":\"azure-blob-loopback\",\"provider\":\"azure-blob\",\"message_format\":\"json\",\"file_transfer_enabled\":True,\"azure_blob\":{\"service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(AZURITE_BLOB_BATCH)\",\"flush_interval_seconds\":1,\"batch_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
+	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing=[c for c in existing if c.get('name')!='azure-blob-loopback']; existing.append({\"name\":\"azure-blob-loopback\",\"provider\":\"azure-blob\",\"message_format\":\"json\",\"file_transfer_enabled\":True,\"azure_blob\":{\"service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(AZURITE_BLOB_BATCH)\",\"flush_interval_seconds\":5,\"batch_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	EXISTING_IB=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
-	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing=[c for c in existing if c.get('name')!='azure-blob-loopback']; existing.append({\"name\":\"azure-blob-loopback\",\"provider\":\"azure-blob\",\"message_format\":\"json\",\"file_transfer_enabled\":True,\"azure_blob\":{\"service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(AZURITE_BLOB_BATCH)\",\"flush_interval_seconds\":1,\"batch_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
+	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing=[c for c in existing if c.get('name')!='azure-blob-loopback']; existing.append({\"name\":\"azure-blob-loopback\",\"provider\":\"azure-blob\",\"message_format\":\"json\",\"file_transfer_enabled\":True,\"azure_blob\":{\"service_url\":\"$(AZURITE_BLOB_URL)\",\"account_name\":\"$(AZURITE_ACCOUNT_NAME)\",\"account_key\":\"$(AZURITE_ACCOUNT_KEY)\",\"blob_container_name\":\"$(AZURITE_BLOB_BATCH)\",\"flush_interval_seconds\":5,\"batch_poll_interval_seconds\":1}}); print(json.dumps(existing))") && \
 	curl -sf -X PUT http://localhost:$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \
 		-d '{"PluginSettings":{"Plugins":{"crossguard":{"outboundconnections":"'"$$(echo $$NEW_OB | sed 's/"/\\"/g')"'","inboundconnections":"'"$$(echo $$NEW_IB | sed 's/"/\\"/g')"'"}}}}' >/dev/null && \
-	echo "Server A configured with azure-blob loopback connection (outbound + inbound, flush=1s, poll=1s)" && \
+	echo "Server A configured with azure-blob loopback connection (outbound + inbound, flush=5s, poll=1s)" && \
 	echo "Resetting plugin to pick up new config..." && \
 	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin disable $(PLUGIN_ID) && \
 	$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin enable $(PLUGIN_ID) && \
@@ -610,8 +610,8 @@ docker-azure-blob-smoke-test: docker-check
 		-H "Content-Type: application/json" \
 		-d '{"channel_id":"'"$$AZB_LOOP_CH"'","message":"azure-blob-smoke-test:'"$$AZB_ID"'"}' >/dev/null && \
 	echo "  Posted azure-blob-smoke-test:$$AZB_ID to Server A loop/azure-blob-loopback" && \
-	echo "Waiting for azure-blob relay (6s: 1s flush + 2s inbound poll + 3s buffer)..." && \
-	sleep 6 && \
+	echo "Waiting for azure-blob relay (10s: 5s flush + 2s inbound poll + 3s buffer)..." && \
+	sleep 10 && \
 	AZB_FOUND=$$(curl -sf "http://localhost:$(MM_PORT_A)/api/v4/channels/$$AZB_LB_CH/posts?per_page=10" \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json;data=json.load(sys.stdin);sid='$$AZB_ID';found=any('azure-blob-smoke-test:'+sid in p.get('message','') for p in data.get('posts',{}).values());print('PASS' if found else 'FAIL');sys.exit(0 if found else 1)") && \
 	echo "azure-blob message relay test: $$AZB_FOUND" || \
@@ -638,8 +638,8 @@ docker-azure-blob-smoke-test: docker-check
 		-H "Content-Type: application/json" \
 		-d '{"channel_id":"'"$$AZB_LOOP_CH"'","message":"azure-blob-file-test:'"$$AZB_FILE_ID"'","file_ids":["'"$$FILE_UPLOAD"'"]}' >/dev/null && \
 	echo "  Posted azure-blob-file-test:$$AZB_FILE_ID with sample.pdf to Server A loop/azure-blob-loopback" && \
-	echo "Waiting for azure-blob file relay (10s: 1s flush + 2s msg poll + 2s file watch + 5s buffer)..." && \
-	sleep 10 && \
+	echo "Waiting for azure-blob file relay (14s: 5s flush + 2s msg poll + 2s file watch + 5s buffer)..." && \
+	sleep 14 && \
 	AZB_FILE_FOUND=$$(curl -sf "http://localhost:$(MM_PORT_A)/api/v4/channels/$$AZB_LB_CH/posts?per_page=10" \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json;data=json.load(sys.stdin);sid='$$AZB_FILE_ID';found=any('azure-blob-file-test:'+sid in p.get('message','') and len(p.get('file_ids',[]))>0 for p in data.get('posts',{}).values());print('PASS' if found else 'FAIL');sys.exit(0 if found else 1)") && \
 	echo "azure-blob deferred file relay test: $$AZB_FILE_FOUND" || \
@@ -720,10 +720,10 @@ docker-servicebus-smoke-test: docker-check servicebus-probe-run
 	echo "Adding azure-servicebus loopback connection to Server A config..." && \
 	EXISTING=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('outboundconnections','[]'))") && \
-	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	NEW_OB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING'); existing=[c for c in existing if c.get('name')!='servicebus-loopback']; existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
 	EXISTING_IB=$$(curl -sf http://localhost:$(MM_PORT_A)/api/v4/config \
 		-H "Authorization: Bearer $$TOKEN_A" | python3 -c "import sys,json; c=json.load(sys.stdin); ps=c.get('PluginSettings',{}).get('Plugins',{}).get('crossguard',{}); print(ps.get('inboundconnections','[]'))") && \
-	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
+	NEW_IB=$$(python3 -c "import sys,json; existing=json.loads('$$EXISTING_IB'); existing=[c for c in existing if c.get('name')!='servicebus-loopback']; existing.append({\"name\":\"servicebus-loopback\",\"provider\":\"azure-servicebus\",\"message_format\":\"xml\",\"file_transfer_enabled\":False,\"azure_servicebus\":{\"connection_string\":\"$(SERVICEBUS_EMULATOR_CONNSTR)\",\"queue_name\":\"$(SERVICEBUS_QUEUE)\"}}); print(json.dumps(existing))") && \
 	curl -sf -X PUT http://localhost:$(MM_PORT_A)/api/v4/config/patch \
 		-H "Authorization: Bearer $$TOKEN_A" \
 		-H "Content-Type: application/json" \

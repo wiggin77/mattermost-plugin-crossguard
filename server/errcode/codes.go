@@ -28,6 +28,11 @@ const (
 const (
 	ConfigSameConfigPassed = 12000
 	ConfigValidationWarn   = 12001
+
+	// Azure Service Principal cross-provider audit. Emitted at successful
+	// SP construction by any of the three Azure providers so operators
+	// can correlate which AAD identity authenticated each connection.
+	AzureSPAuditConstructed = 12010
 )
 
 // command.go (13000-13999)
@@ -221,6 +226,9 @@ const (
 	AzureBlobFileDownloadFailed            = 18046
 	AzureBlobFileHandlerError              = 18047
 	AzureBlobFileDeleteFailed              = 18048
+
+	// Service Principal auth (Phase 1).
+	AzureBlobSPCredentialFailed = 18049 // azidentity NewClientSecretCredential failed
 )
 
 // azure_provider.go (19000-19999)
@@ -235,6 +243,9 @@ const (
 	AzureQueueBlobDownloadFailed  = 19007
 	AzureQueueBlobHandlerError    = 19008
 	AzureQueueBlobDeleteFailed    = 19009
+
+	// Service Principal auth (Phase 1).
+	AzureQueueSPCredentialFailed = 19010 // azidentity NewClientSecretCredential failed
 )
 
 // nats_provider.go (20000-20999)
@@ -331,6 +342,9 @@ const (
 	ServiceBusRedelivery         = 26004
 	ServiceBusMalformedBody      = 26005
 	APIAzureServiceBusTestFailed = 26006
+
+	// Service Principal auth (Phase 1).
+	ServiceBusSPCredentialFailed = 26007 // azidentity NewClientSecretCredential failed
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -370,6 +384,7 @@ var AllCodes = []int{
 
 	ConfigSameConfigPassed,
 	ConfigValidationWarn,
+	AzureSPAuditConstructed,
 
 	CommandOpenConnDialogFailed,
 
@@ -524,6 +539,7 @@ var AllCodes = []int{
 	AzureBlobFileDownloadFailed,
 	AzureBlobFileHandlerError,
 	AzureBlobFileDeleteFailed,
+	AzureBlobSPCredentialFailed,
 
 	AzureQueueCreateQueueFailed,
 	AzureQueueCreateContainerFail,
@@ -535,6 +551,7 @@ var AllCodes = []int{
 	AzureQueueBlobDownloadFailed,
 	AzureQueueBlobHandlerError,
 	AzureQueueBlobDeleteFailed,
+	AzureQueueSPCredentialFailed,
 
 	NATSDownloadFileFailed,
 	NATSFileHandlerError,
@@ -611,4 +628,5 @@ var AllCodes = []int{
 	ServiceBusRedelivery,
 	ServiceBusMalformedBody,
 	APIAzureServiceBusTestFailed,
+	ServiceBusSPCredentialFailed,
 }

@@ -697,6 +697,46 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await component.getByRole('button', {name: 'Test Connection'}).click();
             await expect(component.getByRole('button', {name: 'Testing...'})).toBeVisible();
         });
+
+        test('Test connection success banner auto-clears after TEST_STATUS_DISPLAY_MS', async ({mount, page}) => {
+            await page.route('**/plugins/crossguard/api/v1/test-connection*', async (route) => {
+                await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({message: 'Connection successful'})});
+            });
+            await page.clock.install();
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Test Connection'}).click();
+            await expect(component.getByText('Connection successful')).toBeVisible();
+            await page.clock.fastForward(10100);
+            await expect(component.getByText('Connection successful')).toHaveCount(0);
+        });
+
+        test('Test connection failed banner auto-clears after TEST_STATUS_DISPLAY_MS', async ({mount, page}) => {
+            await page.route('**/plugins/crossguard/api/v1/test-connection*', async (route) => {
+                await route.fulfill({status: 500, contentType: 'application/json', body: JSON.stringify({error: 'boom'})});
+            });
+            await page.clock.install();
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Test Connection'}).click();
+            await expect(component.getByText('boom')).toBeVisible();
+            await page.clock.fastForward(10100);
+            await expect(component.getByText('boom')).toHaveCount(0);
+        });
+
+        test('Test connection network error banner auto-clears after TEST_STATUS_DISPLAY_MS', async ({mount, page}) => {
+            await page.route('**/plugins/crossguard/api/v1/test-connection*', async (route) => {
+                await route.abort('connectionrefused');
+            });
+            await page.clock.install();
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Test Connection'}).click();
+
+            // Wait until Testing... is gone so we know the catch ran and set the banner.
+            await expect(component.getByRole('button', {name: 'Test Connection'})).toBeVisible();
+            await page.clock.fastForward(10100);
+
+            // The status banner has been removed by the timeout cleanup.
+            await expect(component.locator('text=Failed to fetch')).toHaveCount(0);
+        });
     });
 
     // -------------------------------------------------------------------------
@@ -828,7 +868,13 @@ test.describe('ConnectionSettings Edge Cases', () => {
     // Azure Service Bus provider
     // -------------------------------------------------------------------------
     test.describe('Azure Service Bus provider', () => {
-        test('round-trips an azure-servicebus connection without mutating it', async ({mount, page}) => {
+        test('round-trips an azure-servicebus connection: secrets emit sentinel for server-side merge', async ({mount, page}) => {
+            // Opening an existing connection for edit and saving without
+            // changing the password field MUST emit the SECRET_SENTINEL
+            // (not the original cleartext). The server's mergeOneConnectionSecrets
+            // resolves the sentinel back to the stored value, so the round
+            // trip is correct end-to-end. The cleartext never re-renders in
+            // the browser's onChange payload.
             const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([serviceBusConn])})}/>);
             await expect(component.getByText('sb-conn').first()).toBeVisible();
             await component.getByRole('button', {name: 'Edit'}).click();
@@ -838,7 +884,11 @@ test.describe('ConnectionSettings Edge Cases', () => {
             const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
             expect(saved).toHaveLength(1);
             expect(saved[0].provider).toBe('azure-servicebus');
-            expect(saved[0].azure_servicebus.connection_string).toContain('servicebus.windows.net');
+
+            // connection_string is a secret; it MUST be the sentinel after a
+            // round-trip with no edit, not the original cleartext.
+            expect(saved[0].azure_servicebus.connection_string).toBe('__CROSSGUARD_SECRET_UNCHANGED__');
+            expect(saved[0].azure_servicebus.connection_string).not.toContain('SharedAccessKey=abc');
             expect(saved[0].azure_servicebus.queue_name).toBe('sb-queue');
             expect(saved[0].nats).toBeUndefined();
             expect(saved[0].azure_queue).toBeUndefined();
@@ -877,6 +927,558 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await expect(component.getByLabel('Azure Service Bus Blob Account Name')).toBeVisible();
             await expect(component.getByLabel('Azure Service Bus Blob Account Key')).toBeVisible();
             await expect(component.getByLabel('Azure Service Bus Blob Container Name')).toBeVisible();
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Azure Blob provider
+    // -------------------------------------------------------------------------
+    test.describe('Azure Blob provider', () => {
+        const azureBlobConn = {
+            name: 'blob-conn',
+            provider: 'azure-blob',
+            file_transfer_enabled: false,
+            file_filter_mode: '',
+            file_filter_types: '',
+            message_format: 'json',
+            azure_blob: {
+                service_url: 'https://example.blob.core.windows.net',
+                account_name: 'example',
+                account_key: 'a2V5',
+                blob_container_name: 'my-container',
+                flush_interval_seconds: 60,
+                auth_mode: 'shared-key',
+                azure_cloud: 'public',
+                tenant_id: '',
+                client_id: '',
+                client_secret: '',
+            },
+        };
+
+        test('selecting azure-blob provider exposes all blob form inputs', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            const providerSelect = component.locator('select').first();
+            await providerSelect.selectOption('azure-blob');
+
+            await expect(component.getByLabel('Azure Blob Auth Mode')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Cloud')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Service URL')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Account Name')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Account Key')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Container Name')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Flush Interval in seconds')).toBeVisible();
+        });
+
+        test('save with empty service URL shows Service URL is required', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('blob-x');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Service URL is required.')).toBeVisible();
+        });
+
+        test('save with empty container name shows Blob Container Name is required', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('blob-x');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Container Name is required.')).toBeVisible();
+        });
+
+        test('save with flush interval below 5 shows Flush Interval error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('blob-x');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Flush Interval in seconds').fill('2');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Flush Interval must be at least 5 seconds.')).toBeVisible();
+        });
+
+        test('save with empty flush interval shows Flush Interval error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('blob-x');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Flush Interval in seconds').fill('');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Flush Interval must be at least 5 seconds.')).toBeVisible();
+        });
+
+        test('save happy path round-trips azure-blob JSON with provider and config', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('blob-good');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('azure-blob');
+            expect(saved[0].azure_blob.service_url).toBe('https://acct.blob.core.windows.net');
+            expect(saved[0].azure_blob.account_name).toBe('acct');
+            expect(saved[0].azure_blob.account_key).toBe('a2V5');
+            expect(saved[0].azure_blob.blob_container_name).toBe('cont');
+            expect(saved[0].azure_blob.flush_interval_seconds).toBe(60);
+            expect(saved[0].nats).toBeUndefined();
+            expect(saved[0].azure_queue).toBeUndefined();
+            expect(saved[0].azure_servicebus).toBeUndefined();
+        });
+
+        test('switch NATS to azure-blob initializes empty azure_blob block', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await component.locator('select').first().selectOption('azure-blob');
+            await expect(component.getByLabel('Azure Blob Service URL')).toHaveValue('');
+            await expect(component.getByLabel('Azure Blob Container Name')).toHaveValue('');
+            await expect(component.getByLabel('Azure Blob Flush Interval in seconds')).toHaveValue('60');
+        });
+
+        test('switching to azure-blob then saving clears nats and other azure blocks', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([natsConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Update Connection'}).click();
+
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('azure-blob');
+            expect(saved[0].nats).toBeUndefined();
+            expect(saved[0].azure_queue).toBeUndefined();
+            expect(saved[0].azure_servicebus).toBeUndefined();
+        });
+
+        test('switch azure-blob to NATS clears azure_blob on save', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([azureBlobConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await component.locator('select').first().selectOption('nats');
+
+            // Switching to NATS requires a subject before save; fill the auto-filled one to satisfy the prefix rule.
+            await component.locator('input[placeholder="crossguard.my-connection"]').fill('crossguard.blob-conn');
+            await component.getByRole('button', {name: 'Update Connection'}).click();
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('nats');
+            expect(saved[0].azure_blob).toBeUndefined();
+        });
+
+        test('loadConnectionForEdit substitutes SECRET_SENTINEL for stored account_key', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([azureBlobConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await expect(component.getByLabel('Azure Blob Account Key')).toHaveValue('__CROSSGUARD_SECRET_UNCHANGED__');
+        });
+
+        test('round-trips an azure-blob connection without re-emitting cleartext account_key', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([azureBlobConn])})}/>);
+            await component.getByRole('button', {name: 'Edit'}).click();
+            await component.getByRole('button', {name: 'Update Connection'}).click();
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('azure-blob');
+            expect(saved[0].azure_blob.account_key).toBe('__CROSSGUARD_SECRET_UNCHANGED__');
+            expect(saved[0].azure_blob.account_key).not.toBe('a2V5');
+        });
+
+        test('stored azure-blob connection renders Azure Blob badge and Container meta', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps({value: JSON.stringify([azureBlobConn])})}/>);
+            await expect(component.getByText('blob-conn').first()).toBeVisible();
+            await expect(component.locator('span', {hasText: 'Azure Blob'}).first()).toBeVisible();
+            await expect(component.getByText('Container', {exact: true}).first()).toBeVisible();
+            await expect(component.getByText('my-container').first()).toBeVisible();
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // File-transfer save validation (Queue and Service Bus)
+    // -------------------------------------------------------------------------
+    test.describe('File-transfer save validation', () => {
+        test('Azure Queue: file_transfer_enabled with empty Blob Service URL shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('qft');
+            await component.locator('select').first().selectOption('azure-queue');
+            await component.locator('input[placeholder="https://myaccount.queue.core.windows.net"]').fill('https://x.queue.core.windows.net');
+            await component.locator('input[placeholder="myaccount"]').fill('acct');
+            await component.locator('input[placeholder="Paste key from Azure portal"]').fill('a2V5');
+            await component.locator('input[placeholder="crossguard-messages"]').fill('q1');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Service URL is required when file transfer is enabled.')).toBeVisible();
+        });
+
+        test('Azure Queue: file_transfer_enabled with empty Blob Container Name shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('qft2');
+            await component.locator('select').first().selectOption('azure-queue');
+            await component.locator('input[placeholder="https://myaccount.queue.core.windows.net"]').fill('https://x.queue.core.windows.net');
+            await component.locator('input[placeholder="myaccount"]').fill('acct');
+            await component.locator('input[placeholder="Paste key from Azure portal"]').fill('a2V5');
+            await component.locator('input[placeholder="crossguard-messages"]').fill('q2');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByLabel('Azure Queue Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Container Name is required when file transfer is enabled.')).toBeVisible();
+        });
+
+        test('Azure Service Bus: file_transfer_enabled with empty Blob Service URL shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sbft');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Connection String').fill('Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=zz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('q');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Service URL is required when file transfer is enabled.')).toBeVisible();
+        });
+
+        test('Azure Service Bus: file_transfer_enabled with empty Blob Container Name shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sbft2');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Connection String').fill('Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=zz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('q');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByLabel('Azure Service Bus Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Container Name is required when file transfer is enabled.')).toBeVisible();
+        });
+
+        test('Azure Service Bus connection-string mode: file_transfer_enabled with empty Blob Account Name shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sbft3');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Connection String').fill('Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=zz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('q');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByLabel('Azure Service Bus Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByLabel('Azure Service Bus Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Account Name is required when file transfer is enabled.')).toBeVisible();
+        });
+
+        test('Azure Service Bus connection-string mode: file_transfer_enabled with empty Blob Account Key shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sbft4');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Connection String').fill('Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=zz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('q');
+            const fileCheckbox = component.getByText('Enable File Transfer').locator('..').locator('input[type="checkbox"]');
+            await fileCheckbox.check();
+            await component.getByLabel('Azure Service Bus Blob Service URL').fill('https://x.blob.core.windows.net');
+            await component.getByLabel('Azure Service Bus Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Service Bus Blob Account Name').fill('blobacct');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Blob Account Key is required when file transfer is enabled.')).toBeVisible();
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Service Principal auth mode (azure-queue, azure-blob, azure-servicebus)
+    // -------------------------------------------------------------------------
+    test.describe('Service Principal auth mode', () => {
+        const VALID_TENANT = '11111111-2222-3333-4444-555555555555';
+
+        async function openQueueForm(component: any) {
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sp-q');
+            await component.locator('select').first().selectOption('azure-queue');
+            await component.getByLabel('Azure Queue Auth Mode').selectOption('service-principal');
+        }
+
+        async function openBlobForm(component: any) {
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sp-b');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Auth Mode').selectOption('service-principal');
+        }
+
+        async function openSBForm(component: any) {
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sp-sb');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Auth Mode').selectOption('service-principal');
+        }
+
+        test('Azure Queue SP toggle reveals SP form fields', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openQueueForm(component);
+            await expect(component.getByLabel('Azure Queue Tenant ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Queue Client ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Queue Client Secret', {exact: true})).toBeVisible();
+        });
+
+        test('Azure Blob SP toggle reveals SP form fields and hides Account Key', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await expect(component.getByLabel('Azure Blob Tenant ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Client ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Client Secret', {exact: true})).toBeVisible();
+            await expect(component.getByLabel('Azure Blob Account Key')).not.toBeVisible();
+        });
+
+        test('Azure Service Bus SP toggle reveals SP fields, Namespace, and hides Connection String', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openSBForm(component);
+            await expect(component.getByLabel('Azure Service Bus Tenant ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Client ID')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Client Secret', {exact: true})).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Namespace')).toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Connection String')).not.toBeVisible();
+        });
+
+        test('Azure Service Bus switching back from SP to connection-string hides Namespace and shows Connection String', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openSBForm(component);
+            await expect(component.getByLabel('Azure Service Bus Namespace')).toBeVisible();
+            await component.getByLabel('Azure Service Bus Auth Mode').selectOption('connection-string');
+            await expect(component.getByLabel('Azure Service Bus Namespace')).not.toBeVisible();
+            await expect(component.getByLabel('Azure Service Bus Connection String')).toBeVisible();
+        });
+
+        test('SP save with empty Tenant ID shows Tenant ID required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Tenant ID is required for service-principal auth mode.')).toBeVisible();
+        });
+
+        test('SP save with bad tenant rejects non-GUID non-FQDN value (no dot)', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill('nodotvalue');
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Tenant ID must be a GUID or FQDN (e.g. contoso.onmicrosoft.com).')).toBeVisible();
+        });
+
+        test('SP save with tenant containing whitespace is rejected', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill('bad host.example.com');
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Tenant ID must be a GUID or FQDN (e.g. contoso.onmicrosoft.com).')).toBeVisible();
+        });
+
+        test('SP save with tenant containing scheme is rejected', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill('https://contoso.onmicrosoft.com');
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Tenant ID must be a GUID or FQDN (e.g. contoso.onmicrosoft.com).')).toBeVisible();
+        });
+
+        test('SP save with FQDN tenant passes the tenant format check', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill('contoso.onmicrosoft.com');
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].azure_blob.tenant_id).toBe('contoso.onmicrosoft.com');
+            expect(saved[0].azure_blob.auth_mode).toBe('service-principal');
+        });
+
+        test('SP save with empty Client ID shows Client ID required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Client ID is required for service-principal auth mode.')).toBeVisible();
+        });
+
+        test('SP save with empty Client Secret shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Client Secret is required for service-principal auth mode.')).toBeVisible();
+        });
+
+        test('SP mode with non-empty Account Key in state shows cross-mode leakage error (Blob)', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sp-leak');
+            await component.locator('select').first().selectOption('azure-blob');
+
+            // Fill account_key while still in shared-key mode, then switch to SP.
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('residual-key');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Auth Mode').selectOption('service-principal');
+            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Account Key must be empty when auth_mode is service-principal.')).toBeVisible();
+        });
+
+        test('SP mode with non-empty Connection String in state shows cross-mode leakage error (Service Bus)', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('sp-leak-sb');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.getByLabel('Azure Service Bus Connection String').fill('Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=r;SharedAccessKey=zz');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('sb-queue');
+            await component.getByLabel('Azure Service Bus Auth Mode').selectOption('service-principal');
+            await component.getByLabel('Azure Service Bus Namespace').fill('myns.servicebus.windows.net');
+            await component.getByLabel('Azure Service Bus Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Service Bus Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Service Bus Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Connection String must be empty when auth_mode is service-principal.')).toBeVisible();
+        });
+
+        test('Service Bus SP save with empty Namespace shows namespace required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openSBForm(component);
+            await component.locator('input[placeholder="crossguard-relay"]').fill('sb-queue');
+            await component.getByLabel('Azure Service Bus Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Service Bus Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Service Bus Client Secret', {exact: true}).fill('secret-value');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Service Bus Namespace is required for service-principal auth mode (e.g. myns.servicebus.windows.net).')).toBeVisible();
+        });
+
+        test('Azure Blob shared-key save with empty Account Name shows Account Name required', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('legacy-b');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Account Name is required for shared-key auth mode.')).toBeVisible();
+        });
+
+        test('Azure Blob shared-key save with empty Account Key shows Account Key required', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('legacy-b2');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Account Key is required for shared-key auth mode.')).toBeVisible();
+        });
+
+        test('Service Bus connection-string save with empty Connection String shows required error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('legacy-sb');
+            await component.locator('select').first().selectOption('azure-servicebus');
+            await component.locator('input[placeholder="crossguard-relay"]').fill('q');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Connection String is required for connection-string auth mode.')).toBeVisible();
+        });
+
+        test('Legacy mode cross-mode leakage: SP fields filled in shared-key mode shows error', async ({mount}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await component.getByRole('button', {name: '+ Add Connection'}).click();
+            await component.locator('input[placeholder="my-connection"]').fill('leak-back');
+            await component.locator('select').first().selectOption('azure-blob');
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Account Key').fill('a2V5');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+
+            // Switch to SP, fill SP fields, then switch back to leak them into shared-key mode.
+            await component.getByLabel('Azure Blob Auth Mode').selectOption('service-principal');
+            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Auth Mode').selectOption('shared-key');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            await expect(component.getByText('Service Principal fields (tenant_id / client_id / client_secret) must be empty when auth_mode is shared-key.')).toBeVisible();
+        });
+
+        test('SP happy path round-trips azure-blob JSON with auth_mode and SP credentials', async ({mount, page}) => {
+            const component = await mount(<ConnectionSettingsStory {...defaultProps()}/>);
+            await openBlobForm(component);
+            await component.getByLabel('Azure Blob Service URL').fill('https://acct.blob.core.windows.net');
+            await component.getByLabel('Azure Blob Account Name').fill('acct');
+            await component.getByLabel('Azure Blob Container Name').fill('cont');
+            await component.getByLabel('Azure Blob Tenant ID').fill(VALID_TENANT);
+            await component.getByLabel('Azure Blob Client ID').fill('client-id-abc');
+            await component.getByLabel('Azure Blob Client Secret', {exact: true}).fill('inline-secret');
+            await component.getByRole('button', {name: 'Add Connection', exact: true}).click();
+            const calls = await getCalls(page);
+            const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
+            expect(saved[0].provider).toBe('azure-blob');
+            expect(saved[0].azure_blob.auth_mode).toBe('service-principal');
+            expect(saved[0].azure_blob.tenant_id).toBe(VALID_TENANT);
+            expect(saved[0].azure_blob.client_id).toBe('client-id-abc');
+            expect(saved[0].azure_blob.client_secret).toBe('inline-secret');
+            expect(saved[0].azure_blob.client_secret_env).toBeUndefined();
+            expect(saved[0].azure_blob.client_secret_file).toBeUndefined();
         });
     });
 });

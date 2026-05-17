@@ -242,31 +242,25 @@ func (p *Plugin) handleTestAzureQueueConnection(w http.ResponseWriter, conn Conn
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureQueue.QueueServiceURL) == "" {
-		writeJSONError(w, "queue_service_url is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.AccountName) == "" {
-		writeJSONError(w, "account_name is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.AccountKey) == "" {
-		writeJSONError(w, "account_key is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.QueueName) == "" {
-		writeJSONError(w, "queue_name is required", http.StatusBadRequest)
+	// Required-field validation is delegated to validateAzureQueueConnection,
+	// which knows the per-auth-mode rules (shared-key needs account_key; SP
+	// needs tenant_id/client_id/client_secret*; etc.). The legacy handler
+	// hardcoded account_key as required, which rejected valid SP configs at
+	// HTTP 400 before the probe could run.
+	if errs := validateAzureQueueConnection(conn, "connection "+conn.Name); len(errs) > 0 {
+		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return
 	}
 
 	if err := testAzureQueueConnectionFn(*conn.AzureQueue); err != nil {
+		// The error from testAzureQueueConnection is already sanitized; running
+		// it through the helper again is a no-op and defends against any future
+		// probe refactor that returns a raw SDK error.
+		msg := sanitizeAzureError(err)
 		p.API.LogError("Azure Queue connection test failed",
 			"error_code", errcode.APIAzureQueueTestFailed,
-			"error", err.Error())
-		writeJSONError(w, "Azure Queue connection test failed: "+err.Error(), http.StatusBadGateway)
+			"error", msg)
+		writeJSONError(w, "Azure Queue connection test failed: "+msg, http.StatusBadGateway)
 		return
 	}
 
@@ -284,39 +278,21 @@ func (p *Plugin) handleTestAzureBlobConnection(w http.ResponseWriter, conn Conne
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureBlob.ServiceURL) == "" {
-		writeJSONError(w, "service_url is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.AccountName) == "" {
-		writeJSONError(w, "account_name is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.AccountKey) == "" {
-		writeJSONError(w, "account_key is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.BlobContainerName) == "" {
-		writeJSONError(w, "blob_container_name is required", http.StatusBadRequest)
-		return
-	}
-
-	// Share the same numeric validation as config persistence so the "test"
-	// button catches out-of-range flush_interval_seconds / blob_lock_max_age_seconds
-	// before we even try to connect.
+	// Required-field validation is delegated to validateAzureBlobConnection,
+	// which switches on auth_mode. This also covers out-of-range numerics
+	// (flush_interval_seconds, blob_lock_max_age_seconds) that the legacy
+	// handler picked up via a separate validateAzureBlobConnection call.
 	if errs := validateAzureBlobConnection(conn, "connection "+conn.Name); len(errs) > 0 {
 		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return
 	}
 
 	if err := testAzureBlobConnectionFn(*conn.AzureBlob); err != nil {
+		msg := sanitizeAzureError(err)
 		p.API.LogError("Azure Blob connection test failed",
 			"error_code", errcode.APIAzureBlobTestFailed,
-			"error", err.Error())
-		writeJSONError(w, "Azure Blob connection test failed: "+err.Error(), http.StatusBadGateway)
+			"error", msg)
+		writeJSONError(w, "Azure Blob connection test failed: "+msg, http.StatusBadGateway)
 		return
 	}
 
@@ -334,30 +310,21 @@ func (p *Plugin) handleTestAzureServiceBusConnection(w http.ResponseWriter, conn
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureServiceBus.ConnectionString) == "" {
-		writeJSONError(w, "connection_string is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureServiceBus.QueueName) == "" {
-		writeJSONError(w, "queue_name is required", http.StatusBadRequest)
-		return
-	}
-
-	// Share the same validation as config persistence so the "test" button
-	// catches name-regex violations, out-of-range MaxMessageSizeBytes, etc.
-	// before we even try to connect.
+	// Required-field validation is delegated to validateAzureServiceBusConnection,
+	// which switches on auth_mode. The legacy handler hardcoded
+	// connection_string as required, which rejected valid SP configs at
+	// HTTP 400 before the probe could run.
 	if errs := validateAzureServiceBusConnection(conn, "connection "+conn.Name); len(errs) > 0 {
 		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return
 	}
 
 	if err := testAzureServiceBusConnectionFn(*conn.AzureServiceBus); err != nil {
-		// The error from testAzureServiceBusConnection has already been sanitized.
+		msg := sanitizeAzureError(err)
 		p.API.LogError("Azure Service Bus connection test failed",
 			"error_code", errcode.APIAzureServiceBusTestFailed,
-			"error", err.Error())
-		writeJSONError(w, "Azure Service Bus connection test failed: "+err.Error(), http.StatusBadGateway)
+			"error", msg)
+		writeJSONError(w, "Azure Service Bus connection test failed: "+msg, http.StatusBadGateway)
 		return
 	}
 

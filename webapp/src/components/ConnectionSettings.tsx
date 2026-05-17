@@ -3,6 +3,32 @@ import React from 'react';
 
 type ProviderType = 'nats' | 'azure-queue' | 'azure-blob' | 'azure-servicebus';
 
+// Azure auth modes per the server's per-provider auth_mode discriminator
+// (see server/configuration.go). Empty string is intentionally allowed:
+// the server treats empty as the legacy mode for each provider (shared-key
+// for Queue/Blob, connection-string for Service Bus). The webapp always
+// writes one of the explicit constants when a form is saved.
+type AzureQueueAuthMode = '' | 'shared-key' | 'service-principal';
+type AzureBlobAuthMode = '' | 'shared-key' | 'service-principal';
+type AzureServiceBusAuthMode = '' | 'connection-string' | 'service-principal';
+type AzureCloud = '' | 'public' | 'usgov' | 'china';
+
+const AZURE_AUTH_SHARED_KEY = 'shared-key';
+const AZURE_AUTH_CONNECTION_STRING = 'connection-string';
+const AZURE_AUTH_SERVICE_PRINCIPAL = 'service-principal';
+const AZURE_CLOUD_PUBLIC = 'public';
+const AZURE_CLOUD_USGOV = 'usgov';
+const AZURE_CLOUD_CHINA = 'china';
+
+// SECRET_SENTINEL is sent back by the form for any password field the
+// admin did not touch. The server's OnConfigurationChange merge step
+// (server/configuration.go mergeOneConnectionSecrets) sees this string
+// and substitutes the stored value, so unchanged secrets never round-trip
+// through the browser as cleartext on save. The token is deliberately
+// distinctive (not a row of asterisks) so it cannot collide with a real
+// secret. Keep in sync with the Go-side SecretSentinel constant.
+const SECRET_SENTINEL = '__CROSSGUARD_SECRET_UNCHANGED__';
+
 interface NATSProviderConfig {
     address: string;
     subject: string;
@@ -16,24 +42,38 @@ interface NATSProviderConfig {
     ca_cert: string;
 }
 
-interface AzureQueueProviderConfig {
+// Shared Azure Service Principal fields. Mirrors the Go-side flat fields
+// added to each provider config. client_secret is required in SP mode.
+// To keep the secret out of plugin config, inject the whole connections
+// JSON via the MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_* env var.
+interface AzureSPFields {
+    auth_mode?: string; // typed as string here for TS variance across providers
+    azure_cloud?: AzureCloud;
+    tenant_id?: string;
+    client_id?: string;
+    client_secret?: string;
+}
+
+interface AzureQueueProviderConfig extends AzureSPFields {
     queue_service_url: string;
     blob_service_url: string;
     account_name: string;
     account_key: string;
     queue_name: string;
     blob_container_name: string;
+    auth_mode?: AzureQueueAuthMode;
 }
 
-interface AzureBlobProviderConfig {
+interface AzureBlobProviderConfig extends AzureSPFields {
     service_url: string;
     account_name: string;
     account_key: string;
     blob_container_name: string;
     flush_interval_seconds?: number;
+    auth_mode?: AzureBlobAuthMode;
 }
 
-interface AzureServiceBusProviderConfig {
+interface AzureServiceBusProviderConfig extends AzureSPFields {
     connection_string: string;
     queue_name: string;
     blob_service_url: string;
@@ -42,6 +82,8 @@ interface AzureServiceBusProviderConfig {
     blob_container_name: string;
     max_message_size_bytes?: number;
     blob_poll_interval_seconds?: number;
+    auth_mode?: AzureServiceBusAuthMode;
+    service_bus_namespace?: string;
 }
 
 interface Connection {
@@ -104,6 +146,11 @@ const emptyAzureQueueConfig: AzureQueueProviderConfig = {
     account_key: '',
     queue_name: '',
     blob_container_name: '',
+    auth_mode: AZURE_AUTH_SHARED_KEY,
+    azure_cloud: AZURE_CLOUD_PUBLIC,
+    tenant_id: '',
+    client_id: '',
+    client_secret: '',
 };
 
 const emptyAzureBlobConfig: AzureBlobProviderConfig = {
@@ -112,6 +159,11 @@ const emptyAzureBlobConfig: AzureBlobProviderConfig = {
     account_key: '',
     blob_container_name: '',
     flush_interval_seconds: 60,
+    auth_mode: AZURE_AUTH_SHARED_KEY,
+    azure_cloud: AZURE_CLOUD_PUBLIC,
+    tenant_id: '',
+    client_id: '',
+    client_secret: '',
 };
 
 const emptyAzureServiceBusConfig: AzureServiceBusProviderConfig = {
@@ -121,6 +173,12 @@ const emptyAzureServiceBusConfig: AzureServiceBusProviderConfig = {
     blob_account_name: '',
     blob_account_key: '',
     blob_container_name: '',
+    auth_mode: AZURE_AUTH_CONNECTION_STRING,
+    azure_cloud: AZURE_CLOUD_PUBLIC,
+    service_bus_namespace: '',
+    tenant_id: '',
+    client_id: '',
+    client_secret: '',
 };
 
 const emptyConnection: Connection = {
@@ -132,6 +190,211 @@ const emptyConnection: Connection = {
     message_format: 'json',
     nats: {...emptyNATSConfig},
 };
+
+// loadConnectionForEdit prepares a stored connection for the edit form.
+// Every secret field that already has a value is replaced with the
+// SECRET_SENTINEL so the form never displays cleartext secrets and so the
+// server's merge step can preserve the stored value when the admin saves
+// without editing the field. Secret fields touched as: account_key
+// (Queue/Blob), client_secret (Queue/Blob/SB), connection_string (SB),
+// blob_account_key (SB).
+// validateAzureAuthFields runs client-side auth-mode validation for the
+// three Azure providers. legacyMode is the legacy default for the
+// provider ("shared-key" for Queue/Blob; "connection-string" for SB).
+// Empty cfg.auth_mode means "use legacy" and gets the legacy required
+// fields enforced. The server runs the canonical version of these
+// checks; the client copy is for fast inline feedback.
+function validateAzureAuthFields(
+    cfg: AzureSPFields & {
+        account_key?: string;
+        account_name?: string;
+        connection_string?: string;
+        service_bus_namespace?: string;
+    },
+    legacyMode: 'shared-key' | 'connection-string',
+): string | null {
+    // Mirror the server's normalizeAzureAuthMode (trim + lowercase). A
+    // hand-edited config with "Service-Principal" would otherwise fall
+    // through to the "Invalid auth_mode" branch even though the server
+    // accepts it.
+    const rawMode = (cfg.auth_mode || legacyMode).trim().toLowerCase();
+    const mode = rawMode || legacyMode;
+
+    if (mode === legacyMode) {
+        if (legacyMode === 'shared-key') {
+            if (!cfg.account_name || !cfg.account_name.trim()) {
+                return 'Account Name is required for shared-key auth mode.';
+            }
+            if (!cfg.account_key || !cfg.account_key.trim()) {
+                return 'Account Key is required for shared-key auth mode.';
+            }
+        } else if (!cfg.connection_string || !cfg.connection_string.trim()) {
+                return 'Connection String is required for connection-string auth mode.';
+            }
+
+        // Cross-mode leakage: SP fields must not be set in legacy mode.
+        if (cfg.tenant_id || cfg.client_id || cfg.client_secret) {
+            return `Service Principal fields (tenant_id / client_id / client_secret) must be empty when auth_mode is ${legacyMode}.`;
+        }
+        return null;
+    }
+
+    if (mode === AZURE_AUTH_SERVICE_PRINCIPAL) {
+        if (!cfg.tenant_id || !cfg.tenant_id.trim()) {
+            return 'Tenant ID is required for service-principal auth mode.';
+        }
+        if (!isValidAzureTenantID(cfg.tenant_id)) {
+            return 'Tenant ID must be a GUID or FQDN (e.g. contoso.onmicrosoft.com).';
+        }
+        if (!cfg.client_id || !cfg.client_id.trim()) {
+            return 'Client ID is required for service-principal auth mode.';
+        }
+        if (!cfg.client_secret || !cfg.client_secret.trim()) {
+            return 'Client Secret is required for service-principal auth mode.';
+        }
+
+        // Cross-mode leakage: legacy secrets must be empty in SP mode.
+        // Note: SECRET_SENTINEL is allowed in account_key etc. because the
+        // server resolves it back to the stored value before validating.
+        const isSentinelOrEmpty = (v?: string) => !v || v === SECRET_SENTINEL;
+        if (legacyMode === 'shared-key' && !isSentinelOrEmpty(cfg.account_key)) {
+            return 'Account Key must be empty when auth_mode is service-principal.';
+        }
+        if (legacyMode === 'connection-string' && !isSentinelOrEmpty(cfg.connection_string)) {
+            return 'Connection String must be empty when auth_mode is service-principal.';
+        }
+        if (legacyMode === 'connection-string') {
+            const ns = (cfg.service_bus_namespace || '').trim();
+            if (!ns) {
+                return 'Service Bus Namespace is required for service-principal auth mode (e.g. myns.servicebus.windows.net).';
+            }
+
+            // Mirror server-side validateServiceBusNamespace: strip sb:// and
+            // trailing /, then require FQDN-shape (dot, no whitespace, no path,
+            // no other scheme).
+            const stripped = ns.replace(/^sb:\/\//i, '').replace(/\/$/, '');
+            if (!stripped.includes('.') || (/[\s/\\]/).test(stripped) || stripped.includes('://')) {
+                return 'Service Bus Namespace must be a fully-qualified namespace (e.g. myns.servicebus.windows.net).';
+            }
+        }
+        return null;
+    }
+
+    return `Invalid auth_mode "${mode}".`;
+}
+
+// isValidAzureTenantID accepts either a GUID or an FQDN-shaped string.
+// Mirrors the server-side validateAzureTenantID in configuration.go.
+function isValidAzureTenantID(s: string): boolean {
+    const t = s.trim();
+    if (!t) {
+        return false;
+    }
+    const guid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    if (guid.test(t)) {
+        return true;
+    }
+
+    // FQDN-shape: must contain a dot, no scheme, no path, no whitespace.
+    if (!t.includes('.') || (/[\s/\\]/).test(t) || t.includes('://')) {
+        return false;
+    }
+    return true;
+}
+
+// ServicePrincipalFields renders the shared SP credential inputs
+// (tenant_id, client_id, client_secret). Reused across all three Azure
+// provider forms so the UI is consistent. Styles are read from the
+// lexically-enclosed `styles` object; this component is intentionally
+// declared inside the same module to avoid duplicating the styles object.
+function ServicePrincipalFieldsComponent({
+    ariaPrefix,
+    cfg,
+    onChange,
+    disabled,
+}: {
+    ariaPrefix: string;
+    cfg: AzureSPFields;
+    onChange: (field: string, value: string) => void;
+    disabled: boolean;
+}) {
+    return (
+        <>
+            <div style={styles.formSection}>
+                <div style={styles.formSectionTitle}>{'Service Principal'}</div>
+                <div style={styles.helpText}>
+                    {'Azure AD application credentials. The application must have data-plane RBAC (e.g. "Storage Queue Data Contributor" or "Storage Blob Data Contributor" or "Azure Service Bus Data Sender/Receiver") on the target resource. The plugin does NOT auto-create queues/containers in service-principal mode.'}
+                </div>
+                <div style={styles.inputGroup}>
+                    <label style={styles.label}>{'Tenant ID'}</label>
+                    <input
+                        aria-label={`${ariaPrefix} Tenant ID`}
+                        style={styles.input}
+                        type='text'
+                        value={cfg.tenant_id || ''}
+                        onChange={(e) => onChange('tenant_id', e.target.value)}
+                        disabled={disabled}
+                        placeholder='00000000-0000-0000-0000-000000000000 or contoso.onmicrosoft.com'
+                    />
+                </div>
+                <div style={styles.inputGroup}>
+                    <label style={styles.label}>{'Client ID'}</label>
+                    <input
+                        aria-label={`${ariaPrefix} Client ID`}
+                        style={styles.input}
+                        type='text'
+                        value={cfg.client_id || ''}
+                        onChange={(e) => onChange('client_id', e.target.value)}
+                        disabled={disabled}
+                        placeholder='Application (client) ID'
+                    />
+                </div>
+                <div style={styles.inputGroup}>
+                    <label style={styles.label}>{'Client Secret'}</label>
+                    <input
+                        aria-label={`${ariaPrefix} Client Secret`}
+                        style={styles.input}
+                        type='password'
+                        value={cfg.client_secret || ''}
+                        onChange={(e) => onChange('client_secret', e.target.value)}
+                        disabled={disabled}
+                        placeholder='Azure AD application client secret'
+                    />
+                    <div style={styles.helpText}>
+                        {'To keep the secret out of plugin config on disk, inject the whole connections JSON via the MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS / INBOUNDCONNECTIONS env var (Kubernetes Secret, CSI volume + init container, systemd LoadCredential=, or Vault).'}
+                    </div>
+                </div>
+            </div>
+        </>
+    );
+}
+
+function loadConnectionForEdit(stored: Connection): Connection {
+    const next: Connection = {...stored};
+    if (next.azure_queue) {
+        next.azure_queue = {
+            ...next.azure_queue,
+            account_key: next.azure_queue.account_key ? SECRET_SENTINEL : '',
+            client_secret: next.azure_queue.client_secret ? SECRET_SENTINEL : '',
+        };
+    }
+    if (next.azure_blob) {
+        next.azure_blob = {
+            ...next.azure_blob,
+            account_key: next.azure_blob.account_key ? SECRET_SENTINEL : '',
+            client_secret: next.azure_blob.client_secret ? SECRET_SENTINEL : '',
+        };
+    }
+    if (next.azure_servicebus) {
+        next.azure_servicebus = {
+            ...next.azure_servicebus,
+            connection_string: next.azure_servicebus.connection_string ? SECRET_SENTINEL : '',
+            blob_account_key: next.azure_servicebus.blob_account_key ? SECRET_SENTINEL : '',
+            client_secret: next.azure_servicebus.client_secret ? SECRET_SENTINEL : '',
+        };
+    }
+    return next;
+}
 
 function normalizeConnection(conn: Record<string, unknown>): Connection {
     if (conn.provider) {
@@ -511,7 +774,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
 
     const handleEdit = (index: number) => {
         setEditingIndex(index);
-        setEditForm({...connections[index]});
+        setEditForm(loadConnectionForEdit(connections[index]));
         setFormError(null);
     };
 
@@ -591,6 +854,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 nats: {...nats, subject: trimmedSubject},
                 azure_queue: undefined,
                 azure_blob: undefined,
+                azure_servicebus: undefined,
             };
         } else if (editForm.provider === 'azure-queue') {
             const azureQueue = editForm.azure_queue || emptyAzureQueueConfig;
@@ -602,20 +866,18 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 setFormError('Blob Service URL is required when file transfer is enabled.');
                 return;
             }
-            if (!azureQueue.account_name.trim()) {
-                setFormError('Account Name is required.');
-                return;
-            }
-            if (!azureQueue.account_key.trim()) {
-                setFormError('Account Key is required.');
-                return;
-            }
             if (!azureQueue.queue_name.trim()) {
                 setFormError('Queue Name is required.');
                 return;
             }
             if (editForm.file_transfer_enabled && !azureQueue.blob_container_name.trim()) {
                 setFormError('Blob Container Name is required when file transfer is enabled.');
+                return;
+            }
+
+            const queueAuthErr = validateAzureAuthFields(azureQueue, 'shared-key');
+            if (queueAuthErr) {
+                setFormError(queueAuthErr);
                 return;
             }
 
@@ -629,12 +891,13 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
             };
         } else if (editForm.provider === 'azure-servicebus') {
             const sb = editForm.azure_servicebus || emptyAzureServiceBusConfig;
-            if (!sb.connection_string.trim()) {
-                setFormError('Connection String is required.');
-                return;
-            }
             if (!sb.queue_name.trim()) {
                 setFormError('Queue Name is required.');
+                return;
+            }
+            const sbAuthErr = validateAzureAuthFields(sb, 'connection-string');
+            if (sbAuthErr) {
+                setFormError(sbAuthErr);
                 return;
             }
             if (editForm.file_transfer_enabled) {
@@ -642,17 +905,24 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                     setFormError('Blob Service URL is required when file transfer is enabled.');
                     return;
                 }
-                if (!sb.blob_account_name.trim()) {
-                    setFormError('Blob Account Name is required when file transfer is enabled.');
-                    return;
-                }
-                if (!sb.blob_account_key.trim()) {
-                    setFormError('Blob Account Key is required when file transfer is enabled.');
-                    return;
-                }
                 if (!sb.blob_container_name.trim()) {
                     setFormError('Blob Container Name is required when file transfer is enabled.');
                     return;
+                }
+
+                // Blob sidecar credential model is auth_mode dependent:
+                // connection-string mode requires explicit blob_account_*;
+                // service-principal mode inherits parent SP and forbids them.
+                const authMode = sb.auth_mode || AZURE_AUTH_CONNECTION_STRING;
+                if (authMode === AZURE_AUTH_CONNECTION_STRING) {
+                    if (!sb.blob_account_name.trim()) {
+                        setFormError('Blob Account Name is required when file transfer is enabled.');
+                        return;
+                    }
+                    if (!sb.blob_account_key.trim()) {
+                        setFormError('Blob Account Key is required when file transfer is enabled.');
+                        return;
+                    }
                 }
             }
 
@@ -670,14 +940,6 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                 setFormError('Service URL is required.');
                 return;
             }
-            if (!azureBlob.account_name.trim()) {
-                setFormError('Account Name is required.');
-                return;
-            }
-            if (!azureBlob.account_key.trim()) {
-                setFormError('Account Key is required.');
-                return;
-            }
             if (!azureBlob.blob_container_name.trim()) {
                 setFormError('Blob Container Name is required.');
                 return;
@@ -685,6 +947,11 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
             const flush = azureBlob.flush_interval_seconds;
             if (flush === undefined || Number.isNaN(flush) || flush < 5) {
                 setFormError('Flush Interval must be at least 5 seconds.');
+                return;
+            }
+            const blobAuthErr = validateAzureAuthFields(azureBlob, 'shared-key');
+            if (blobAuthErr) {
+                setFormError(blobAuthErr);
                 return;
             }
 
@@ -959,111 +1226,199 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                         </>
                     )}
 
-                    {editForm.provider === 'azure-queue' && (
-                        <>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Queue Service URL'}</label>
-                                <input
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_queue?.queue_service_url || ''}
-                                    onChange={(e) => handleAzureQueueChange('queue_service_url', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='https://myaccount.queue.core.windows.net'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Queue Storage service endpoint. For example, https://myaccount.queue.core.windows.net.'}
+                    {editForm.provider === 'azure-queue' && (() => {
+                        const qAuthMode = editForm.azure_queue?.auth_mode || AZURE_AUTH_SHARED_KEY;
+                        const qIsSP = qAuthMode === AZURE_AUTH_SERVICE_PRINCIPAL;
+                        return (
+                            <>
+                                <div style={styles.formRow}>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Auth Mode'}</label>
+                                        <select
+                                            aria-label='Azure Queue Auth Mode'
+                                            style={styles.select}
+                                            value={qAuthMode}
+                                            onChange={(e) => handleAzureQueueChange('auth_mode', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_AUTH_SHARED_KEY}>{'Shared Key (storage account key)'}</option>
+                                            <option value={AZURE_AUTH_SERVICE_PRINCIPAL}>{'Service Principal (Azure AD Client Secret)'}</option>
+                                        </select>
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Azure Cloud'}</label>
+                                        <select
+                                            aria-label='Azure Queue Cloud'
+                                            style={styles.select}
+                                            value={editForm.azure_queue?.azure_cloud || AZURE_CLOUD_PUBLIC}
+                                            onChange={(e) => handleAzureQueueChange('azure_cloud', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_CLOUD_PUBLIC}>{'Azure Public'}</option>
+                                            <option value={AZURE_CLOUD_USGOV}>{'Azure US Government'}</option>
+                                            <option value={AZURE_CLOUD_CHINA}>{'Azure China'}</option>
+                                        </select>
+                                    </div>
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Blob Service URL'}</label>
-                                <input
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_queue?.blob_service_url || ''}
-                                    onChange={(e) => handleAzureQueueChange('blob_service_url', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='https://myaccount.blob.core.windows.net'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Blob Storage service endpoint. Required when file transfer is enabled. For example, https://myaccount.blob.core.windows.net.'}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Queue Service URL'}</label>
+                                    <input
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_queue?.queue_service_url || ''}
+                                        onChange={(e) => handleAzureQueueChange('queue_service_url', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='https://myaccount.queue.core.windows.net'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Azure Queue Storage service endpoint. For example, https://myaccount.queue.core.windows.net.'}
+                                    </div>
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Account Name'}</label>
-                                <input
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_queue?.account_name || ''}
-                                    onChange={(e) => handleAzureQueueChange('account_name', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='myaccount'
-                                />
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Account Key'}</label>
-                                <input
-                                    style={styles.input}
-                                    type='password'
-                                    value={editForm.azure_queue?.account_key || ''}
-                                    onChange={(e) => handleAzureQueueChange('account_key', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='Paste key from Azure portal'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Storage account shared key.'}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Account Name'}</label>
+                                    <input
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_queue?.account_name || ''}
+                                        onChange={(e) => handleAzureQueueChange('account_name', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='myaccount'
+                                    />
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Queue Name'}</label>
-                                <input
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_queue?.queue_name || ''}
-                                    onChange={(e) => handleAzureQueueChange('queue_name', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='crossguard-messages'
-                                />
-                            </div>
-                        </>
-                    )}
+                                {!qIsSP && (
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Account Key'}</label>
+                                        <input
+                                            style={styles.input}
+                                            type='password'
+                                            value={editForm.azure_queue?.account_key || ''}
+                                            onChange={(e) => handleAzureQueueChange('account_key', e.target.value)}
+                                            disabled={disabled}
+                                            placeholder='Paste key from Azure portal'
+                                        />
+                                        <div style={styles.helpText}>
+                                            {'Azure Storage account shared key.'}
+                                        </div>
+                                    </div>
+                                )}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Queue Name'}</label>
+                                    <input
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_queue?.queue_name || ''}
+                                        onChange={(e) => handleAzureQueueChange('queue_name', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='crossguard-messages'
+                                    />
+                                </div>
+                                {qIsSP && (
+                                    <ServicePrincipalFieldsComponent
+                                        ariaPrefix='Azure Queue'
+                                        cfg={editForm.azure_queue || emptyAzureQueueConfig}
+                                        onChange={(field, value) => handleAzureQueueChange(field as keyof AzureQueueProviderConfig, value)}
+                                        disabled={disabled}
+                                    />
+                                )}
+                            </>
+                        );
+                    })()}
 
-                    {editForm.provider === 'azure-servicebus' && (
-                        <>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Connection String'}</label>
-                                <input
-                                    aria-label='Azure Service Bus Connection String'
-                                    style={styles.input}
-                                    type='password'
-                                    value={editForm.azure_servicebus?.connection_string || ''}
-                                    onChange={(e) => handleAzureServiceBusChange('connection_string', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=…;SharedAccessKey=…'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Service Bus SAS connection string. Treat as a secret.'}
+                    {editForm.provider === 'azure-servicebus' && (() => {
+                        const sbAuthMode = editForm.azure_servicebus?.auth_mode || AZURE_AUTH_CONNECTION_STRING;
+                        const sbIsSP = sbAuthMode === AZURE_AUTH_SERVICE_PRINCIPAL;
+                        return (
+                            <>
+                                <div style={styles.formRow}>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Auth Mode'}</label>
+                                        <select
+                                            aria-label='Azure Service Bus Auth Mode'
+                                            style={styles.select}
+                                            value={sbAuthMode}
+                                            onChange={(e) => handleAzureServiceBusChange('auth_mode', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_AUTH_CONNECTION_STRING}>{'Connection String (SAS)'}</option>
+                                            <option value={AZURE_AUTH_SERVICE_PRINCIPAL}>{'Service Principal (Azure AD Client Secret)'}</option>
+                                        </select>
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Azure Cloud'}</label>
+                                        <select
+                                            aria-label='Azure Service Bus Cloud'
+                                            style={styles.select}
+                                            value={editForm.azure_servicebus?.azure_cloud || AZURE_CLOUD_PUBLIC}
+                                            onChange={(e) => handleAzureServiceBusChange('azure_cloud', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_CLOUD_PUBLIC}>{'Azure Public'}</option>
+                                            <option value={AZURE_CLOUD_USGOV}>{'Azure US Government'}</option>
+                                            <option value={AZURE_CLOUD_CHINA}>{'Azure China'}</option>
+                                        </select>
+                                    </div>
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Queue Name'}</label>
-                                <input
-                                    aria-label='Azure Service Bus Queue Name'
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_servicebus?.queue_name || ''}
-                                    onChange={(e) => handleAzureServiceBusChange('queue_name', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='crossguard-relay'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Pre-created Service Bus queue. The plugin does not auto-create queues — use the Azure portal or ARM to create it with your desired LockDuration and MaxDeliveryCount.'}
+                                {!sbIsSP && (
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Connection String'}</label>
+                                    <input
+                                        aria-label='Azure Service Bus Connection String'
+                                        style={styles.input}
+                                        type='password'
+                                        value={editForm.azure_servicebus?.connection_string || ''}
+                                        onChange={(e) => handleAzureServiceBusChange('connection_string', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=…;SharedAccessKey=…'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Azure Service Bus SAS connection string. Treat as a secret.'}
+                                    </div>
                                 </div>
-                            </div>
-                            {editForm.file_transfer_enabled && (
+                            )}
+                                {sbIsSP && (
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Service Bus Namespace'}</label>
+                                    <input
+                                        aria-label='Azure Service Bus Namespace'
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_servicebus?.service_bus_namespace || ''}
+                                        onChange={(e) => handleAzureServiceBusChange('service_bus_namespace', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='myns.servicebus.windows.net'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Fully-qualified Service Bus namespace. Use the appropriate cloud suffix (e.g. .servicebus.usgovcloudapi.net for Azure US Government).'}
+                                    </div>
+                                </div>
+                            )}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Queue Name'}</label>
+                                    <input
+                                        aria-label='Azure Service Bus Queue Name'
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_servicebus?.queue_name || ''}
+                                        onChange={(e) => handleAzureServiceBusChange('queue_name', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='crossguard-relay'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Pre-created Service Bus queue. The plugin does not auto-create queues — use the Azure portal or ARM to create it with your desired LockDuration and MaxDeliveryCount.'}
+                                    </div>
+                                </div>
+                                {sbIsSP && (
+                                <ServicePrincipalFieldsComponent
+                                    ariaPrefix='Azure Service Bus'
+                                    cfg={editForm.azure_servicebus || emptyAzureServiceBusConfig}
+                                    onChange={(field, value) => handleAzureServiceBusChange(field as keyof AzureServiceBusProviderConfig, value)}
+                                    disabled={disabled}
+                                />
+                            )}
+                                {editForm.file_transfer_enabled && (
                                 <>
                                     <div style={styles.helpText}>
-                                        {'Service Bus is message-only. File attachments flow through a separate Azure Blob Storage container. The Blob credentials below are distinct from the Service Bus connection string above.'}
+                                        {sbIsSP ? 'Service Bus is message-only. File attachments flow through a separate Azure Blob Storage container. In service-principal mode, the blob sidecar inherits the parent SP credential; provide only the service URL and container name below.' : 'Service Bus is message-only. File attachments flow through a separate Azure Blob Storage container. The Blob credentials below are distinct from the Service Bus connection string above.'}
                                     </div>
                                     <div style={styles.inputGroup}>
                                         <label style={styles.label}>{'Blob Service URL'}</label>
@@ -1077,30 +1432,34 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                             placeholder='https://myaccount.blob.core.windows.net'
                                         />
                                     </div>
-                                    <div style={styles.inputGroup}>
-                                        <label style={styles.label}>{'Blob Account Name'}</label>
-                                        <input
-                                            aria-label='Azure Service Bus Blob Account Name'
-                                            style={styles.input}
-                                            type='text'
-                                            value={editForm.azure_servicebus?.blob_account_name || ''}
-                                            onChange={(e) => handleAzureServiceBusChange('blob_account_name', e.target.value)}
-                                            disabled={disabled}
-                                            placeholder='myaccount'
-                                        />
-                                    </div>
-                                    <div style={styles.inputGroup}>
-                                        <label style={styles.label}>{'Blob Account Key'}</label>
-                                        <input
-                                            aria-label='Azure Service Bus Blob Account Key'
-                                            style={styles.input}
-                                            type='password'
-                                            value={editForm.azure_servicebus?.blob_account_key || ''}
-                                            onChange={(e) => handleAzureServiceBusChange('blob_account_key', e.target.value)}
-                                            disabled={disabled}
-                                            placeholder='Paste key from Azure portal'
-                                        />
-                                    </div>
+                                    {!sbIsSP && (
+                                        <>
+                                            <div style={styles.inputGroup}>
+                                                <label style={styles.label}>{'Blob Account Name'}</label>
+                                                <input
+                                                    aria-label='Azure Service Bus Blob Account Name'
+                                                    style={styles.input}
+                                                    type='text'
+                                                    value={editForm.azure_servicebus?.blob_account_name || ''}
+                                                    onChange={(e) => handleAzureServiceBusChange('blob_account_name', e.target.value)}
+                                                    disabled={disabled}
+                                                    placeholder='myaccount'
+                                                />
+                                            </div>
+                                            <div style={styles.inputGroup}>
+                                                <label style={styles.label}>{'Blob Account Key'}</label>
+                                                <input
+                                                    aria-label='Azure Service Bus Blob Account Key'
+                                                    style={styles.input}
+                                                    type='password'
+                                                    value={editForm.azure_servicebus?.blob_account_key || ''}
+                                                    onChange={(e) => handleAzureServiceBusChange('blob_account_key', e.target.value)}
+                                                    disabled={disabled}
+                                                    placeholder='Paste key from Azure portal'
+                                                />
+                                            </div>
+                                        </>
+                                    )}
                                     <div style={styles.inputGroup}>
                                         <label style={styles.label}>{'Blob Container Name'}</label>
                                         <input
@@ -1115,78 +1474,121 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                     </div>
                                 </>
                             )}
-                        </>
-                    )}
+                            </>
+                        );
+                    })()}
 
-                    {editForm.provider === 'azure-blob' && (
-                        <>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Service URL'}</label>
-                                <input
-                                    aria-label='Azure Blob Service URL'
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_blob?.service_url || ''}
-                                    onChange={(e) => handleAzureBlobChange('service_url', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='https://myaccount.blob.core.windows.net'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Blob Storage service endpoint. For example, https://myaccount.blob.core.windows.net.'}
+                    {editForm.provider === 'azure-blob' && (() => {
+                        const bAuthMode = editForm.azure_blob?.auth_mode || AZURE_AUTH_SHARED_KEY;
+                        const bIsSP = bAuthMode === AZURE_AUTH_SERVICE_PRINCIPAL;
+                        return (
+                            <>
+                                <div style={styles.formRow}>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Auth Mode'}</label>
+                                        <select
+                                            aria-label='Azure Blob Auth Mode'
+                                            style={styles.select}
+                                            value={bAuthMode}
+                                            onChange={(e) => handleAzureBlobChange('auth_mode', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_AUTH_SHARED_KEY}>{'Shared Key (storage account key)'}</option>
+                                            <option value={AZURE_AUTH_SERVICE_PRINCIPAL}>{'Service Principal (Azure AD Client Secret)'}</option>
+                                        </select>
+                                    </div>
+                                    <div style={styles.inputGroup}>
+                                        <label style={styles.label}>{'Azure Cloud'}</label>
+                                        <select
+                                            aria-label='Azure Blob Cloud'
+                                            style={styles.select}
+                                            value={editForm.azure_blob?.azure_cloud || AZURE_CLOUD_PUBLIC}
+                                            onChange={(e) => handleAzureBlobChange('azure_cloud', e.target.value)}
+                                            disabled={disabled}
+                                        >
+                                            <option value={AZURE_CLOUD_PUBLIC}>{'Azure Public'}</option>
+                                            <option value={AZURE_CLOUD_USGOV}>{'Azure US Government'}</option>
+                                            <option value={AZURE_CLOUD_CHINA}>{'Azure China'}</option>
+                                        </select>
+                                    </div>
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Account Name'}</label>
-                                <input
-                                    aria-label='Azure Blob Account Name'
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_blob?.account_name || ''}
-                                    onChange={(e) => handleAzureBlobChange('account_name', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='myaccount'
-                                />
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Account Key'}</label>
-                                <input
-                                    aria-label='Azure Blob Account Key'
-                                    style={styles.input}
-                                    type='password'
-                                    value={editForm.azure_blob?.account_key || ''}
-                                    onChange={(e) => handleAzureBlobChange('account_key', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='Paste key from Azure portal'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Azure Storage account shared key.'}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Service URL'}</label>
+                                    <input
+                                        aria-label='Azure Blob Service URL'
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_blob?.service_url || ''}
+                                        onChange={(e) => handleAzureBlobChange('service_url', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='https://myaccount.blob.core.windows.net'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Azure Blob Storage service endpoint. For example, https://myaccount.blob.core.windows.net.'}
+                                    </div>
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Blob Container Name'}</label>
-                                <input
-                                    aria-label='Azure Blob Container Name'
-                                    style={styles.input}
-                                    type='text'
-                                    value={editForm.azure_blob?.blob_container_name || ''}
-                                    onChange={(e) => handleAzureBlobChange('blob_container_name', e.target.value)}
-                                    disabled={disabled}
-                                    placeholder='crossguard-batches'
-                                />
-                                <div style={styles.helpText}>
-                                    {'Blob container used for both batched message files and deferred file attachments.'}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Account Name'}</label>
+                                    <input
+                                        aria-label='Azure Blob Account Name'
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_blob?.account_name || ''}
+                                        onChange={(e) => handleAzureBlobChange('account_name', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='myaccount'
+                                    />
                                 </div>
-                            </div>
-                            <div style={styles.inputGroup}>
-                                <label style={styles.label}>{'Flush Interval (seconds)'}</label>
-                                <input
-                                    aria-label='Azure Blob Flush Interval in seconds'
-                                    style={styles.input}
-                                    type='number'
-                                    min={5}
-                                    step={1}
-                                    value={editForm.azure_blob?.flush_interval_seconds ?? ''}
-                                    onChange={(e) => {
+                                {!bIsSP && (
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Account Key'}</label>
+                                    <input
+                                        aria-label='Azure Blob Account Key'
+                                        style={styles.input}
+                                        type='password'
+                                        value={editForm.azure_blob?.account_key || ''}
+                                        onChange={(e) => handleAzureBlobChange('account_key', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='Paste key from Azure portal'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Azure Storage account shared key.'}
+                                    </div>
+                                </div>
+                            )}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Blob Container Name'}</label>
+                                    <input
+                                        aria-label='Azure Blob Container Name'
+                                        style={styles.input}
+                                        type='text'
+                                        value={editForm.azure_blob?.blob_container_name || ''}
+                                        onChange={(e) => handleAzureBlobChange('blob_container_name', e.target.value)}
+                                        disabled={disabled}
+                                        placeholder='crossguard-batches'
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'Blob container used for both batched message files and deferred file attachments.'}
+                                    </div>
+                                </div>
+                                {bIsSP && (
+                                <ServicePrincipalFieldsComponent
+                                    ariaPrefix='Azure Blob'
+                                    cfg={editForm.azure_blob || emptyAzureBlobConfig}
+                                    onChange={(field, value) => handleAzureBlobChange(field as keyof AzureBlobProviderConfig, value)}
+                                    disabled={disabled}
+                                />
+                            )}
+                                <div style={styles.inputGroup}>
+                                    <label style={styles.label}>{'Flush Interval (seconds)'}</label>
+                                    <input
+                                        aria-label='Azure Blob Flush Interval in seconds'
+                                        style={styles.input}
+                                        type='number'
+                                        min={5}
+                                        step={1}
+                                        value={editForm.azure_blob?.flush_interval_seconds ?? ''}
+                                        onChange={(e) => {
                                         const raw = e.target.value;
                                         if (raw === '') {
                                             handleAzureBlobChange('flush_interval_seconds', undefined);
@@ -1198,14 +1600,15 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                         }
                                         handleAzureBlobChange('flush_interval_seconds', parsed);
                                     }}
-                                    disabled={disabled}
-                                />
-                                <div style={styles.helpText}>
-                                    {'How often batched message files are uploaded to blob storage. Default 60 seconds, minimum 5.'}
+                                        disabled={disabled}
+                                    />
+                                    <div style={styles.helpText}>
+                                        {'How often batched message files are uploaded to blob storage. Default 60 seconds, minimum 5.'}
+                                    </div>
                                 </div>
-                            </div>
-                        </>
-                    )}
+                            </>
+                        );
+                    })()}
 
                     {!isInbound && (
                         <div style={styles.inputGroup}>
@@ -1363,20 +1766,37 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                         </div>
                     </div>
                     {editForm.file_transfer_enabled && editForm.provider === 'azure-queue' && (
-                        <div style={styles.inputGroup}>
-                            <label style={styles.label}>{'Blob Container Name'}</label>
-                            <input
-                                style={styles.input}
-                                type='text'
-                                value={editForm.azure_queue?.blob_container_name || ''}
-                                onChange={(e) => handleAzureQueueChange('blob_container_name', e.target.value)}
-                                disabled={disabled}
-                                placeholder='crossguard-files'
-                            />
-                            <div style={styles.helpText}>
-                                {'Azure Blob Storage container for file attachments.'}
+                        <>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Blob Service URL'}</label>
+                                <input
+                                    aria-label='Azure Queue Blob Service URL'
+                                    style={styles.input}
+                                    type='text'
+                                    value={editForm.azure_queue?.blob_service_url || ''}
+                                    onChange={(e) => handleAzureQueueChange('blob_service_url', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='https://myaccount.blob.core.windows.net'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Azure Blob Storage service endpoint. For example, https://myaccount.blob.core.windows.net.'}
+                                </div>
                             </div>
-                        </div>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.label}>{'Blob Container Name'}</label>
+                                <input
+                                    style={styles.input}
+                                    type='text'
+                                    value={editForm.azure_queue?.blob_container_name || ''}
+                                    onChange={(e) => handleAzureQueueChange('blob_container_name', e.target.value)}
+                                    disabled={disabled}
+                                    placeholder='crossguard-files'
+                                />
+                                <div style={styles.helpText}>
+                                    {'Azure Blob Storage container for file attachments.'}
+                                </div>
+                            </div>
+                        </>
                     )}
                     {editForm.file_transfer_enabled && (
                         <>
@@ -1579,9 +1999,7 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
     };
 
     const sectionTitle = isInbound ? 'Inbound' : 'Outbound';
-    const sectionDesc = isInbound ?
-        'Messages received from external providers and relayed into Mattermost.' :
-        'Messages sent from Mattermost to external providers.';
+    const sectionDesc = isInbound ? 'Messages received from external providers and relayed into Mattermost.' : 'Messages sent from Mattermost to external providers.';
     const directionStyle = isInbound ? styles.directionInbound : styles.directionOutbound;
 
     return (

@@ -116,7 +116,7 @@
                     <td><strong>Name</strong></td>
                     <td><code>name</code></td>
                     <td>Yes</td>
-                    <td>Lowercase letters, numbers, and hyphens only. Pattern: <code>^[a-z0-9]+(-[a-z0-9]+)*$</code>. Must be unique across ALL connections.</td>
+                    <td>Lowercase letters, numbers, and hyphens only. Pattern: <code>^[a-z0-9]+(-[a-z0-9]+)*$</code>. Must be unique within its direction (inbound or outbound). The same name may appear in both an inbound and an outbound entry, which is the loopback configuration.</td>
                     <td>Human-readable identifier. Used in all commands and API calls. Examples: <code>relay-to-b</code>, <code>high-side</code>, <code>nats-prod</code></td>
                 </tr>
                 <tr>
@@ -411,22 +411,128 @@
 
         <p><strong>Dead-Letter Queue (DLQ) behaviour:</strong> If handler errors cause redelivery count to exceed the queue's <code>MaxDeliveryCount</code>, Azure Service Bus auto-moves the message to the queue's dead-letter sub-queue. The plugin does NOT inspect or process DLQ messages; they stop appearing in receive polls. Use the Azure Portal, <code>az servicebus queue message</code> CLI, or Azure monitoring alerts to inspect the DLQ. The plugin logs a WARN with error code <code>26004</code> (<code>ServiceBusRedelivery</code>) on every redelivery so operators can detect poison-message buildup before DLQ moves happen.</p>
 
+        <!-- Service Principal Authentication -->
+        <h3 id="service-principal">Azure Service Principal Authentication</h3>
+        <p>All three Azure providers (Queue, Blob, Service Bus) support <strong>Azure AD Service Principal authentication</strong> as an alternative to shared keys / SAS connection strings. Service Principal uses the AAD <code>client_credentials</code> grant: an application registered in Azure AD authenticates with a tenant ID, a client (application) ID, and a client secret. The plugin acquires bearer tokens from AAD and uses them to call the Azure data plane.</p>
+
+        <p><strong>Why this matters:</strong> Shared keys grant full account access and cannot be scoped or rotated centrally. Service Principal + Azure RBAC lets you grant a single AAD identity exactly the permissions it needs on a specific queue, container, or namespace, and rotation happens in AAD without touching plugin config.</p>
+
+        <h4>Phase 1 Deployment Guidance</h4>
+        <p>This release supports the <strong>Client Secret</strong> flow only. Client certificate auth and Managed Identity are tracked as later phases. From a compliance / threat-model perspective:</p>
+        <ul>
+            <li><strong>Acceptable for:</strong> development, staging, and production environments paired with a strict secret-rotation policy (90-day maximum). Federal customers using Azure Government with rotation tooling can deploy Phase 1 in production.</li>
+            <li><strong>Not the recommended posture for:</strong> high-side ATO environments where shared-secret material at rest is a finding. For those environments, wait for Phase 2 (certificate auth via Azure Key Vault + CSI driver) or use the Mattermost env-var substitution mechanism described below to keep the secret out of plugin config entirely.</li>
+        </ul>
+
+        <h4>Known Exposure: Secret in Plugin Config (Phase 1B Follow-Up)</h4>
+        <p>The Mattermost <code>GET /api/v4/config</code> endpoint returns plugin custom-settings as cleartext to any System Admin. This affects <strong>all</strong> Crossguard secret fields (<code>account_key</code>, <code>connection_string</code>, <code>blob_account_key</code>, <code>client_secret</code>): an admin opening the System Console will see the secret value in their browser's network tab and any <code>mmctl config show</code> output will include it. A structural fix that replaces the cleartext with a reference is tracked as Phase 1B.</p>
+        <p><strong>Immediate Federal mitigation:</strong> inject the entire connections JSON via Mattermost's plugin-settings env-var substitution. Setting <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> (and the inbound counterpart) overrides whatever is stored in plugin config at load time; the value can come from a Kubernetes Secret, a CSI volume + init container, systemd <code>LoadCredential=</code>, or HashiCorp Vault. The credential then lives only in the Mattermost process environment, not in <code>config.json</code> on disk, not in the configuration database, and not in <code>GET /api/v4/config</code> responses. This is the same mechanism Mattermost uses for every other plugin secret.</p>
+
+        <h4>Common Service Principal Fields</h4>
+        <p>The following fields are shared across all three Azure providers when <code>auth_mode</code> is <code>service-principal</code>:</p>
+        <table class="field-table">
+            <thead>
+                <tr><th>Field</th><th>Required</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>auth_mode</code></td>
+                    <td>No</td>
+                    <td>String enum. Queue/Blob: <code>"shared-key"</code> (default) or <code>"service-principal"</code>. Service Bus: <code>"connection-string"</code> (default) or <code>"service-principal"</code>.</td>
+                    <td>Selects the credential type. Empty defaults to the legacy mode for backward compatibility (existing configs keep working unchanged).</td>
+                </tr>
+                <tr>
+                    <td><code>azure_cloud</code></td>
+                    <td>No</td>
+                    <td>String enum: <code>"public"</code> (default), <code>"usgov"</code>, <code>"china"</code>.</td>
+                    <td>Selects the Azure cloud environment. Passed to the AAD authority host for credential acquisition. For Queue and Blob, also passed to the data-plane SDK client options. For Service Bus, data-plane routing comes from the FQDN namespace, so only the credential receives the cloud option.</td>
+                </tr>
+                <tr>
+                    <td><code>tenant_id</code></td>
+                    <td>Yes (SP)</td>
+                    <td>String. GUID or domain form (e.g., <code>contoso.onmicrosoft.com</code>).</td>
+                    <td>Azure AD directory (tenant) ID.</td>
+                </tr>
+                <tr>
+                    <td><code>client_id</code></td>
+                    <td>Yes (SP)</td>
+                    <td>String (GUID).</td>
+                    <td>Azure AD application (client) ID for the Service Principal.</td>
+                </tr>
+                <tr>
+                    <td><code>client_secret</code></td>
+                    <td>Yes (SP)</td>
+                    <td>String (secret).</td>
+                    <td>Inline client secret value. Required in SP mode. To keep the secret out of plugin config on disk, inject the whole connections JSON via the <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> / <code>INBOUNDCONNECTIONS</code> env var (see Phase 1B mitigation above).</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h4>Azure Service Bus &ndash; Additional SP Field</h4>
+        <table class="field-table">
+            <thead>
+                <tr><th>Field</th><th>Required</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>service_bus_namespace</code></td>
+                    <td>Yes (SP)</td>
+                    <td>String (FQDN).</td>
+                    <td>Fully-qualified Service Bus namespace, e.g., <code>myns.servicebus.windows.net</code> for Public, <code>myns.servicebus.usgovcloudapi.net</code> for US Government. The SAS connection string used to encode this for the legacy mode; in SP mode it must be supplied separately. If you accidentally include the <code>sb://</code> scheme, it is stripped.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h4>Minimum Required Azure RBAC Roles</h4>
+        <p>Grant the Service Principal these data-plane roles at the resource scope. The plugin <strong>skips auto-creation</strong> of queues/containers in SP mode &mdash; you must pre-provision them via the Azure Portal, ARM template, or <code>az</code> CLI. This means the operator does not need management-plane (Owner / Contributor) roles, which is the correct least-privilege posture.</p>
+        <ul>
+            <li><strong>Azure Queue provider:</strong> <code>Storage Queue Data Contributor</code> on the Queue Storage account. If file transfer is enabled, also grant <code>Storage Blob Data Contributor</code> on the same account.</li>
+            <li><strong>Azure Blob provider:</strong> <code>Storage Blob Data Contributor</code> on the Blob Storage account.</li>
+            <li><strong>Azure Service Bus provider:</strong> <code>Azure Service Bus Data Sender</code> AND <code>Azure Service Bus Data Receiver</code> on the queue (or on the namespace). If file transfer is enabled and the blob sidecar inherits the parent SP credential (the default in SP mode), the same SP also needs <code>Storage Blob Data Contributor</code> on the blob storage account.</li>
+        </ul>
+        <p><strong>Owner-tier roles are NOT required.</strong> If you see startup errors about <code>AuthorizationPermissionMismatch</code> on a Create call, double-check that the queue/container has been pre-provisioned and that the SP has the correct data-plane role.</p>
+
+        <h4>Service Bus Blob Sidecar Credential Inheritance (SP Mode)</h4>
+        <p>When Azure Service Bus is in SP mode the blob sidecar <strong>inherits the parent SP credential</strong>: do NOT set <code>blob_account_name</code> or <code>blob_account_key</code>, validation rejects the save if you do. This empty-fields rule applies unconditionally in SP mode, even when <code>file_transfer_enabled</code> is false, so a stored shared-key cannot linger across a file-transfer toggle. When file transfer is enabled, provide <code>blob_service_url</code> and <code>blob_container_name</code>. The same Service Principal must have the appropriate roles on both the Service Bus namespace and the blob storage account. Mixed-credential deployments (one SP for AMQP, a different SP or shared key for blob) are deferred to Phase 2.</p>
+
+        <h4>Azure Government (Sovereign Cloud) Setup</h4>
+        <p>To configure a connection for Azure US Government:</p>
+        <ol>
+            <li>Set <code>azure_cloud</code> to <code>usgov</code>.</li>
+            <li>Use the US Gov endpoints in <code>queue_service_url</code>, <code>blob_service_url</code>, <code>service_url</code>, or <code>service_bus_namespace</code>: <code>*.queue.core.usgovcloudapi.net</code>, <code>*.blob.core.usgovcloudapi.net</code>, <code>*.servicebus.usgovcloudapi.net</code>.</li>
+            <li>Register the Service Principal in the Azure US Government AAD tenant (not the commercial tenant). Grant the data-plane RBAC roles described above.</li>
+        </ol>
+        <p>The plugin passes the cloud configuration to <code>azidentity</code> so token acquisition routes to <code>login.microsoftonline.us</code> automatically; you do not need to override an authority host.</p>
+
+        <h4>Save-Time Credential Probe</h4>
+        <p>When you save a plugin configuration that includes one or more SP connections, the plugin acquires a token from AAD for each SP connection before the save commits. Bad tenant/client/secret values fail the save with a sanitized error message instead of producing repeated runtime failures during the relay loop. The probe has a 10-second timeout. Errors are scrubbed of any credential material before being logged or surfaced to the admin UI.</p>
+
+        <h4>Secret Hydration in the Admin Console</h4>
+        <p>When you open an existing connection in the System Console, password fields (including <code>client_secret</code>, <code>account_key</code>, <code>connection_string</code>, <code>blob_account_key</code>) are hydrated with a distinctive sentinel token (<code>__CROSSGUARD_SECRET_UNCHANGED__</code>) instead of the stored cleartext. The token is rendered as bullets in the password input and never round-trips to a browser as a real secret. If you save the form without editing a password field, the sentinel is sent back to the server and the stored value is preserved.</p>
+        <ul>
+            <li><strong>To rotate a secret:</strong> paste the new value into the field and save.</li>
+            <li><strong>To leave a secret unchanged:</strong> do nothing &mdash; do not delete the field contents.</li>
+            <li><strong>To clear a stored secret</strong> (for example, when migrating from shared-key to service-principal): clear the field and save. An empty inbound value is honored as an explicit clear.</li>
+        </ul>
+
         <!-- Validation Rules -->
         <h3>Validation Rules Summary</h3>
         <ol>
-            <li>Names must be globally unique across inbound AND outbound connections</li>
+            <li>Names must be unique within each direction (inbound or outbound). The same bare name may appear in both lists, which is the loopback configuration where one server is both publishing and subscribing on the same transport</li>
             <li>Names must be lowercase alphanumeric with hyphens (no spaces, underscores, uppercase)</li>
             <li>Subject must always start with <code>crossguard.</code></li>
             <li>Both sides of a relay must use the same NATS subject</li>
             <li>Auth credentials must be complete (both username AND password for credentials auth)</li>
             <li>TLS cert and key must be provided as a pair (enforced at config save time)</li>
-            <li>Azure Queue connections require <code>queue_service_url</code>, <code>account_name</code>, <code>account_key</code>, and <code>queue_name</code></li>
+            <li>Azure Queue connections require <code>queue_service_url</code> and <code>queue_name</code>; shared-key mode additionally requires <code>account_name</code> and <code>account_key</code></li>
             <li>Azure Queue connections require <code>blob_service_url</code> and <code>blob_container_name</code> when file transfer is enabled</li>
-            <li>Azure Blob connections require <code>service_url</code>, <code>account_name</code>, <code>account_key</code>, and <code>blob_container_name</code></li>
+            <li>Azure Blob connections require <code>service_url</code> and <code>blob_container_name</code>; shared-key mode additionally requires <code>account_name</code> and <code>account_key</code></li>
             <li>Azure Blob <code>flush_interval_seconds</code> must be at least 5 when set; <code>blob_lock_max_age_seconds</code> must be at least 30 when set</li>
-            <li>Azure Service Bus connections require <code>connection_string</code> and <code>queue_name</code></li>
+            <li>Azure Service Bus connections require <code>queue_name</code>; connection-string mode additionally requires <code>connection_string</code>; service-principal mode additionally requires <code>service_bus_namespace</code></li>
             <li>Azure Service Bus <code>queue_name</code> is capped at 260 characters and allows only <code>A-Z a-z 0-9 . _ - /</code></li>
-            <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code>, <code>blob_account_name</code>, <code>blob_account_key</code>, and <code>blob_container_name</code></li>
+            <li>Azure Service Bus connections with file transfer enabled also require <code>blob_service_url</code> and <code>blob_container_name</code>; in connection-string mode also <code>blob_account_name</code> and <code>blob_account_key</code>. In service-principal mode <code>blob_account_name</code> and <code>blob_account_key</code> must be <strong>empty</strong> (sidecar inherits parent SP); this empty-fields rule applies unconditionally in SP mode, including when file transfer is disabled, so stale shared-key material cannot survive a file-transfer toggle</li>
+            <li>When <code>auth_mode</code> is <code>service-principal</code>: <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and <code>client_secret</code> are required; the corresponding legacy field (<code>account_key</code> / <code>connection_string</code>) must be empty</li>
+            <li>When <code>auth_mode</code> is set, <code>azure_cloud</code> must be one of <code>public</code>, <code>usgov</code>, or <code>china</code> when present; empty defaults to <code>public</code></li>
         </ol>
 
         <!-- Relay Settings -->

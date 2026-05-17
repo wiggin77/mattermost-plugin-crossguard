@@ -1119,42 +1119,47 @@ func TestAzureBlobProvider_RecoverDirectory(t *testing.T) {
 }
 
 func TestTestAzureBlobConnectionOps(t *testing.T) {
-	t.Run("create error not-exists is wrapped", func(t *testing.T) {
-		ops := &fakeBlobOps{createFn: func(ctx context.Context) error { return errors.New("permission") }}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to create container")
-	})
-
-	t.Run("already exists error continues", func(t *testing.T) {
+	t.Run("list error wrapped", func(t *testing.T) {
 		ops := &fakeBlobOps{
-			createFn: func(ctx context.Context) error { return errors.New(azureErrContainerAlreadyExists) },
-		}
-		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), ops))
-	})
-
-	t.Run("upload error wrapped", func(t *testing.T) {
-		ops := &fakeBlobOps{
-			uploadFn: func(ctx context.Context, name string, data []byte, metadata map[string]*string) error {
-				return errors.New("u")
+			listFn: func(ctx context.Context, prefix string, includeMetadata bool) ([]blobListing, error) {
+				return nil, errors.New("permission")
 			},
 		}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
+		err := testAzureBlobConnectionOps(t.Context(), ops, "c1", AzureAuthSharedKey)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to upload test blob")
+		assert.Contains(t, err.Error(), "container")
+		assert.Contains(t, err.Error(), "c1")
 	})
 
-	t.Run("delete error wrapped", func(t *testing.T) {
+	t.Run("not-found error in SP mode gets actionable hint", func(t *testing.T) {
 		ops := &fakeBlobOps{
-			deleteFn: func(ctx context.Context, name string) error { return errors.New("d") },
+			listFn: func(ctx context.Context, prefix string, includeMetadata bool) ([]blobListing, error) {
+				return nil, errors.New("RESPONSE 404: ContainerNotFound; The specified container does not exist.")
+			},
 		}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
+		err := testAzureBlobConnectionOps(t.Context(), ops, "missing", AzureAuthServicePrincipal)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to delete test blob")
+		assert.Contains(t, err.Error(), "Pre-provision",
+			"SP-mode 404 should tell the operator to pre-provision the container")
+		assert.Contains(t, err.Error(), "missing")
+	})
+
+	t.Run("not-found error in shared-key mode is milder", func(t *testing.T) {
+		ops := &fakeBlobOps{
+			listFn: func(ctx context.Context, prefix string, includeMetadata bool) ([]blobListing, error) {
+				return nil, errors.New("RESPONSE 404: ContainerNotFound; The specified container does not exist.")
+			},
+		}
+		err := testAzureBlobConnectionOps(t.Context(), ops, "missing", AzureAuthSharedKey)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.NotContains(t, err.Error(), "Pre-provision",
+			"shared-key mode should not push the pre-provision message (auto-create runs at startup)")
 	})
 
 	t.Run("happy path", func(t *testing.T) {
-		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), &fakeBlobOps{}))
+		// fakeBlobOps with no listFn returns nil, nil; that's a healthy probe.
+		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), &fakeBlobOps{}, "c1", AzureAuthSharedKey))
 	})
 }
 

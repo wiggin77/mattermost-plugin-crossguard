@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -822,7 +824,7 @@ func TestNewAzureProvider_InvalidCredential(t *testing.T) {
 		QueueServiceURL: "https://acct.queue.core.windows.net",
 		QueueName:       "q1",
 	}
-	_, err := newAzureProvider(cfg, api)
+	_, err := newAzureProvider(t.Context(), cfg, api)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared key credential")
 }
@@ -837,4 +839,157 @@ func TestTestAzureQueueConnection_InvalidCredential(t *testing.T) {
 	err := testAzureQueueConnection(cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared key credential")
+}
+
+// ----- newAzureProvider SP branch coverage -----
+
+// validSPQueueCfg returns a syntactically valid azure-queue config in SP mode.
+// azidentity does not contact AAD during credential construction, so the
+// constructor runs to completion locally; only Subscribe/Publish/test would
+// hit the network. This lets us exercise the SP code path without mocking
+// the SDK clients.
+func validSPQueueCfg() AzureQueueProviderConfig {
+	return AzureQueueProviderConfig{
+		QueueServiceURL: "https://acct.queue.core.windows.net",
+		QueueName:       "q1",
+		AuthMode:        AzureAuthServicePrincipal,
+		AzureCloud:      AzureCloudPublic,
+		TenantID:        "11111111-2222-3333-4444-555555555555",
+		ClientID:        "client-uuid",
+		ClientSecret:    "topsec",
+	}
+}
+
+func TestNewAzureProvider_SPMode_HappyPath(t *testing.T) {
+	api := &plugintest.API{}
+	defer api.AssertExpectations(t)
+	// In SP mode the constructor must emit the audit log line; no Create()
+	// call against Azure (skipped in SP mode).
+	api.On("LogInfo", "Azure auth (service-principal): credential constructed",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return().Once()
+
+	p, err := newAzureProvider(t.Context(), validSPQueueCfg(), api)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+}
+
+func TestNewAzureProvider_SPMode_BadCloud(t *testing.T) {
+	cfg := validSPQueueCfg()
+	cfg.AzureCloud = "atlantis"
+	_, err := newAzureProvider(t.Context(), cfg, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-queue config")
+	assert.Contains(t, err.Error(), "unknown azure_cloud")
+}
+
+func TestNewAzureProvider_SPMode_BadTenant(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("LogError", "Azure Queue: service principal credential failed",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return().Once()
+	defer api.AssertExpectations(t)
+
+	cfg := validSPQueueCfg()
+	cfg.TenantID = "" // azidentity rejects empty tenant
+	_, err := newAzureProvider(t.Context(), cfg, api)
+	require.Error(t, err)
+}
+
+func TestNewAzureProvider_UnknownAuthMode(t *testing.T) {
+	cfg := validSPQueueCfg()
+	cfg.AuthMode = "weird-mode"
+	_, err := newAzureProvider(t.Context(), cfg, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown auth_mode")
+}
+
+// ----- newAzureProviderBlobSidecar coverage -----
+
+func TestNewAzureProviderBlobSidecar_SPMode_NoAutoCreate(t *testing.T) {
+	// SP mode must NOT call CreateContainer. We can't easily mock the
+	// container.Client constructor; instead exercise the function with a
+	// valid SP cfg and verify it returns a non-nil ops adapter without
+	// invoking any API method (no LogWarn, no LogError -- because the
+	// constructor doesn't reach the create-container path).
+	api := &plugintest.API{}
+	defer api.AssertExpectations(t)
+
+	cfg := AzureQueueProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+		TenantID:          "11111111-2222-3333-4444-555555555555",
+		ClientID:          "client-uuid",
+		ClientSecret:      "topsec",
+	}
+	ops, err := newAzureProviderBlobSidecar(t.Context(), cfg, AzureAuthServicePrincipal, cloud.AzurePublic, api)
+	require.NoError(t, err)
+	require.NotNil(t, ops)
+}
+
+func TestNewAzureProviderBlobSidecar_SPMode_BadTenant(t *testing.T) {
+	cfg := AzureQueueProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+		TenantID:          "", // azidentity rejects
+		ClientID:          "client-uuid",
+		ClientSecret:      "topsec",
+	}
+	_, err := newAzureProviderBlobSidecar(t.Context(), cfg, AzureAuthServicePrincipal, cloud.AzurePublic, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-queue blob sidecar SP credential")
+}
+
+func TestNewAzureProviderBlobSidecar_SharedKey_BadAccountKey(t *testing.T) {
+	cfg := AzureQueueProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+		AccountName:       "acct",
+		AccountKey:        "not-valid-base64-!!!",
+	}
+	_, err := newAzureProviderBlobSidecar(t.Context(), cfg, AzureAuthSharedKey, cloud.AzurePublic, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-queue blob sidecar shared key")
+}
+
+func TestNewAzureProviderBlobSidecar_UnknownAuthMode(t *testing.T) {
+	cfg := AzureQueueProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+	}
+	_, err := newAzureProviderBlobSidecar(t.Context(), cfg, "weird-mode", cloud.AzurePublic, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-queue blob sidecar: unknown auth_mode")
+}
+
+// ----- testAzureQueueConnection SP branch coverage -----
+
+func TestTestAzureQueueConnection_BadCloud(t *testing.T) {
+	cfg := validSPQueueCfg()
+	cfg.AzureCloud = "atlantis"
+	err := testAzureQueueConnection(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-queue config")
+	assert.Contains(t, err.Error(), "unknown azure_cloud")
+}
+
+func TestTestAzureQueueConnection_SPMode_BadTenant(t *testing.T) {
+	cfg := validSPQueueCfg()
+	cfg.TenantID = ""
+	err := testAzureQueueConnection(cfg)
+	require.Error(t, err)
+	// Falls through buildClientSecretCredential, which wraps with the
+	// "azidentity NewClientSecretCredential" prefix.
+	assert.Contains(t, err.Error(), "azidentity NewClientSecretCredential")
+}
+
+func TestTestAzureQueueConnection_UnknownAuthMode(t *testing.T) {
+	cfg := validSPQueueCfg()
+	cfg.AuthMode = "weird-mode"
+	err := testAzureQueueConnection(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown auth_mode")
 }

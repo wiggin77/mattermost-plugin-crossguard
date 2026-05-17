@@ -41,6 +41,8 @@ type TeamStatusEntry struct {
 }
 
 // RedactedConnection exposes only safe fields from a connection config.
+// Secret material (account_key, connection_string, client_secret*) is
+// deliberately omitted; the renderer in redactConnection enforces this.
 type RedactedConnection struct {
 	Name                string `json:"name"`
 	Direction           string `json:"direction"`
@@ -54,6 +56,17 @@ type RedactedConnection struct {
 	MessageFormat       string `json:"message_format,omitempty"`
 	QueueName           string `json:"queue_name,omitempty"`
 	BlobContainerName   string `json:"blob_container_name,omitempty"`
+
+	// Azure Service Principal: safe fields only. tenant_id / client_id /
+	// azure_cloud / service_bus_namespace are operationally useful for
+	// admins debugging which AAD identity a connection runs as, and none
+	// of them are credential material. client_secret* fields are NEVER
+	// surfaced; see TestRedactConnection_NoSecretsExposed for the contract.
+	AuthMode            string `json:"auth_mode,omitempty"`
+	TenantID            string `json:"tenant_id,omitempty"`
+	ClientID            string `json:"client_id,omitempty"`
+	AzureCloud          string `json:"azure_cloud,omitempty"`
+	ServiceBusNamespace string `json:"service_bus_namespace,omitempty"`
 }
 
 // GlobalStatusResponse is the JSON response for the system-wide status endpoint.
@@ -925,15 +938,32 @@ func redactConnection(conn ConnectionConfig, direction string) RedactedConnectio
 	if conn.AzureQueue != nil {
 		rc.QueueName = conn.AzureQueue.QueueName
 		rc.BlobContainerName = conn.AzureQueue.BlobContainerName
+		// SP fields: surface auth_mode + non-secret identity. NEVER:
+		// ClientSecret, ClientSecretEnv, ClientSecretFile, AccountKey.
+		rc.AuthMode = conn.AzureQueue.AuthMode
+		rc.TenantID = conn.AzureQueue.TenantID
+		rc.ClientID = conn.AzureQueue.ClientID
+		rc.AzureCloud = conn.AzureQueue.AzureCloud
 	}
 	if conn.AzureBlob != nil {
 		rc.BlobContainerName = conn.AzureBlob.BlobContainerName
+		rc.AuthMode = conn.AzureBlob.AuthMode
+		rc.TenantID = conn.AzureBlob.TenantID
+		rc.ClientID = conn.AzureBlob.ClientID
+		rc.AzureCloud = conn.AzureBlob.AzureCloud
 	}
 	if conn.AzureServiceBus != nil {
-		// Only safe-to-expose fields: queue name and (optional) blob container.
-		// ConnectionString and BlobAccountKey MUST never appear on the redacted view.
+		// Only safe-to-expose fields: queue name, (optional) blob container,
+		// auth mode, namespace, and non-secret AAD identity.
+		// ConnectionString, BlobAccountKey, and ClientSecret* MUST never
+		// appear on the redacted view.
 		rc.QueueName = conn.AzureServiceBus.QueueName
 		rc.BlobContainerName = conn.AzureServiceBus.BlobContainerName
+		rc.AuthMode = conn.AzureServiceBus.AuthMode
+		rc.TenantID = conn.AzureServiceBus.TenantID
+		rc.ClientID = conn.AzureServiceBus.ClientID
+		rc.AzureCloud = conn.AzureServiceBus.AzureCloud
+		rc.ServiceBusNamespace = conn.AzureServiceBus.ServiceBusNamespace
 	}
 	return rc
 }

@@ -75,21 +75,21 @@
             <tbody>
                 <tr><td><code>10000-10999</code></td><td><a href="#hooks">hooks.go</a></td><td>Mattermost post and reaction event hooks</td><td>12</td></tr>
                 <tr><td><code>11000-11999</code></td><td><a href="#api">api.go</a></td><td>REST API handlers</td><td>17</td></tr>
-                <tr><td><code>12000-12999</code></td><td><a href="#configuration">configuration.go</a></td><td>Plugin configuration lifecycle</td><td>2</td></tr>
+                <tr><td><code>12000-12999</code></td><td><a href="#configuration">configuration.go</a></td><td>Plugin configuration lifecycle</td><td>3</td></tr>
                 <tr><td><code>13000-13999</code></td><td><a href="#command">command.go</a></td><td>Slash command handlers</td><td>1</td></tr>
                 <tr><td><code>14000-14999</code></td><td><a href="#service">service.go</a></td><td>Team and channel initialization service</td><td>34</td></tr>
                 <tr><td><code>15000-15999</code></td><td><a href="#inbound">inbound.go</a></td><td>Inbound message dispatch and file watcher</td><td>46</td></tr>
                 <tr><td><code>16000-16999</code></td><td><a href="#connections">connections.go</a></td><td>Outbound publisher and file upload</td><td>14</td></tr>
                 <tr><td><code>17000-17999</code></td><td><a href="#sync-user">sync_user.go</a></td><td>Synthetic relay-user resolution</td><td>4</td></tr>
-                <tr><td><code>18000-18999</code></td><td><a href="#azure-blob">azure_blob_provider.go</a></td><td>Azure Blob WAL provider</td><td>49</td></tr>
-                <tr><td><code>19000-19999</code></td><td><a href="#azure-queue">azure_provider.go</a></td><td>Azure Queue provider</td><td>10</td></tr>
+                <tr><td><code>18000-18999</code></td><td><a href="#azure-blob">azure_blob_provider.go</a></td><td>Azure Blob WAL provider</td><td>50</td></tr>
+                <tr><td><code>19000-19999</code></td><td><a href="#azure-queue">azure_provider.go</a></td><td>Azure Queue provider</td><td>11</td></tr>
                 <tr><td><code>20000-20999</code></td><td><a href="#nats">nats_provider.go</a></td><td>NATS transport provider</td><td>4</td></tr>
                 <tr><td><code>21000-21999</code></td><td><a href="#prompt">prompt.go</a></td><td>Inbound connection prompts</td><td>17</td></tr>
                 <tr><td><code>22000-22999</code></td><td><a href="#retry-dispatch">retry_dispatch.go</a></td><td>Missing-parent post retry queue</td><td>5</td></tr>
                 <tr><td><code>23000-23999</code></td><td><a href="#store-caching">store/caching.go</a></td><td>Cluster cache invalidation</td><td>1</td></tr>
                 <tr><td><code>24000-24999</code></td><td><a href="#request">request.go</a></td><td>Team admin connection request workflow</td><td>17</td></tr>
                 <tr><td><code>25000-25999</code></td><td><a href="#channel-request">channel_request.go</a></td><td>Channel admin connection request workflow</td><td>18</td></tr>
-                <tr><td><code>26000-26999</code></td><td><a href="#azure-servicebus">azure_servicebus_provider.go</a></td><td>Azure Service Bus provider</td><td>7</td></tr>
+                <tr><td><code>26000-26999</code></td><td><a href="#azure-servicebus">azure_servicebus_provider.go</a></td><td>Azure Service Bus provider</td><td>8</td></tr>
             </tbody>
         </table>
 
@@ -163,6 +163,7 @@
             <tbody>
                 <tr><td><code>12000</code></td><td><code>ConfigSameConfigPassed</code><br><span class="permission-tag">WARN</span></td><td>"setConfiguration called with the existing configuration". The <code>OnConfigurationChange</code> hook fired but Mattermost passed the same config object that is already loaded.</td><td>Usually benign, fired during plugin activation and config reloads. Spammy occurrences suggest a tight loop calling <code>SavePluginConfig</code>. Check for misbehaving admin integrations.</td></tr>
                 <tr><td><code>12001</code></td><td><code>ConfigValidationWarn</code><br><span class="permission-tag">WARN</span></td><td>"Plugin configuration has validation warnings". Non-fatal validation warnings were raised while parsing plugin settings.</td><td>Read the warning text in the adjacent <code>warnings</code> field (connection with obsolete field, duplicate name, etc.). Edit the connection in System Console &gt; Plugins &gt; Cross Guard and save again to clear.</td></tr>
+                <tr><td><code>12010</code></td><td><code>AzureSPAuditConstructed</code><br><span class="permission-tag">INFO</span></td><td>"Azure auth (service-principal): credential constructed" with <code>provider</code> (one of <code>azure-queue</code>, <code>azure-blob</code>, <code>azure-servicebus</code>), <code>auth_mode</code> (always <code>service-principal</code>), <code>tenant_id</code>, <code>client_id</code>, <code>azure_cloud</code>, and <code>secret_hash_prefix</code> (first 12 hex chars of SHA-256 of the resolved secret). Emitted once per Service Principal credential construction so operators have a record of which AAD identity authenticated each connection. The secret value itself is never logged.</td><td>Audit-only; not an error. Use <code>secret_hash_prefix</code> to correlate which secret was active during an incident without exposing material that could be used to reconstruct it.</td></tr>
             </tbody>
         </table>
 
@@ -397,6 +398,7 @@
                 <tr><td><code>18046</code></td><td><code>AzureBlobFileDownloadFailed</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: file download failed" with <code>blob</code>. Failed to download a deferred file blob.</td><td>Check network. Retried on next poll.</td></tr>
                 <tr><td><code>18047</code></td><td><code>AzureBlobFileHandlerError</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: file handler error" with <code>blob</code>. The file handler rejected a downloaded deferred file.</td><td>Correlate with the adjacent <code>15041</code>-<code>15045</code> inbound file error.</td></tr>
                 <tr><td><code>18048</code></td><td><code>AzureBlobFileDeleteFailed</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: file delete failed" with <code>blob</code>. Failed to delete a deferred file blob after successful processing.</td><td>Check credentials.</td></tr>
+                <tr><td><code>18049</code></td><td><code>AzureBlobSPCredentialFailed</code><br><span class="permission-tag">ERROR</span></td><td>"Azure Blob: service principal credential failed" with <code>tenant_id</code>, <code>client_id</code>, and a sanitized <code>error</code>. <code>azidentity.NewClientSecretCredential</code> rejected the supplied Service Principal credentials at provider construction time.</td><td>Verify <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and that <code>client_secret</code> is non-empty. The error field is scrubbed of credential material; full SDK detail is available with <code>AZURE_SDK_GO_LOGGING=all</code> on the Mattermost server (production deployments should leave this off).</td></tr>
             </tbody>
         </table>
 
@@ -421,6 +423,7 @@
                 <tr><td><code>19007</code></td><td><code>AzureQueueBlobDownloadFailed</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: failed to download" with <code>blob</code>. Failed to download a deferred file blob.</td><td>Check network. Retried on the next poll.</td></tr>
                 <tr><td><code>19008</code></td><td><code>AzureQueueBlobHandlerError</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: handler returned error" with <code>blob</code>. File handler rejected a downloaded blob.</td><td>Correlate with the adjacent <code>15041</code>-<code>15045</code> inbound file error.</td></tr>
                 <tr><td><code>19009</code></td><td><code>AzureQueueBlobDeleteFailed</code><br><span class="permission-tag">WARN</span></td><td>"Azure Blob: failed to delete after processing" with <code>blob</code>. Failed to delete a blob after successful processing.</td><td>Check credentials.</td></tr>
+                <tr><td><code>19010</code></td><td><code>AzureQueueSPCredentialFailed</code><br><span class="permission-tag">ERROR</span></td><td>"Azure Queue: service principal credential failed" with <code>tenant_id</code>, <code>client_id</code>, and a sanitized <code>error</code>. <code>azidentity.NewClientSecretCredential</code> rejected the supplied Service Principal credentials at provider construction time.</td><td>Verify <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and that <code>client_secret</code> is non-empty. The error field is scrubbed of credential material; full SDK detail is available with <code>AZURE_SDK_GO_LOGGING=all</code> on the Mattermost server.</td></tr>
             </tbody>
         </table>
 
@@ -593,6 +596,7 @@
                 <tr><td><code>26004</code></td><td><code>ServiceBusRedelivery</code><br><span class="permission-tag">WARN</span></td><td>"Service Bus message redelivered" with <code>queue</code>, <code>delivery_count</code>, <code>message_id</code>. A received message has a <code>DeliveryCount &gt; 1</code>, meaning Service Bus has redelivered it at least once.</td><td>Expected during transient handler failures. Watch the rate: sustained redelivery indicates a poison message. Service Bus auto-moves the message to the dead-letter queue after the queue-configured <code>MaxDeliveryCount</code> is exceeded. Use the Azure portal or <code>az servicebus queue message</code> to inspect the DLQ.</td></tr>
                 <tr><td><code>26005</code></td><td><code>ServiceBusMalformedBody</code><br><span class="permission-tag">WARN</span></td><td>"Service Bus message has empty body; completing to drop" with <code>queue</code>, <code>message_id</code>. A received message had a zero-length body. The plugin completes (drops) it to avoid an infinite redelivery loop.</td><td>Capture the message ID and source. Usually an unrelated producer writing to the same queue, or a sender bug producing empty envelopes.</td></tr>
                 <tr><td><code>26006</code></td><td><code>APIAzureServiceBusTestFailed</code><br><span class="permission-tag">ERROR</span></td><td>"Azure Service Bus connection test failed" with <code>error</code> (sanitized). Emitted from <code>handleTestAzureServiceBusConnection</code> when the admin "Test Connection" button cannot peek the target queue.</td><td>The returned error is already sanitized of SAS key material. Typical causes: queue does not exist (pre-create in the Azure portal or via ARM/Terraform), unauthorized (check the connection-string SAS rule permissions), or unreachable endpoint (network or firewall).</td></tr>
+                <tr><td><code>26007</code></td><td><code>ServiceBusSPCredentialFailed</code><br><span class="permission-tag">ERROR</span></td><td>"Service Bus: service principal credential failed" with <code>tenant_id</code>, <code>client_id</code>, and a sanitized <code>error</code>. <code>azidentity.NewClientSecretCredential</code> rejected the supplied Service Principal credentials at provider construction time.</td><td>Verify <code>tenant_id</code> (GUID or FQDN), <code>client_id</code>, and that <code>client_secret</code> is non-empty. The error field is scrubbed of credential material.</td></tr>
             </tbody>
         </table>
 
