@@ -127,7 +127,7 @@ func TestMentionTransformsRoundTrip(t *testing.T) {
 }
 
 func TestSyncMsgFromModelNil(t *testing.T) {
-	assert.Nil(t, SyncMsgFromModel(nil))
+	assert.Nil(t, SyncMsgFromModel(nil, NewRecordingLogger()))
 }
 
 func TestSyncMsgToModelNil(t *testing.T) {
@@ -137,7 +137,10 @@ func TestSyncMsgToModelNil(t *testing.T) {
 
 func TestSyncMsgFromModelEmpty(t *testing.T) {
 	in := &mmModel.SyncMsg{Id: "sm1", ChannelId: "ch01"}
-	got := SyncMsgFromModel(in)
+	log := NewRecordingLogger()
+	got := SyncMsgFromModel(in, log)
+	assert.Empty(t, log.Warns)
+	assert.Empty(t, log.Errors)
 	require.NotNil(t, got)
 	assert.Equal(t, "sm1", got.Id)
 	assert.Equal(t, "ch01", got.ChannelId)
@@ -214,7 +217,10 @@ func TestSyncMsgFullRoundTrip(t *testing.T) {
 		},
 	}
 
-	wired := SyncMsgFromModel(original)
+	log := NewRecordingLogger()
+	wired := SyncMsgFromModel(original, log)
+	assert.Empty(t, log.Warns, "conforming inputs must not emit audit events")
+	assert.Empty(t, log.Errors)
 	data, err := xml.Marshal(wired)
 	require.NoError(t, err)
 
@@ -251,15 +257,61 @@ func TestSyncMsgFullRoundTrip(t *testing.T) {
 	assert.Equal(t, original.MentionTransforms, got.MentionTransforms)
 }
 
+// TestSyncMsgFromModelBackfillsReactionChannelId verifies that when
+// the upstream reaction omits ChannelId (observed on post-lifecycle
+// envelopes from upstream Mattermost), the wire converter back-fills
+// it from the parent SyncMsg. The schema marks Reaction.ChannelId as
+// required (MattermostIdType) so an empty value would fail compliance
+// validation; SyncMsg is per-channel by construction so the parent's
+// value is authoritative.
+func TestSyncMsgFromModelBackfillsReactionChannelId(t *testing.T) {
+	const (
+		parentChannel   = "ch01aaaaaaaaaaaaaaaaaaaaaa"
+		explicitChannel = "ch02aaaaaaaaaaaaaaaaaaaaaa"
+		syncMsgID       = "sm01aaaaaaaaaaaaaaaaaaaaaa"
+		userA           = "u01aaaaaaaaaaaaaaaaaaaaaaa"
+		userB           = "u02aaaaaaaaaaaaaaaaaaaaaaa"
+		post1           = "p01aaaaaaaaaaaaaaaaaaaaaaa"
+		post2           = "p02aaaaaaaaaaaaaaaaaaaaaaa"
+	)
+	in := &mmModel.SyncMsg{
+		Id:        syncMsgID,
+		ChannelId: parentChannel,
+		Reactions: []*mmModel.Reaction{
+			{
+				UserId:    userA,
+				PostId:    post1,
+				EmojiName: "thumbsup",
+				CreateAt:  1700000000,
+				UpdateAt:  1700000000,
+				// ChannelId intentionally empty
+			},
+			{
+				UserId:    userB,
+				PostId:    post2,
+				EmojiName: "smile",
+				CreateAt:  1700000001,
+				UpdateAt:  1700000001,
+				ChannelId: explicitChannel, // already set; must be preserved
+			},
+		},
+	}
+	got := SyncMsgFromModel(in, NewRecordingLogger())
+	require.NotNil(t, got)
+	require.Len(t, got.Reactions, 2)
+	assert.Equal(t, parentChannel, got.Reactions[0].ChannelId, "empty ChannelId must back-fill from parent SyncMsg")
+	assert.Equal(t, explicitChannel, got.Reactions[1].ChannelId, "non-empty ChannelId must be preserved verbatim")
+}
+
 func TestSyncMsgDeterministicMarshalling(t *testing.T) {
 	build := func() *mmModel.SyncMsg {
 		return &mmModel.SyncMsg{
 			Id:        "sm1",
 			ChannelId: "ch01",
 			Users: map[string]*mmModel.User{
-				"u03": {Id: "u03", Username: "carol", Roles: "system_user"},
-				"u01": {Id: "u01", Username: "alice", Roles: "system_user"},
-				"u02": {Id: "u02", Username: "bob", Roles: "system_user"},
+				"u03": {Id: "u03", Username: "carol", Email: "carol@example.test", Roles: "system_user"},
+				"u01": {Id: "u01", Username: "alice", Email: "alice@example.test", Roles: "system_user"},
+				"u02": {Id: "u02", Username: "bob", Email: "bob@example.test", Roles: "system_user"},
 			},
 			MentionTransforms: map[string]string{
 				"@bob":   "@bob.remote",
@@ -269,9 +321,9 @@ func TestSyncMsgDeterministicMarshalling(t *testing.T) {
 	}
 	// Marshalling the same SyncMsg twice must produce byte-identical
 	// output despite Go's randomized map iteration.
-	a, err := xml.Marshal(SyncMsgFromModel(build()))
+	a, err := xml.Marshal(SyncMsgFromModel(build(), NewRecordingLogger()))
 	require.NoError(t, err)
-	b, err := xml.Marshal(SyncMsgFromModel(build()))
+	b, err := xml.Marshal(SyncMsgFromModel(build(), NewRecordingLogger()))
 	require.NoError(t, err)
 	assert.Equal(t, string(a), string(b))
 }

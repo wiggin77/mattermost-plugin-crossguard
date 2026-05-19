@@ -214,9 +214,16 @@ func decodeWrappedSlice[T any](d *xml.Decoder, child string, out *[]*T) error {
 // SyncMsgFromModel converts an upstream SyncMsg to its wire form,
 // pruning fields per the wire-type policy. Returns nil if the input
 // is nil.
-func SyncMsgFromModel(m *mmModel.SyncMsg) *SyncMsg {
+//
+// The caller passes a WireLogger so per-user validation (Username
+// ladder, Email pattern) and per-prop validation can emit audit
+// events. If log is nil, a no-op logger is used (test convenience).
+func SyncMsgFromModel(m *mmModel.SyncMsg, log WireLogger) *SyncMsg {
 	if m == nil {
 		return nil
+	}
+	if log == nil {
+		log = nopLogger{}
 	}
 	out := &SyncMsg{
 		Id:        m.Id,
@@ -225,7 +232,9 @@ func SyncMsgFromModel(m *mmModel.SyncMsg) *SyncMsg {
 	if len(m.Users) > 0 {
 		out.Users = make(UserMap, len(m.Users))
 		for id, u := range m.Users {
-			out.Users[id] = UserFromModel(u)
+			if wired := UserFromModel(u, log); wired != nil {
+				out.Users[id] = wired
+			}
 		}
 	}
 	// At most one post per envelope by the sender's split policy. If the
@@ -239,7 +248,19 @@ func SyncMsgFromModel(m *mmModel.SyncMsg) *SyncMsg {
 	if len(m.Reactions) > 0 {
 		out.Reactions = make([]*Reaction, 0, len(m.Reactions))
 		for _, r := range m.Reactions {
-			out.Reactions = append(out.Reactions, ReactionFromModel(r))
+			wired := ReactionFromModel(r)
+			// Back-fill ChannelId from the parent SyncMsg when the
+			// upstream reaction omits it. The wire schema marks
+			// Reaction.ChannelId as required (MattermostIdType) and
+			// some upstream code paths emit reactions without it
+			// (e.g., during post-delete cleanup), which would
+			// otherwise fail compliance validation. SyncMsg is
+			// per-channel by construction, so the parent channel id
+			// is the authoritative source.
+			if wired != nil && wired.ChannelId == "" {
+				wired.ChannelId = out.ChannelId
+			}
+			out.Reactions = append(out.Reactions, wired)
 		}
 	}
 	if len(m.Statuses) > 0 {

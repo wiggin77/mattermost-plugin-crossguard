@@ -47,6 +47,12 @@ type TransportEnvelope struct {
 }
 
 // MarshalEnvelope serializes a TransportEnvelope to XML with the standard header.
+// When the CROSSGUARD_ENVELOPE_ARCHIVE_DIR env var is set, the marshalled
+// bytes are also written to that directory via archiveEnvelope; this is
+// the chokepoint that all outbound wire envelopes pass through so the
+// integration test suite can verify schema conformance across every
+// publish path (sync_msg via publishToOutboundConn, test envelopes via
+// the per-provider test-connection handlers, etc.).
 func MarshalEnvelope(env *TransportEnvelope) ([]byte, error) {
 	if env == nil {
 		return nil, fmt.Errorf("envelope is nil")
@@ -61,7 +67,9 @@ func MarshalEnvelope(env *TransportEnvelope) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(xml.Header), data...), nil
+	out := append([]byte(xml.Header), data...)
+	archiveEnvelope(env, out)
+	return out, nil
 }
 
 // UnmarshalEnvelope deserializes XML bytes into a TransportEnvelope.
@@ -132,9 +140,18 @@ func buildSyncResponse(msg *mmModel.SyncMsg) mmModel.SyncResponse {
 // templateEnv supplies the routing/audit fields (Version, Type,
 // ConnName, Timestamp, TeamName, ChannelName). Its own SyncMsg field
 // is ignored.
-func buildOutboundEnvelopes(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg) []*TransportEnvelope {
+//
+// log carries the audit-logging seam for wire-layer validation events
+// (UserFromModel ladder, per-prop drops). Callers in production wrap
+// p.API with a context-aware adapter so events emitted inside the wire
+// package surface with conn_name and post_id correlation. Tests can
+// pass wire.NopLogger() when they don't care about audit output.
+func buildOutboundEnvelopes(log wire.WireLogger, templateEnv *TransportEnvelope, msg *mmModel.SyncMsg) []*TransportEnvelope {
 	if templateEnv == nil || msg == nil {
 		return nil
+	}
+	if log == nil {
+		log = wire.NopLogger()
 	}
 
 	// Pre-bucket reactions and acks by their referenced PostId.
@@ -158,10 +175,10 @@ func buildOutboundEnvelopes(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg
 			continue
 		}
 		localPostIDs[post.Id] = struct{}{}
-		out = append(out, buildPostEnvelope(templateEnv, msg, post, reactionsByPost, acksByPost))
+		out = append(out, buildPostEnvelope(log, templateEnv, msg, post, reactionsByPost, acksByPost))
 	}
 
-	if meta := buildMetadataEnvelope(templateEnv, msg, localPostIDs); meta != nil {
+	if meta := buildMetadataEnvelope(log, templateEnv, msg, localPostIDs); meta != nil {
 		out = append(out, meta)
 	}
 
@@ -183,6 +200,7 @@ func buildOutboundEnvelopes(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg
 // (e.g., referenced by membership changes) belong on the metadata
 // envelope.
 func buildPostEnvelope(
+	log wire.WireLogger,
 	templateEnv *TransportEnvelope,
 	msg *mmModel.SyncMsg,
 	post *mmModel.Post,
@@ -200,7 +218,8 @@ func buildPostEnvelope(
 	if author, ok := msg.Users[post.UserId]; ok {
 		subModel.Users = map[string]*mmModel.User{post.UserId: author}
 	}
-	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel))
+	postLog := withPostContext(log, post.Id)
+	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel, postLog))
 }
 
 // buildMetadataEnvelope constructs the optional metadata envelope for
@@ -210,7 +229,7 @@ func buildPostEnvelope(
 // when nothing in this category is present. Nil entries in any of the
 // input slices are skipped throughout, so an all-nil slice does not
 // trigger a degenerate empty metadata envelope.
-func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg, localPostIDs map[string]struct{}) *TransportEnvelope {
+func buildMetadataEnvelope(log wire.WireLogger, templateEnv *TransportEnvelope, msg *mmModel.SyncMsg, localPostIDs map[string]struct{}) *TransportEnvelope {
 	var orphanReactions []*mmModel.Reaction
 	for _, r := range msg.Reactions {
 		if r == nil {
@@ -283,7 +302,7 @@ func buildMetadataEnvelope(templateEnv *TransportEnvelope, msg *mmModel.SyncMsg,
 		MembershipChanges: memberships,
 		Acknowledgements:  orphanAcks,
 	}
-	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel))
+	return cloneEnvelopeHeader(templateEnv, wire.SyncMsgFromModel(subModel, log))
 }
 
 // cloneEnvelopeHeader copies the routing/audit fields from templateEnv

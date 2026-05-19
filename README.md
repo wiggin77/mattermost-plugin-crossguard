@@ -81,6 +81,24 @@ for f in schema/examples/*.xml; do
 done
 ```
 
+#### Wire-format validation in integration tests
+
+The example fixtures in `schema/examples/` are static. To verify that the **running** plugin also emits schema-conformant XML on every outbound path (sync_msg via `publishToOutboundConn`, test envelopes via each provider's test-connection handler), the integration suite has an opt-in validation mode.
+
+Run the full suite with the mode on:
+
+```sh
+make docker-integration-test-validate-wire
+# equivalent to:  CROSSGUARD_WIRE_VALIDATE=1 make docker-integration-test
+```
+
+How it works:
+
+- The dev compose file sets `CROSSGUARD_ENVELOPE_ARCHIVE_DIR=/mattermost/wire-archive` on both `mattermost-a` and `mattermost-b` and **host-bind-mounts** `./docker/wire-archive-a` and `./docker/wire-archive-b` to that path. The bind mount is load-bearing: a tmpfs at the same path is invisible to the host docker daemon (mount-namespace isolation between the plugin process and the container's main namespace), so the test runner cannot read the files back. The plugin reads the env var once at start and, when set, writes every successfully marshalled envelope to that directory as `<unix_nano>_<seq>_<conn>_<type>.xml`. When the env var is unset (production), the archiver is a no-op.
+- When the integration test runner sees `CROSSGUARD_WIRE_VALIDATE=1`, `NewHarness` clears each server's archive at test start and registers a `t.Cleanup` that, after the test finishes, lists every archived envelope on each container via `docker compose exec`, pipes each through `xmllint --schema schema/crossguard.xsd`, and fails the test on any non-conforming output (or on a zero count, which would indicate broken plumbing).
+
+Failures print the offending envelope's filename, the xmllint diagnostic, and the envelope contents so the producer can be traced. `xmllint` is required on `PATH`; install `libxml2-utils` on Linux (it ships pre-installed on macOS).
+
 ### Slash Commands
 
 Once the plugin is deployed, use `/crossguard` to manage cross-domain relay:
@@ -128,6 +146,7 @@ Typical workflow: `init-team <connection-name>` first, then `init-channel <conne
 | `make docker-enable` | Enable plugin on both servers |
 | `make docker-plugin-list` | List installed plugins on both servers |
 | `make docker-integration-test` | Full Go integration suite (smoke, post lifecycle, profile image, file filter, prompt accept/block, rewrite team, XML, Azure Queue, Azure Blob, Azure Service Bus). Self-contained: builds + deploys plugin and brings up the SB emulator. |
+| `make docker-integration-test-validate-wire` | Same as `docker-integration-test`, but with `CROSSGUARD_WIRE_VALIDATE=1`. Captures every outbound envelope the plugin emits and validates each against [`schema/crossguard.xsd`](schema/crossguard.xsd) with `xmllint`. See [Wire-format validation in integration tests](#wire-format-validation-in-integration-tests) below. |
 | `make docker-smoke-test` | Single-test wrapper: `go test -run TestSmoke` |
 | `make docker-post-lifecycle-test` | Single-test wrapper: `go test -run TestPostLifecycle` |
 | `make docker-profile-image-test` | Single-test wrapper: `go test -run TestProfileImage` |

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/testreorder"
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 // senderProcess simulates the sender side of the relay: it carries an
@@ -69,7 +70,7 @@ func (s *senderProcess) SendSyncMsg(t *testing.T, channelID string, msg *mmModel
 		TeamName:    "team-test",
 		ChannelName: "channel-test",
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	for _, env := range envs {
 		key := s.connName + "\x00" + channelID
 		s.seqMu.Lock()

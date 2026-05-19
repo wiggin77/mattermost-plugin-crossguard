@@ -6,6 +6,8 @@ import (
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/wire"
 )
 
 // freshSenderState constructs the minimum plugin state needed to test
@@ -103,7 +105,7 @@ func TestOutboundFanoutSequenceMonotonic(t *testing.T) {
 		Id:        "sm-1",
 		ChannelId: "ch1",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "first"},
@@ -115,7 +117,7 @@ func TestOutboundFanoutSequenceMonotonic(t *testing.T) {
 		},
 	}
 
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	// Three post envelopes plus one metadata envelope (membership has
 	// no associated post in this batch).
 	require.Len(t, envs, 4)
@@ -166,7 +168,7 @@ func TestOutboundInboundRoundTrip(t *testing.T) {
 		Id:        "sm-rt",
 		ChannelId: "ch-rt",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "one"},
@@ -176,7 +178,7 @@ func TestOutboundInboundRoundTrip(t *testing.T) {
 	}
 
 	// Sender side: fan out, stamp epoch + sequence, marshal each.
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 3)
 	onWire := make([][]byte, 0, len(envs))
 	for _, env := range envs {
@@ -232,7 +234,7 @@ func TestOutboundInboundRoundTripAcrossSenderRestart(t *testing.T) {
 			Id:        id,
 			ChannelId: "ch-rt",
 			Users: map[string]*mmModel.User{
-				"u1": {Id: "u1", Username: "alice"},
+				"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 			},
 			Posts: []*mmModel.Post{{Id: postID, UserId: "u1", Message: msg}},
 		}
@@ -295,7 +297,7 @@ func publishOnWire(t *testing.T, sender *Plugin, template *TransportEnvelope, ms
 	t.Helper()
 	var out [][]byte
 	for _, msg := range msgs {
-		envs := buildOutboundEnvelopes(template, msg)
+		envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 		for _, env := range envs {
 			env.Epoch = sender.epoch
 			if env.Type == TransportTypeSyncMsg && env.SyncMsg != nil {

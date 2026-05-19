@@ -481,6 +481,21 @@ wire types. Regenerate them whenever a wire type changes:
 1. Update the Go struct in `server/wire/`.
 2. Regenerate examples: `UPDATE_EXAMPLES=1 go test -run TestExampleFiles ./server/`.
 3. Update `schema/crossguard.xsd` to match the new field set or order.
-4. Validate: `python3 -c "import xmlschema; [...]"` or equivalent, running the
-   examples through the new XSD.
+4. Validate: `for f in schema/examples/*.xml; do xmllint --noout --schema
+   schema/crossguard.xsd "$f"; done` (or rely on the in-test gate
+   `TestExampleFilesValidateAgainstSchema` in `server/examples_roundtrip_test.go`).
 5. Re-run the compliance review against the new XSD before deployment.
+
+## Authoritative schema
+
+`schema/crossguard.xsd` is the authoritative wire contract for
+compliance content inspection. Every string field carries a pattern and
+`maxLength`, and every container has a bounded `maxOccurs`. The plugin's
+wire types in `server/wire/` must produce envelopes that validate
+against this schema.
+
+Producer-side conformance to `crossguard.xsd` is documented in
+[`26-05-17-01-constrained-xsd-fixes.md`](./26-05-17-01-constrained-xsd-fixes.md).
+Future cap (`maxLength`/`maxOccurs`) negotiations with the compliance
+team are tracked in
+[`26-05-18-01-constrained-xsd-cap-review.md`](./26-05-18-01-constrained-xsd-cap-review.md).

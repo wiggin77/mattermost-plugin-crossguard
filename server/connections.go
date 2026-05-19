@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	mmModel "github.com/mattermost/mattermost/server/public/model"
+
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/server/errcode"
 )
 
@@ -49,25 +51,27 @@ func (p *Plugin) nextOutboundSeq(connName, channelID string) uint64 {
 	return p.outboundSeq[key]
 }
 
-func buildTestEnvelope(epoch string) (*TransportEnvelope, []byte, string, error) {
-	msgID := newID()
+// buildTestEnvelope builds a connectivity-check envelope. ConnName is
+// also stamped into TeamName and ChannelName so the envelope satisfies
+// the constrained wire-schema's SlugType requirement on those fields;
+// the receiver ignores team/channel scope on test envelopes
+// (inbound.go logs only conn_name and test_id).
+func buildTestEnvelope(connName, epoch string) (*TransportEnvelope, []byte, string, error) {
+	msgID := mmModel.NewId()
 	env := &TransportEnvelope{
-		Version: 1,
-		Type:    TransportTypeTest,
-		Epoch:   epoch,
-		TestID:  msgID,
+		Version:     1,
+		Type:        TransportTypeTest,
+		ConnName:    connName,
+		Epoch:       epoch,
+		TeamName:    connName,
+		ChannelName: connName,
+		TestID:      msgID,
 	}
 	data, err := MarshalEnvelope(env)
 	if err != nil {
 		return nil, nil, "", err
 	}
 	return env, data, msgID, nil
-}
-
-// newID generates a small random ID for test messages without depending on
-// the model package's NewId.
-func newID() string {
-	return fmt.Sprintf("test-%d", time.Now().UnixNano())
 }
 
 func (p *Plugin) connectOutbound() {

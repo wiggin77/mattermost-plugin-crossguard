@@ -1,31 +1,177 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Cross Guard XML wire-format schema.
+  Cross Guard XML wire-format schema. Authoritative wire contract for
+  compliance content inspection: every byte that crosses a security
+  domain boundary must validate against this file. The plugin's wire
+  types in server/wire/ are the producer and must remain conformant.
 
-  Defines every field that can cross a security domain boundary so
-  compliance content-inspection systems can validate every byte they
-  see.
+  Every string element carries a pattern and/or maxLength; every
+  container has a concrete maxOccurs upper bound.
 
-  The envelope fields (version, type, ConnName, Timestamp, TeamName,
-  ChannelName) are the routing and audit surface. The SyncMsg payload
-  is owned by the plugin (server/wire package), not by upstream
-  Mattermost: every field carried on the wire is enumerated here, and
-  any upstream model change is intentionally invisible until the wire
-  types are updated and the schema is re-reviewed.
-
-  Element order matches the field declaration order in the wire
-  structs (sequence, not all): a strict XSD makes structural
-  validation explicit and reviewable. Empty containers (Users, Posts,
-  Reactions, Statuses, MembershipChanges, Acknowledgements,
-  MentionTransforms) are suppressed on the wire by the wire-type
-  marshaler, so all are declared with minOccurs="0".
-
-  If the wire-type structs in server/wire/ change (add, remove, or
-  rename a field), this schema must be regenerated and the new
-  schema re-reviewed before deployment.
+  Constraint conventions:
+    * 26-character Mattermost IDs use MattermostIdType ([a-z0-9]{26}).
+    * Channel/team/conn names use SlugType (lowercase alnum + - _, max 64).
+    * Usernames use UsernameType (lowercase alnum + - _ ., max 64).
+      Colon-bearing remote-tagged usernames are not on the wire; the
+      producer resolves them via Props.RemoteUsername or truncates at
+      the colon before serializing (see server/wire/user.go).
+    * Emails use EmailType (RFC-style pattern, max 254).
+    * Locale codes use LocaleType (BCP 47-shaped, max 35).
+    * Free-form short text (Nickname, FirstName, Position, etc.) uses
+      bounded maxLength only, no pattern, since Mattermost permits Unicode.
+    * Post bodies use MessageTextType (max 1048576, 1 MiB).
+    * Status uses an enumeration of the four documented presence values.
+    * maxOccurs upper bounds derived from product limits (FileIds=10)
+      or generous per-envelope batch caps (User/Reaction/Status/etc.=1000,
+      Transform=100, StringMap Entry=100).
 -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            elementFormDefault="unqualified">
+
+  <!-- ============================================================
+       Constrained simple types
+       ============================================================ -->
+
+  <!-- 26-character Mattermost ID (mmModel.NewId) -->
+  <xs:simpleType name="MattermostIdType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9]{26}"/>
+      <xs:maxLength value="26"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Channel/team slug or connection name: lowercase alnum, hyphens, underscores -->
+  <xs:simpleType name="SlugType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9][a-z0-9_\-]{0,63}"/>
+      <xs:maxLength value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Mattermost username: lowercase alnum, hyphens, underscores, periods -->
+  <xs:simpleType name="UsernameType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9][a-z0-9_\-\.]{0,63}"/>
+      <xs:maxLength value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Display name for webhook overrides: looser than UsernameType, still bounded -->
+  <xs:simpleType name="DisplayNameType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="128"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- RFC 5321 capped email length (254) with a permissive local-part pattern -->
+  <xs:simpleType name="EmailType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"/>
+      <xs:maxLength value="254"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- BCP 47-shaped locale code, e.g. en, en-US, zh-Hant-TW -->
+  <xs:simpleType name="LocaleType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}"/>
+      <xs:maxLength value="35"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Space-separated Mattermost role names (system_user, system_admin, etc.) -->
+  <xs:simpleType name="RolesType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[a-z0-9_ ]{0,1024}"/>
+      <xs:maxLength value="1024"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Emoji name: alnum, underscore, hyphen, plus -->
+  <xs:simpleType name="EmojiNameType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z0-9_\-\+]{1,64}"/>
+      <xs:maxLength value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- URL bounded to 2048 (browser-safe limit) -->
+  <xs:simpleType name="UrlType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="2048"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Short free-form text (Nickname, FirstName, LastName, etc.) -->
+  <xs:simpleType name="ShortTextType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="128"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Medium free-form text (Position, BotDescription, CustomStatus) -->
+  <xs:simpleType name="MediumTextType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="1024"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Hashtags string: space-separated #tags -->
+  <xs:simpleType name="HashtagsType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="1024"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Post body text, capped at 1 MiB -->
+  <xs:simpleType name="MessageTextType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="1048576"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Post.Type: typically empty or a "system_*" marker string -->
+  <xs:simpleType name="PostTypeStringType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="64"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- Presence status: documented values from Mattermost model -->
+  <xs:simpleType name="StatusEnum">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="online"/>
+      <xs:enumeration value="away"/>
+      <xs:enumeration value="dnd"/>
+      <xs:enumeration value="offline"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- StringMap entry attribute key/value (Timezone keys, etc.) -->
+  <xs:simpleType name="MapKeyType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="128"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="MapValueType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="4096"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- MentionTransforms key/value: source mention vs. transformed mention -->
+  <xs:simpleType name="MentionKeyType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="256"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="MentionValueType">
+    <xs:restriction base="xs:string">
+      <xs:maxLength value="256"/>
+    </xs:restriction>
+  </xs:simpleType>
 
   <!-- ============================================================
        Envelope-level types
@@ -54,21 +200,22 @@
   <xs:simpleType name="EpochIdType">
     <xs:restriction base="xs:string">
       <xs:pattern value="[a-z0-9]{26}"/>
+      <xs:maxLength value="26"/>
     </xs:restriction>
   </xs:simpleType>
 
   <xs:element name="CrossGuardEnvelope">
     <xs:complexType>
       <xs:sequence>
-        <xs:element name="ConnName"    type="xs:string"/>
+        <xs:element name="ConnName"    type="SlugType"/>
         <xs:element name="Timestamp"   type="TimestampType"/>
         <xs:element name="Epoch"       type="EpochIdType"   minOccurs="0"/>
         <xs:element name="Sequence"    type="xs:unsignedLong" minOccurs="0"/>
-        <xs:element name="TeamName"    type="xs:string"/>
-        <xs:element name="ChannelName" type="xs:string"/>
+        <xs:element name="TeamName"    type="SlugType"/>
+        <xs:element name="ChannelName" type="SlugType"/>
         <xs:choice minOccurs="0">
           <xs:element name="SyncMsg" type="SyncMsgType"/>
-          <xs:element name="TestID"  type="xs:string"/>
+          <xs:element name="TestID"  type="MattermostIdType"/>
         </xs:choice>
       </xs:sequence>
       <xs:attribute name="version" type="xs:int"           use="required"/>
@@ -82,8 +229,8 @@
 
   <xs:complexType name="SyncMsgType">
     <xs:sequence>
-      <xs:element name="Id"                type="xs:string"/>
-      <xs:element name="ChannelId"         type="xs:string"/>
+      <xs:element name="Id"                type="MattermostIdType"/>
+      <xs:element name="ChannelId"         type="MattermostIdType"/>
       <xs:element name="Users"             type="UsersType"             minOccurs="0"/>
       <xs:element name="Post"              type="PostType"              minOccurs="0"/>
       <xs:element name="Reactions"         type="ReactionsContainerType"         minOccurs="0"/>
@@ -96,11 +243,11 @@
 
   <xs:complexType name="UsersType">
     <xs:sequence>
-      <xs:element name="User" minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="User" minOccurs="0" maxOccurs="1000">
         <xs:complexType>
           <xs:complexContent>
             <xs:extension base="UserType">
-              <xs:attribute name="id" type="xs:string" use="required"/>
+              <xs:attribute name="id" type="MattermostIdType" use="required"/>
             </xs:extension>
           </xs:complexContent>
         </xs:complexType>
@@ -110,34 +257,34 @@
 
   <xs:complexType name="ReactionsContainerType">
     <xs:sequence>
-      <xs:element name="Reaction" type="ReactionType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="Reaction" type="ReactionType" minOccurs="0" maxOccurs="1000"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="StatusesContainerType">
     <xs:sequence>
-      <xs:element name="Status" type="StatusType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="Status" type="StatusType" minOccurs="0" maxOccurs="1000"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="MembershipChangesContainerType">
     <xs:sequence>
-      <xs:element name="MembershipChange" type="MembershipChangeType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="MembershipChange" type="MembershipChangeType" minOccurs="0" maxOccurs="1000"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="AcknowledgementsContainerType">
     <xs:sequence>
-      <xs:element name="PostAcknowledgement" type="PostAcknowledgementType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="PostAcknowledgement" type="PostAcknowledgementType" minOccurs="0" maxOccurs="1000"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="MentionTransformsType">
     <xs:sequence>
-      <xs:element name="Transform" minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="Transform" minOccurs="0" maxOccurs="100">
         <xs:complexType>
-          <xs:attribute name="key"   type="xs:string" use="required"/>
-          <xs:attribute name="value" type="xs:string" use="required"/>
+          <xs:attribute name="key"   type="MentionKeyType"   use="required"/>
+          <xs:attribute name="value" type="MentionValueType" use="required"/>
         </xs:complexType>
       </xs:element>
     </xs:sequence>
@@ -159,29 +306,29 @@
   -->
   <xs:complexType name="PostType">
     <xs:sequence>
-      <xs:element name="Id"           type="xs:string"/>
+      <xs:element name="Id"           type="MattermostIdType"/>
       <xs:element name="CreateAt"     type="xs:long"/>
       <xs:element name="UpdateAt"     type="xs:long"/>
       <xs:element name="EditAt"       type="xs:long"   minOccurs="0"/>
       <xs:element name="DeleteAt"     type="xs:long"/>
-      <xs:element name="UserId"       type="xs:string"/>
-      <xs:element name="ChannelId"    type="xs:string"/>
-      <xs:element name="RootId"       type="xs:string" minOccurs="0"/>
-      <xs:element name="OriginalId"   type="xs:string" minOccurs="0"/>
-      <xs:element name="Message"      type="xs:string"/>
-      <xs:element name="Type"         type="xs:string" minOccurs="0"/>
+      <xs:element name="UserId"       type="MattermostIdType"/>
+      <xs:element name="ChannelId"    type="MattermostIdType"/>
+      <xs:element name="RootId"       type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="OriginalId"   type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="Message"      type="MessageTextType"/>
+      <xs:element name="Type"         type="PostTypeStringType" minOccurs="0"/>
       <xs:element name="Props"        type="PostPropsType" minOccurs="0"/>
-      <xs:element name="Hashtags"     type="xs:string" minOccurs="0"/>
+      <xs:element name="Hashtags"     type="HashtagsType" minOccurs="0"/>
       <xs:element name="FileIds"      type="FileIdsType" minOccurs="0"/>
       <xs:element name="HasReactions" type="xs:boolean" minOccurs="0"/>
-      <xs:element name="RemoteId"     type="xs:string"  minOccurs="0"/>
+      <xs:element name="RemoteId"     type="MattermostIdType"  minOccurs="0"/>
       <xs:element name="IsPinned"     type="xs:boolean" minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="FileIdsType">
     <xs:sequence>
-      <xs:element name="Id" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="Id" type="MattermostIdType" minOccurs="0" maxOccurs="10"/>
     </xs:sequence>
   </xs:complexType>
 
@@ -195,17 +342,17 @@
       <xs:element name="FromBot"                  type="xs:boolean" minOccurs="0"/>
       <xs:element name="FromPlugin"               type="xs:boolean" minOccurs="0"/>
       <xs:element name="FromOAuthApp"             type="xs:boolean" minOccurs="0"/>
-      <xs:element name="OverrideUsername"         type="xs:string"  minOccurs="0"/>
-      <xs:element name="OverrideIconURL"          type="xs:string"  minOccurs="0"/>
-      <xs:element name="OverrideIconEmoji"        type="xs:string"  minOccurs="0"/>
-      <xs:element name="WebhookDisplayName"       type="xs:string"  minOccurs="0"/>
-      <xs:element name="AddedUserId"              type="xs:string"  minOccurs="0"/>
-      <xs:element name="DeleteBy"                 type="xs:string"  minOccurs="0"/>
-      <xs:element name="AddChannelMember"         type="xs:string"  minOccurs="0"/>
+      <xs:element name="OverrideUsername"         type="DisplayNameType" minOccurs="0"/>
+      <xs:element name="OverrideIconURL"          type="UrlType"         minOccurs="0"/>
+      <xs:element name="OverrideIconEmoji"        type="EmojiNameType"   minOccurs="0"/>
+      <xs:element name="WebhookDisplayName"       type="DisplayNameType" minOccurs="0"/>
+      <xs:element name="AddedUserId"              type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="DeleteBy"                 type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="AddChannelMember"         type="MattermostIdType" minOccurs="0"/>
       <xs:element name="MentionHighlightDisabled" type="xs:boolean" minOccurs="0"/>
       <xs:element name="DisableGroupHighlight"    type="xs:boolean" minOccurs="0"/>
-      <xs:element name="AIGeneratedByUserId"      type="xs:string"  minOccurs="0"/>
-      <xs:element name="AIGeneratedByUsername"    type="xs:string"  minOccurs="0"/>
+      <xs:element name="AIGeneratedByUserId"      type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="AIGeneratedByUsername"    type="UsernameType"     minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 
@@ -222,23 +369,23 @@
   -->
   <xs:complexType name="UserType">
     <xs:sequence>
-      <xs:element name="Id"                type="xs:string"/>
+      <xs:element name="Id"                type="MattermostIdType"/>
       <xs:element name="CreateAt"          type="xs:long"   minOccurs="0"/>
       <xs:element name="UpdateAt"          type="xs:long"   minOccurs="0"/>
       <xs:element name="DeleteAt"          type="xs:long"/>
-      <xs:element name="Username"          type="xs:string"/>
-      <xs:element name="Email"             type="xs:string"/>
-      <xs:element name="Nickname"          type="xs:string" minOccurs="0"/>
-      <xs:element name="FirstName"         type="xs:string" minOccurs="0"/>
-      <xs:element name="LastName"          type="xs:string" minOccurs="0"/>
-      <xs:element name="Position"          type="xs:string" minOccurs="0"/>
-      <xs:element name="Roles"             type="xs:string"/>
-      <xs:element name="Locale"            type="xs:string"  minOccurs="0"/>
+      <xs:element name="Username"          type="UsernameType"/>
+      <xs:element name="Email"             type="EmailType"/>
+      <xs:element name="Nickname"          type="ShortTextType" minOccurs="0"/>
+      <xs:element name="FirstName"         type="ShortTextType" minOccurs="0"/>
+      <xs:element name="LastName"          type="ShortTextType" minOccurs="0"/>
+      <xs:element name="Position"          type="MediumTextType" minOccurs="0"/>
+      <xs:element name="Roles"             type="RolesType"/>
+      <xs:element name="Locale"            type="LocaleType" minOccurs="0"/>
       <xs:element name="Timezone"          type="StringMapType" minOccurs="0"/>
       <xs:element name="Props"             type="UserPropsType" minOccurs="0"/>
-      <xs:element name="RemoteId"          type="xs:string"  minOccurs="0"/>
+      <xs:element name="RemoteId"          type="MattermostIdType" minOccurs="0"/>
       <xs:element name="IsBot"             type="xs:boolean" minOccurs="0"/>
-      <xs:element name="BotDescription"    type="xs:string"  minOccurs="0"/>
+      <xs:element name="BotDescription"    type="MediumTextType" minOccurs="0"/>
       <xs:element name="BotLastIconUpdate" type="xs:long"    minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
@@ -249,10 +396,10 @@
   -->
   <xs:complexType name="UserPropsType">
     <xs:sequence>
-      <xs:element name="CustomStatus"     type="xs:string" minOccurs="0"/>
-      <xs:element name="RemoteUsername"   type="xs:string" minOccurs="0"/>
-      <xs:element name="RemoteEmail"      type="xs:string" minOccurs="0"/>
-      <xs:element name="OriginalRemoteId" type="xs:string" minOccurs="0"/>
+      <xs:element name="CustomStatus"     type="MediumTextType"   minOccurs="0"/>
+      <xs:element name="RemoteUsername"   type="UsernameType"     minOccurs="0"/>
+      <xs:element name="RemoteEmail"      type="EmailType"        minOccurs="0"/>
+      <xs:element name="OriginalRemoteId" type="MattermostIdType" minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 
@@ -265,10 +412,10 @@
   -->
   <xs:complexType name="StringMapType">
     <xs:sequence>
-      <xs:element name="Entry" minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="Entry" minOccurs="0" maxOccurs="100">
         <xs:complexType>
-          <xs:attribute name="key"   type="xs:string" use="required"/>
-          <xs:attribute name="value" type="xs:string" use="required"/>
+          <xs:attribute name="key"   type="MapKeyType"   use="required"/>
+          <xs:attribute name="value" type="MapValueType" use="required"/>
         </xs:complexType>
       </xs:element>
     </xs:sequence>
@@ -276,14 +423,14 @@
 
   <xs:complexType name="ReactionType">
     <xs:sequence>
-      <xs:element name="UserId"    type="xs:string"/>
-      <xs:element name="PostId"    type="xs:string"/>
-      <xs:element name="EmojiName" type="xs:string"/>
+      <xs:element name="UserId"    type="MattermostIdType"/>
+      <xs:element name="PostId"    type="MattermostIdType"/>
+      <xs:element name="EmojiName" type="EmojiNameType"/>
       <xs:element name="CreateAt"  type="xs:long"/>
       <xs:element name="UpdateAt"  type="xs:long"/>
       <xs:element name="DeleteAt"  type="xs:long"/>
-      <xs:element name="RemoteId"  type="xs:string" minOccurs="0"/>
-      <xs:element name="ChannelId" type="xs:string"/>
+      <xs:element name="RemoteId"  type="MattermostIdType" minOccurs="0"/>
+      <xs:element name="ChannelId" type="MattermostIdType"/>
     </xs:sequence>
   </xs:complexType>
 
@@ -295,8 +442,8 @@
   -->
   <xs:complexType name="StatusType">
     <xs:sequence>
-      <xs:element name="UserId"         type="xs:string"/>
-      <xs:element name="Status"         type="xs:string"/>
+      <xs:element name="UserId"         type="MattermostIdType"/>
+      <xs:element name="Status"         type="StatusEnum"/>
       <xs:element name="Manual"         type="xs:boolean"/>
       <xs:element name="LastActivityAt" type="xs:long"/>
       <xs:element name="DNDEndTime"     type="xs:long"/>
@@ -305,21 +452,21 @@
 
   <xs:complexType name="MembershipChangeType">
     <xs:sequence>
-      <xs:element name="ChannelId"  type="xs:string"/>
-      <xs:element name="UserId"     type="xs:string"/>
+      <xs:element name="ChannelId"  type="MattermostIdType"/>
+      <xs:element name="UserId"     type="MattermostIdType"/>
       <xs:element name="IsAdd"      type="xs:boolean"/>
-      <xs:element name="RemoteId"   type="xs:string" minOccurs="0"/>
+      <xs:element name="RemoteId"   type="MattermostIdType" minOccurs="0"/>
       <xs:element name="ChangeTime" type="xs:long"/>
     </xs:sequence>
   </xs:complexType>
 
   <xs:complexType name="PostAcknowledgementType">
     <xs:sequence>
-      <xs:element name="UserId"         type="xs:string"/>
-      <xs:element name="PostId"         type="xs:string"/>
+      <xs:element name="UserId"         type="MattermostIdType"/>
+      <xs:element name="PostId"         type="MattermostIdType"/>
       <xs:element name="AcknowledgedAt" type="xs:long"/>
-      <xs:element name="ChannelId"      type="xs:string"/>
-      <xs:element name="RemoteId"       type="xs:string" minOccurs="0"/>
+      <xs:element name="ChannelId"      type="MattermostIdType"/>
+      <xs:element name="RemoteId"       type="MattermostIdType" minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 

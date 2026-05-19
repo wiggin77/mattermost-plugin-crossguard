@@ -85,7 +85,12 @@ func (p *Plugin) OnSharedChannelsSyncMsg(
 		TeamName:    team.Name,
 		ChannelName: channel.Name,
 	}
-	envs := buildOutboundEnvelopes(template, augmented)
+	wireLog := newPluginWireLogger(p.API,
+		"conn_name", connName,
+		"channel_id", msg.ChannelId,
+		"team_id", channel.TeamId,
+	)
+	envs := buildOutboundEnvelopes(wireLog, template, augmented)
 	for _, env := range envs {
 		if err := p.publishToOutboundConn(p.ctx, env, connName); err != nil {
 			p.API.LogError("Failed to publish outbound sync envelope",

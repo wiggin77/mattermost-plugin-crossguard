@@ -45,6 +45,13 @@ type Harness struct {
 
 	mu          sync.Mutex
 	userClients map[string]*model.Client4 // key: serverName + "/" + username
+
+	// preWireArchive captures the set of envelope filenames already
+	// present in each server's archive directory at NewHarness time.
+	// validateWireArchive uses it to filter out envelopes from
+	// previous tests in the same `go test` run so each test's gate
+	// only inspects what it actually emitted. Keyed by container name.
+	preWireArchive map[string]map[string]bool
 }
 
 // NewHarness logs in admin on both servers and returns a Harness. It fails
@@ -76,6 +83,23 @@ func NewHarness(t *testing.T) *Harness {
 
 	h.AdminA = h.loginOrFatal(t, h.A, "admin", "password")
 	h.AdminB = h.loginOrFatal(t, h.B, "admin", "password")
+
+	// Wire-validation mode: when CROSSGUARD_WIRE_VALIDATE=1 is set on
+	// the test runner, take a snapshot of each server's envelope
+	// archive now and register a cleanup that validates every envelope
+	// added since the snapshot against schema/crossguard.xsd. The
+	// plugin writes envelopes to the archive whenever
+	// CROSSGUARD_ENVELOPE_ARCHIVE_DIR is set in the container's env
+	// (docker-compose.dev.yml does that unconditionally; the dev
+	// overhead is one tmpfs file per outbound envelope).
+	//
+	// Snapshot-rather-than-clear is used because the dev container
+	// images are distroless and have no rm in the container; docker
+	// cp is the only image-agnostic way to interact with files inside.
+	if WireValidateEnabled() {
+		h.snapshotWireArchive(t)
+		t.Cleanup(func() { h.validateWireArchive(t) })
+	}
 	return h
 }
 

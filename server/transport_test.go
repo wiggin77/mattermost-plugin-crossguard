@@ -27,7 +27,7 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 			Id:        "sm1",
 			ChannelId: "ch1",
 			Users: map[string]*mmModel.User{
-				"u1": {Id: "u1", Username: "alice", Roles: "system_user", UpdateAt: 100},
+				"u1": {Id: "u1", Username: "alice", Email: "alice@example.test", Roles: "system_user", UpdateAt: 100},
 			},
 			Posts: []*mmModel.Post{
 				{Id: "p1", ChannelId: "ch1", Message: "hello", UpdateAt: 200},
@@ -35,7 +35,7 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 			Reactions: []*mmModel.Reaction{
 				{UserId: "u1", PostId: "p1", EmojiName: "thumbsup", UpdateAt: 250},
 			},
-		}),
+		}, wire.NewRecordingLogger()),
 	}
 
 	data, err := MarshalEnvelope(env)
@@ -76,7 +76,7 @@ func TestTransportEnvelopeEpochSequenceOmittedWhenZero(t *testing.T) {
 		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm1",
 			ChannelId: "ch1",
-		}),
+		}, wire.NewRecordingLogger()),
 	}
 
 	data, err := MarshalEnvelope(env)
@@ -132,11 +132,11 @@ func TestFanoutSinglePostNoMetadata(t *testing.T) {
 		Id:        "sm-1",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Posts: []*mmModel.Post{{Id: "p1", UserId: "u1", Message: "hello"}},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 1)
 	require.NotNil(t, envs[0].SyncMsg.Post)
 	assert.Equal(t, "p1", envs[0].SyncMsg.Post.Id)
@@ -150,8 +150,8 @@ func TestFanoutMultiPostWithReactions(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
-			"u2": {Id: "u2", Username: "bob"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
+			"u2": {Id: "u2", Username: "bob", Email: "bob@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "first"},
@@ -161,7 +161,7 @@ func TestFanoutMultiPostWithReactions(t *testing.T) {
 			{UserId: "u2", PostId: "p1", EmojiName: "thumbsup"},
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 2, "two posts produce two envelopes; reaction rides with its post")
 
 	// First post envelope carries p1 + its reaction + the author.
@@ -183,13 +183,13 @@ func TestFanoutMetadataOnly(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		MembershipChanges: []*mmModel.MembershipChangeMsg{
 			{ChannelId: "ch", UserId: "u1", IsAdd: true, ChangeTime: 12345},
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 1, "membership-only sync produces one metadata envelope")
 	assert.Nil(t, envs[0].SyncMsg.Post, "metadata envelope has no <Post>")
 	require.Len(t, envs[0].SyncMsg.MembershipChanges, 1)
@@ -202,8 +202,8 @@ func TestFanoutPostsPlusOrphanReaction(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
-			"u2": {Id: "u2", Username: "bob"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
+			"u2": {Id: "u2", Username: "bob", Email: "bob@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "in this batch"},
@@ -212,7 +212,7 @@ func TestFanoutPostsPlusOrphanReaction(t *testing.T) {
 			{UserId: "u2", PostId: "p999", EmojiName: "smile"}, // orphan: p999 not in this batch
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 2, "one post envelope + one metadata envelope for the orphan")
 	assert.NotNil(t, envs[0].SyncMsg.Post)
 	assert.Empty(t, envs[0].SyncMsg.Reactions, "p1 has no reactions in this batch")
@@ -225,7 +225,7 @@ func TestFanoutPostsPlusOrphanReaction(t *testing.T) {
 func TestFanoutEmptySyncMsgEmitsBare(t *testing.T) {
 	template := &TransportEnvelope{Version: 1, Type: TransportTypeSyncMsg, ConnName: "c"}
 	msg := &mmModel.SyncMsg{Id: "sm", ChannelId: "ch"}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 1, "empty sync msg still emits one envelope so the cursor advances")
 	assert.Nil(t, envs[0].SyncMsg.Post)
 	assert.Empty(t, envs[0].SyncMsg.Reactions)
@@ -238,16 +238,16 @@ func TestFanoutPostsOnlyDistinctUsers(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
-			"u2": {Id: "u2", Username: "bob"},
-			"u3": {Id: "u3", Username: "carol"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
+			"u2": {Id: "u2", Username: "bob", Email: "bob@example.test"},
+			"u3": {Id: "u3", Username: "carol", Email: "carol@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "from alice"},
 			{Id: "p2", UserId: "u2", Message: "from bob"},
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 2)
 
 	// Each post envelope inlines only its post's author. carol (u3) is
@@ -278,7 +278,7 @@ func TestFanoutReactionWithoutPostUser(t *testing.T) {
 	}
 
 	require.NotPanics(t, func() {
-		envs := buildOutboundEnvelopes(template, msg)
+		envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 		require.Len(t, envs, 1, "one metadata envelope")
 		assert.Nil(t, envs[0].SyncMsg.Post)
 		require.Len(t, envs[0].SyncMsg.Reactions, 1)
@@ -294,7 +294,7 @@ func TestFanoutMembershipPlusOrphanReactionSameUser(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Reactions: []*mmModel.Reaction{
 			{UserId: "u1", PostId: "p-elsewhere", EmojiName: "+1"},
@@ -303,7 +303,7 @@ func TestFanoutMembershipPlusOrphanReactionSameUser(t *testing.T) {
 			{ChannelId: "ch", UserId: "u1", IsAdd: true, ChangeTime: 1},
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 1, "one metadata envelope; no posts")
 	require.Len(t, envs[0].SyncMsg.Users, 1, "user deduped across membership + reaction")
 	assert.Contains(t, envs[0].SyncMsg.Users, "u1")
@@ -317,7 +317,7 @@ func TestFanoutNilEntries(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			nil,
@@ -337,7 +337,7 @@ func TestFanoutNilEntries(t *testing.T) {
 	}
 
 	require.NotPanics(t, func() {
-		envs := buildOutboundEnvelopes(template, msg)
+		envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 		// Exactly one post envelope, no metadata envelope (nil membership
 		// is skipped and the reaction is local to p1).
 		require.Len(t, envs, 1)
@@ -356,8 +356,8 @@ func TestFanoutMentionTransformsDuplicatedPerPostEnvelope(t *testing.T) {
 		Id:        "sm",
 		ChannelId: "ch",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
-			"u2": {Id: "u2", Username: "bob"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
+			"u2": {Id: "u2", Username: "bob", Email: "bob@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "first"},
@@ -367,7 +367,7 @@ func TestFanoutMentionTransformsDuplicatedPerPostEnvelope(t *testing.T) {
 			"@oldname": "@newname",
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 2)
 	for i, env := range envs {
 		require.NotNil(t, env.SyncMsg.MentionTransforms, "envelope %d", i)
@@ -384,7 +384,7 @@ func TestFanoutSyncMsgIDAndChannelIDPreserved(t *testing.T) {
 		Id:        "sm-source",
 		ChannelId: "ch-source",
 		Users: map[string]*mmModel.User{
-			"u1": {Id: "u1", Username: "alice"},
+			"u1": {Id: "u1", Username: "alice", Email: "alice@example.test"},
 		},
 		Posts: []*mmModel.Post{
 			{Id: "p1", UserId: "u1", Message: "x"},
@@ -393,7 +393,7 @@ func TestFanoutSyncMsgIDAndChannelIDPreserved(t *testing.T) {
 			{ChannelId: "ch-source", UserId: "u1", IsAdd: true, ChangeTime: 1},
 		},
 	}
-	envs := buildOutboundEnvelopes(template, msg)
+	envs := buildOutboundEnvelopes(wire.NewRecordingLogger(), template, msg)
 	require.Len(t, envs, 2, "one post + one metadata")
 	for i, env := range envs {
 		assert.Equal(t, "sm-source", env.SyncMsg.Id, "envelope %d Id", i)
@@ -440,7 +440,7 @@ func TestTransportEnvelopeXMLReadable(t *testing.T) {
 		SyncMsg: wire.SyncMsgFromModel(&mmModel.SyncMsg{
 			Id:        "sm1",
 			ChannelId: "ch1",
-		}),
+		}, wire.NewRecordingLogger()),
 	}
 	data, err := MarshalEnvelope(env)
 	require.NoError(t, err)

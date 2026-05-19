@@ -47,7 +47,7 @@ func TestPostPropsFromModelWhitelistedKeys(t *testing.T) {
 	assert.True(t, out.FromOAuthApp)
 	assert.Equal(t, "Alice via Webhook", out.OverrideUsername)
 	assert.Equal(t, "https://example.com/icon.png", out.OverrideIconURL)
-	assert.Equal(t, ":bell:", out.OverrideIconEmoji)
+	assert.Equal(t, "bell", out.OverrideIconEmoji, "wire form strips :colons: per EmojiNameType")
 	assert.Equal(t, "Notifier", out.WebhookDisplayName)
 	assert.Equal(t, "u02", out.AddedUserId)
 	assert.Equal(t, "u03", out.DeleteBy)
@@ -78,6 +78,33 @@ func TestPostPropsToModelRoundTrip(t *testing.T) {
 	props := PostPropsFromModel(in)
 	out := props.ToModel()
 	assert.Equal(t, in, out)
+}
+
+func TestPostPropsOverrideIconEmojiCanonicalization(t *testing.T) {
+	// Mattermost stores override_icon_emoji as ":name:"; the constrained
+	// wire schema's EmojiNameType pattern admits only the bare name.
+	// FromModel strips a single leading/trailing colon; ToModel re-adds
+	// them so upstream sees the original shape.
+	cases := []struct {
+		upstream  string
+		wantWire  string
+		roundTrip string
+	}{
+		{":white_check_mark:", "white_check_mark", ":white_check_mark:"},
+		{"wave", "wave", ":wave:"},
+		{":wave", "wave", ":wave:"},
+		{"wave:", "wave", ":wave:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.upstream, func(t *testing.T) {
+			in := mmModel.StringInterface{"override_icon_emoji": tc.upstream}
+			props := PostPropsFromModel(in)
+			require.NotNil(t, props)
+			assert.Equal(t, tc.wantWire, props.OverrideIconEmoji)
+			out := props.ToModel()
+			assert.Equal(t, tc.roundTrip, out["override_icon_emoji"])
+		})
+	}
 }
 
 func TestPostFromModelNil(t *testing.T) {

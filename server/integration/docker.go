@@ -102,6 +102,28 @@ func (d *DockerCompose) MMCtlOrAlreadyExists(t *testing.T, container string, arg
 	return r
 }
 
+// Cp runs `docker compose -f <File> cp <src> <dst>` and returns the
+// combined stdout/stderr plus any error. Either src or dst may use the
+// `service:path` form to copy between the host and a container; the
+// other side must be a host path. Used by helpers that need to read
+// files inside the dev containers, which are distroless and have no
+// shell or coreutils available for in-container scripting.
+func (d *DockerCompose) Cp(t *testing.T, src, dst string) ExecResult {
+	t.Helper()
+	// Test-only helper invoking docker compose with caller-supplied args.
+	cmd := exec.Command("docker", "compose", "-f", d.File, "cp", src, dst) //nolint:gosec // G204: args come from test code, not external input
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return ExecResult{
+		Stdout: strings.TrimRight(stdout.String(), "\n"),
+		Stderr: strings.TrimRight(stderr.String(), "\n"),
+		Err:    err,
+	}
+}
+
 // PluginEnable enables the plugin in the given container.
 func (d *DockerCompose) PluginEnable(t *testing.T, container, pluginID string) {
 	t.Helper()

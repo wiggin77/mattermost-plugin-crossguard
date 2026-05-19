@@ -78,4 +78,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/mattermost/mattermost/server/public => /home/dlauder/Development/mattermost/mattermost/server/public
+replace github.com/mattermost/mattermost/server/public => /Users/dlauder/Development/mattermost/mattermost/server/public

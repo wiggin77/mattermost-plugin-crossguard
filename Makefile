@@ -519,9 +519,20 @@ docker-check:
 		exit 1; \
 	fi
 
-## Build and deploy plugin to both Docker Mattermost servers
+## Build and deploy plugin to both Docker Mattermost servers.
+##
+## `dist` is invoked via a recursive $(MAKE) with
+## MM_SERVICESETTINGS_ENABLEDEVELOPER / MM_DEBUG stripped, so the
+## build always cross-compiles for linux/amd64 + linux/arm64
+## regardless of the developer's shell environment. The dev
+## "developer mode" branch in the `server` recipe emits only a host-OS
+## binary, which fails plugin activation in the Linux containers (no
+## plugin-linux-amd64). The conditional in `server:` is parse-time, so
+## target-specific variables cannot override it -- a sub-make is the
+## only clean fix.
 .PHONY: docker-deploy
-docker-deploy: docker-check dist
+docker-deploy: docker-check
+	@MM_SERVICESETTINGS_ENABLEDEVELOPER= MM_DEBUG= $(MAKE) dist
 	@echo "Deploying plugin to Server A (mattermost-a)..."
 	@$(DOCKER_COMPOSE) cp dist/$(BUNDLE_NAME) mattermost-a:/tmp/$(BUNDLE_NAME)
 	@$(DOCKER_COMPOSE) exec -T mattermost-a mmctl --local plugin add /tmp/$(BUNDLE_NAME) --force

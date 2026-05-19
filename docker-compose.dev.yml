@@ -142,8 +142,16 @@ services:
       - /mattermost/data:uid=2000,gid=2000
       - /mattermost/plugins:uid=2000,gid=2000,exec
       - /mattermost/client/plugins:uid=2000,gid=2000
+    volumes:
+      # Wire-envelope archive: host bind mount so the plugin's
+      # outbound envelopes (visible via os.WriteFile from the plugin
+      # process) are also visible to the test runner on the host.
+      # Direct tmpfs mounts at this path ended up isolated from the
+      # docker-host view, presumably by Mattermost plugin sandboxing.
+      - ./docker/wire-archive-a:/mattermost/wire-archive:rw
     environment:
       TZ: UTC
+      CROSSGUARD_ENVELOPE_ARCHIVE_DIR: /mattermost/wire-archive
       MM_CONFIG: postgres://mmuser:mmuser_password@postgres-a:5432/mattermost?sslmode=disable&connect_timeout=10
       MM_SQLSETTINGS_DRIVERNAME: postgres
       MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:mmuser_password@postgres-a:5432/mattermost?sslmode=disable&connect_timeout=10
@@ -190,8 +198,12 @@ services:
       - /mattermost/data:uid=2000,gid=2000
       - /mattermost/plugins:uid=2000,gid=2000,exec
       - /mattermost/client/plugins:uid=2000,gid=2000
+    volumes:
+      # Wire-envelope archive: see mattermost-a above for details.
+      - ./docker/wire-archive-b:/mattermost/wire-archive:rw
     environment:
       TZ: UTC
+      CROSSGUARD_ENVELOPE_ARCHIVE_DIR: /mattermost/wire-archive
       MM_CONFIG: postgres://mmuser:mmuser_password@postgres-b:5432/mattermost?sslmode=disable&connect_timeout=10
       MM_SQLSETTINGS_DRIVERNAME: postgres
       MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:mmuser_password@postgres-b:5432/mattermost?sslmode=disable&connect_timeout=10

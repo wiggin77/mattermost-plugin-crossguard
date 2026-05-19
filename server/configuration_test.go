@@ -563,8 +563,11 @@ func TestFileFilterValidation(t *testing.T) {
 }
 
 func TestBuildTestEnvelope(t *testing.T) {
-	const epoch = "abcdef0123456789abcdef0123"
-	env, data, msgID, err := buildTestEnvelope(epoch)
+	const (
+		epoch    = "abcdef0123456789abcdef0123"
+		connName = "nats-low-to-high"
+	)
+	env, data, msgID, err := buildTestEnvelope(connName, epoch)
 	require.NoError(t, err)
 	require.NotEmpty(t, msgID)
 	require.NotEmpty(t, data)
@@ -572,6 +575,9 @@ func TestBuildTestEnvelope(t *testing.T) {
 	assert.Equal(t, TransportTypeTest, env.Type)
 	assert.Equal(t, msgID, env.TestID)
 	assert.Equal(t, epoch, env.Epoch)
+	assert.Equal(t, connName, env.ConnName)
+	assert.Equal(t, connName, env.TeamName, "test envelope reuses ConnName for SlugType-conforming TeamName")
+	assert.Equal(t, connName, env.ChannelName, "test envelope reuses ConnName for SlugType-conforming ChannelName")
 	assert.Equal(t, uint64(0), env.Sequence, "test envelopes never carry a Sequence")
 
 	got, err := UnmarshalEnvelope(data)

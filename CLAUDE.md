@@ -288,6 +288,7 @@ After setup:
 | `make docker-logs-b` | Follow Server B logs |
 | `make docker-reset` | Disable and re-enable plugin on both servers |
 | `make docker-integration-test` | Full integration suite: self-contained, builds + deploys plugin, runs every Go test in `server/integration/`. Use this to validate the plugin end-to-end. |
+| `make docker-integration-test-validate-wire` | Same as `docker-integration-test` but with `CROSSGUARD_WIRE_VALIDATE=1`: the plugin archives every outbound envelope to `/mattermost/wire-archive` in each container, and the harness validates every archived envelope against `schema/crossguard.xsd` via xmllint at test cleanup. Fails the test on any non-conforming output. |
 | `make docker-smoke-test` | Single-test wrapper: `go test -run TestSmoke` |
 | `make docker-post-lifecycle-test` | Single-test wrapper: `go test -run TestPostLifecycle` |
 | `make docker-profile-image-test` | Single-test wrapper: `go test -run TestProfileImage` |

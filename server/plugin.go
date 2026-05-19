@@ -124,6 +124,10 @@ func (p *Plugin) OnActivate() error {
 	p.API.LogInfo("Sender epoch assigned",
 		"error_code", errcode.PluginEpochAssigned,
 		"epoch", p.epoch, "node_id", p.nodeID)
+	p.API.LogInfo("Envelope archive configuration",
+		"error_code", errcode.PluginEnvelopeArchiveConfig,
+		"archive_dir", envelopeArchiveDir,
+		"enabled", envelopeArchiveDir != "")
 
 	cfg := p.getConfiguration()
 	p.sequencer = newInboundSequencer(

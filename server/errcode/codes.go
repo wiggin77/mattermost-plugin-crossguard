@@ -344,6 +344,7 @@ const (
 	PluginMigrateInviteFailed     = 27105
 	PluginMigrateSummary          = 27106
 	PluginMigrateDeferred         = 27107
+	PluginEnvelopeArchiveConfig   = 27108
 )
 
 // inbound_files.go (28000-28999)
@@ -363,6 +364,19 @@ const (
 	InboundAttachmentDisabled             = 28012
 	InboundAttachmentFiltered             = 28013
 	InboundProfileImageDisabled           = 28014
+)
+
+// wire/* (29000-29999). The wire package does not log directly via
+// p.API; the WireLogger interface in server/wire/validate.go adapts
+// these codes for the outbound producer in transport.go.
+const (
+	WireUserDroppedNonConformingUsername = 29000 // Error: Username failed validation and could not be recovered via the resolve-then-truncate ladder.
+	WireUserDroppedNonConformingEmail    = 29001 // Error: Email failed validation; whole user record dropped.
+	WireUsernameTruncatedAtColon         = 29002 // Warn: Colon-bearing Username sanitized by truncation (ladder step 3); RemoteUsername prop missing or itself non-conforming.
+	WireUserPropDroppedNonConforming     = 29003 // Warn: Individual UserProps key (RemoteUsername or RemoteEmail) failed validation; prop dropped, user record retained.
+	WirePostDroppedNonConforming         = 29004 // Error: reserved for symmetric Post validation coverage; not currently used.
+	WireReactionDroppedNonConforming     = 29005 // Error: reserved for symmetric Reaction validation coverage; not currently used.
+	WireUserDroppedAuditAtCaller         = 29006 // Error: emitted by buildOutboundEnvelopes when UserFromModel returns nil, correlating the drop with the carrying post.
 )
 
 // AllCodes lists every code declared in this package. Used by
@@ -649,6 +663,7 @@ var AllCodes = []int{
 	PluginMigrateInviteFailed,
 	PluginMigrateSummary,
 	PluginMigrateDeferred,
+	PluginEnvelopeArchiveConfig,
 
 	InboundFileUnknownKind,
 	InboundAttachmentMissingHeader,
@@ -665,4 +680,12 @@ var AllCodes = []int{
 	InboundAttachmentDisabled,
 	InboundAttachmentFiltered,
 	InboundProfileImageDisabled,
+
+	WireUserDroppedNonConformingUsername,
+	WireUserDroppedNonConformingEmail,
+	WireUsernameTruncatedAtColon,
+	WireUserPropDroppedNonConforming,
+	WirePostDroppedNonConforming,
+	WireReactionDroppedNonConforming,
+	WireUserDroppedAuditAtCaller,
 }

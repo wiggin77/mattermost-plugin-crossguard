@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/xml"
+	"strings"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
 )
@@ -113,7 +114,7 @@ func PostPropsFromModel(m mmModel.StringInterface) *PostProps {
 		FromOAuthApp:             propBool(m, postPropFromOAuthApp),
 		OverrideUsername:         propString(m, postPropOverrideUsername),
 		OverrideIconURL:          propString(m, postPropOverrideIconURL),
-		OverrideIconEmoji:        propString(m, postPropOverrideIconEmoji),
+		OverrideIconEmoji:        stripEmojiColons(propString(m, postPropOverrideIconEmoji)),
 		WebhookDisplayName:       propString(m, postPropWebhookDisplayName),
 		AddedUserId:              propString(m, postPropAddedUserId),
 		DeleteBy:                 propString(m, postPropDeleteBy),
@@ -155,7 +156,7 @@ func (p *PostProps) ToModel() mmModel.StringInterface {
 		out[postPropOverrideIconURL] = p.OverrideIconURL
 	}
 	if p.OverrideIconEmoji != "" {
-		out[postPropOverrideIconEmoji] = p.OverrideIconEmoji
+		out[postPropOverrideIconEmoji] = ":" + p.OverrideIconEmoji + ":"
 	}
 	if p.WebhookDisplayName != "" {
 		out[postPropWebhookDisplayName] = p.WebhookDisplayName
@@ -221,6 +222,14 @@ func propString(m mmModel.StringInterface, key string) string {
 		return s
 	}
 	return ""
+}
+
+// stripEmojiColons removes a single leading and trailing ':' from an
+// emoji-name value. Mattermost stores override_icon_emoji in the
+// ':emoji_name:' form, but the wire schema's EmojiNameType pattern
+// admits only the bare name. ToModel() re-adds the colons.
+func stripEmojiColons(s string) string {
+	return strings.Trim(s, ":")
 }
 
 // Post is the wire representation of a Mattermost post. Fields the

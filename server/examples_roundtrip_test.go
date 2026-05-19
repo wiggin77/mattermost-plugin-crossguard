@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -46,6 +48,7 @@ func exampleCases() []exampleCase {
 		{"19_user_with_timezone_and_props.xml", userWithTimezoneAndPropsEnvelope},
 		{"20_bot_user.xml", botUserEnvelope},
 		{"21_metadata_orphan_reaction.xml", metadataOrphanReactionEnvelope},
+		{"22_system_add_to_channel.xml", systemAddToChannelEnvelope},
 	}
 }
 
@@ -54,11 +57,46 @@ func exampleCases() []exampleCase {
 // exampleCases is safe; gosec G304 does not apply.
 func examplesDir() string { return filepath.Join("..", "schema", "examples") }
 
+// requireXmllint resolves xmllint or fails the test. The schema gate is
+// mandatory: every test run on every machine must validate fixtures
+// against schema/crossguard.xsd. Mac ships xmllint pre-installed; Linux
+// developers install libxml2-utils; CI does the same.
+func requireXmllint(t *testing.T) string {
+	t.Helper()
+	xmllint, err := exec.LookPath("xmllint")
+	if err != nil {
+		t.Fatalf("xmllint not on PATH; install libxml2-utils (the schema gate is mandatory)")
+	}
+	return xmllint
+}
+
+// validateAgainstSchema pipes data into xmllint --schema crossguard.xsd
+// and fails the test on any validation error. Used by both the freshly
+// marshalled bytes (in TestExampleFiles) and the on-disk fixtures (in
+// TestExampleFilesValidateAgainstSchema) so neither path can silently
+// admit a non-conforming envelope.
+func validateAgainstSchema(t *testing.T, xmllint string, data []byte) {
+	t.Helper()
+	schema := filepath.Join("..", "schema", "crossguard.xsd")
+	cmd := exec.Command(xmllint, "--noout", "--schema", schema, "-") //nolint:gosec // xmllint is resolved via LookPath; schema path is a constant under the repo
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("schema validation failed:\n%s", string(out))
+	}
+}
+
 // TestExampleFiles compares each schema/examples/*.xml file to the bytes
-// produced by MarshalEnvelope on the canonical struct for that scenario.
+// produced by MarshalEnvelope on the canonical struct for that scenario,
+// AND validates those freshly produced bytes against schema/crossguard.xsd.
+// Validation runs whether UPDATE_EXAMPLES is set or not so a builder
+// change that produces a non-conforming envelope cannot be silently
+// regenerated onto disk.
 // Set UPDATE_EXAMPLES=1 to rewrite the files from the current code output;
-// otherwise the test asserts byte-for-byte equality.
+// otherwise the test asserts byte-for-byte equality against the on-disk
+// fixtures.
 func TestExampleFiles(t *testing.T) {
+	xmllint := requireXmllint(t)
 	update := os.Getenv("UPDATE_EXAMPLES") == "1"
 	dir := examplesDir()
 
@@ -71,6 +109,8 @@ func TestExampleFiles(t *testing.T) {
 			want = append(want, data...)
 			want = append(want, '\n')
 
+			validateAgainstSchema(t, xmllint, want)
+
 			path := filepath.Join(dir, tc.file)
 			if update {
 				require.NoError(t, os.WriteFile(path, want, 0o600)) //nolint:gosec // example fixtures, deterministic input
@@ -80,6 +120,24 @@ func TestExampleFiles(t *testing.T) {
 			got, err := os.ReadFile(path) //nolint:gosec // example fixture path is a constant under the repo
 			require.NoError(t, err)
 			assert.Equal(t, string(want), string(got), "regenerate with UPDATE_EXAMPLES=1 if format change is intentional")
+		})
+	}
+}
+
+// TestExampleFilesValidateAgainstSchema runs every on-disk example
+// fixture through xmllint against schema/crossguard.xsd. This catches
+// any case where a fixture was modified by hand or by an out-of-band
+// tool without going through the regeneration path; TestExampleFiles
+// covers the regeneration path itself.
+func TestExampleFilesValidateAgainstSchema(t *testing.T) {
+	xmllint := requireXmllint(t)
+	dir := examplesDir()
+	for _, tc := range exampleCases() {
+		tc := tc
+		t.Run(tc.file, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(dir, tc.file)) //nolint:gosec // example fixture path is a constant under the repo
+			require.NoError(t, err)
+			validateAgainstSchema(t, xmllint, data)
 		})
 	}
 }
@@ -138,7 +196,7 @@ const (
 )
 
 func alice() *mmModel.User {
-	remoteID := "remote-low"
+	remoteID := "remoteloaaaaaaaaaaaaaaaaaa"
 	return &mmModel.User{
 		Id:        userA,
 		CreateAt:  1700000000000,
@@ -155,7 +213,7 @@ func alice() *mmModel.User {
 }
 
 func bob() *mmModel.User {
-	remoteID := "remote-low"
+	remoteID := "remoteloaaaaaaaaaaaaaaaaaa"
 	return &mmModel.User{
 		Id:        userB,
 		CreateAt:  1700000000000,
@@ -179,7 +237,7 @@ func baseEnvelope(connName, channelName string, msg *mmModel.SyncMsg) *Transport
 		Timestamp:   fixedTimestamp,
 		TeamName:    "team-a",
 		ChannelName: channelName,
-		SyncMsg:     wire.SyncMsgFromModel(msg),
+		SyncMsg:     wire.SyncMsgFromModel(msg, wire.NewRecordingLogger()),
 	}
 }
 
@@ -203,7 +261,7 @@ func withIndependentSession(env *TransportEnvelope, epoch string, seq uint64) *T
 
 func postSimpleEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-01",
+		Id:        "sm01aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -220,7 +278,7 @@ func postSimpleEnvelope() *TransportEnvelope {
 
 func postMarkdownRichEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-02",
+		Id:        "sm02aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -237,7 +295,7 @@ func postMarkdownRichEnvelope() *TransportEnvelope {
 
 func postCodeBlocksEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-03",
+		Id:        "sm03aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -254,7 +312,7 @@ func postCodeBlocksEnvelope() *TransportEnvelope {
 
 func postTableAndLinksEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-04",
+		Id:        "sm04aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -271,7 +329,7 @@ func postTableAndLinksEnvelope() *TransportEnvelope {
 
 func postThreadReplyEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-05",
+		Id:        "sm05aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -289,7 +347,7 @@ func postThreadReplyEnvelope() *TransportEnvelope {
 
 func postIncidentReportEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-06",
+		Id:        "sm06aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice(), userB: bob()},
 		Posts: []*mmModel.Post{{
@@ -305,26 +363,33 @@ func postIncidentReportEnvelope() *TransportEnvelope {
 }
 
 func postUpdateEnvelope() *TransportEnvelope {
+	// Edited post: OriginalId points at the post id that this version
+	// supersedes (Mattermost creates a new post row on edit and chains
+	// it to the predecessor via OriginalId). Exercises <OriginalId>.
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-07",
+		Id:        "sm07aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
-			Id:        postID1,
-			CreateAt:  1712956800000,
-			UpdateAt:  1712957000000,
-			EditAt:    1712957000000,
-			UserId:    userA,
-			ChannelId: chanID,
-			Message:   "Morning team. Standup moved to 9:45 in the upstairs room.",
+			Id:         postID2,
+			CreateAt:   1712956800000,
+			UpdateAt:   1712957000000,
+			EditAt:     1712957000000,
+			UserId:     userA,
+			ChannelId:  chanID,
+			OriginalId: postID1,
+			Message:    "Morning team. Standup moved to 9:45 in the upstairs room.",
 		}},
 	}
 	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 7)
 }
 
 func postDeleteEnvelope() *TransportEnvelope {
+	// Deleted post: DeleteAt is set, and Props.DeleteBy records the user
+	// who issued the delete (typically the author, or a moderator).
+	// Exercises <Props><DeleteBy>.
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-08",
+		Id:        "sm08aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Posts: []*mmModel.Post{{
 			Id:        postID1,
@@ -333,6 +398,9 @@ func postDeleteEnvelope() *TransportEnvelope {
 			DeleteAt:  1712957100000,
 			UserId:    userA,
 			ChannelId: chanID,
+			Props: mmModel.StringInterface{
+				"deleteBy": userA,
+			},
 		}},
 	}
 	return withSeq(baseEnvelope("nats-low-to-high", "general", msg), 8)
@@ -340,7 +408,7 @@ func postDeleteEnvelope() *TransportEnvelope {
 
 func reactionAddEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-09",
+		Id:        "sm09aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Reactions: []*mmModel.Reaction{{
 			UserId:    userA,
@@ -356,7 +424,7 @@ func reactionAddEnvelope() *TransportEnvelope {
 
 func reactionRemoveEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-10",
+		Id:        "sm10aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Reactions: []*mmModel.Reaction{{
 			UserId:    userA,
@@ -373,7 +441,7 @@ func reactionRemoveEnvelope() *TransportEnvelope {
 
 func reactionCustomEmojiEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-11",
+		Id:        "sm11aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Reactions: []*mmModel.Reaction{{
 			UserId:    userA,
@@ -390,16 +458,19 @@ func reactionCustomEmojiEnvelope() *TransportEnvelope {
 func testEnvelope() *TransportEnvelope {
 	// Test envelopes carry the sender's current Epoch (so the receiver can
 	// correlate the ping against an ongoing sync_msg session and detect a
-	// restart) but never a Sequence (no channel scope).
+	// restart) but never a Sequence (no channel scope). TeamName and
+	// ChannelName are populated with the connection name (matching the
+	// production buildTestEnvelope behavior) so the envelope satisfies
+	// the constrained wire-schema's SlugType requirement on those fields.
 	return &TransportEnvelope{
 		Version:     1,
 		Type:        TransportTypeTest,
 		ConnName:    "nats-low-to-high",
 		Timestamp:   fixedTimestamp,
 		Epoch:       timelineEpoch,
-		TeamName:    "",
-		ChannelName: "",
-		TestID:      "test-37io7o7ewliugtoc022jpmyb1e",
+		TeamName:    "nats-low-to-high",
+		ChannelName: "nats-low-to-high",
+		TestID:      "testid12aaaaaaaaaaaaaaaaaa",
 	}
 }
 
@@ -407,14 +478,14 @@ func testEnvelope() *TransportEnvelope {
 // any post payload, exercising the <MembershipChanges> container.
 func membershipChangeJoinEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-13",
+		Id:        "sm13aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userB: bob()},
 		MembershipChanges: []*mmModel.MembershipChangeMsg{{
 			ChannelId:  chanID,
 			UserId:     userB,
 			IsAdd:      true,
-			RemoteId:   "remote-low",
+			RemoteId:   "remoteloaaaaaaaaaaaaaaaaaa",
 			ChangeTime: 1712957500000,
 		}},
 	}
@@ -426,13 +497,13 @@ func membershipChangeJoinEnvelope() *TransportEnvelope {
 // user's profile to accompany the membership event.
 func membershipChangeLeaveEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-14",
+		Id:        "sm14aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		MembershipChanges: []*mmModel.MembershipChangeMsg{{
 			ChannelId:  chanID,
 			UserId:     userB,
 			IsAdd:      false,
-			RemoteId:   "remote-low",
+			RemoteId:   "remoteloaaaaaaaaaaaaaaaaaa",
 			ChangeTime: 1712957600000,
 		}},
 	}
@@ -444,7 +515,7 @@ func membershipChangeLeaveEnvelope() *TransportEnvelope {
 // though the upstream Status has one; verify it does not appear here.
 func statusDndEnvelope() *TransportEnvelope {
 	msg := &mmModel.SyncMsg{
-		Id:        "sm-15",
+		Id:        "sm15aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Statuses: []*mmModel.Status{{
 			UserId:         userA,
@@ -461,7 +532,7 @@ func statusDndEnvelope() *TransportEnvelope {
 // 16: PostAcknowledgement. Exercises the <Acknowledgements> container.
 func postAcknowledgementEnvelope() *TransportEnvelope {
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-16",
+		Id:        "sm16aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Acknowledgements: []*mmModel.PostAcknowledgement{{
 			UserId:         userA,
@@ -476,7 +547,7 @@ func postAcknowledgementEnvelope() *TransportEnvelope {
 // map serialization.
 func mentionTransformsEnvelope() *TransportEnvelope {
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-17",
+		Id:        "sm17aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
@@ -494,25 +565,35 @@ func mentionTransformsEnvelope() *TransportEnvelope {
 	}), "epoch17aaaaaaaaaaaaaaaaaaa", 1)
 }
 
-// 18: Post with typed PostProps (webhook + AI provenance). Exercises
-// every PostProps field so the compliance reviewer can see the full
-// whitelisted set in action. Drops the upstream "attachments" and
+// 18: Post with typed PostProps (webhook + AI provenance) plus the
+// optional Post-level flags. Exhaustive coverage for compliance review:
+// every PostProps key in PostPropsType and every optional Post element
+// (Hashtags, FileIds, HasReactions, IsPinned) appears here.
+// The provenance flags (from_webhook / from_bot / from_plugin /
+// from_oauth_app) are all set true purely for element coverage; a real
+// post would set exactly one. Drops the upstream "attachments" and
 // "force_notification" keys silently.
 func postWithPropsWebhookEnvelope() *TransportEnvelope {
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-18",
+		Id:        "sm18aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Posts: []*mmModel.Post{{
-			Id:        postID1,
-			CreateAt:  1712958000000,
-			UpdateAt:  1712958000000,
-			UserId:    userA,
-			ChannelId: chanID,
-			Message:   "Build succeeded for v1.2.3. Deploy window opens at 14:00 UTC.",
+			Id:           postID1,
+			CreateAt:     1712958000000,
+			UpdateAt:     1712958000000,
+			UserId:       userA,
+			ChannelId:    chanID,
+			Message:      "Build succeeded for v1.2.3. Deploy window opens at 14:00 UTC.",
+			Hashtags:     "#release #v1.2.3",
+			FileIds:      mmModel.StringArray{"fileidaaaaaaaaaaaaaaaaaaaa"},
+			HasReactions: true,
+			IsPinned:     true,
 			Props: mmModel.StringInterface{
 				"from_webhook":             true,
-				"from_bot":                 false,
+				"from_bot":                 true,
+				"from_plugin":              true,
+				"from_oauth_app":           true,
 				"override_username":        "CI Bot",
 				"override_icon_url":        "https://ci.example.com/icon.png",
 				"override_icon_emoji":      ":white_check_mark:",
@@ -520,6 +601,7 @@ func postWithPropsWebhookEnvelope() *TransportEnvelope {
 				"ai_generated_by":          userBot,
 				"ai_generated_by_username": "release-summary-bot",
 				"mentionHighlightDisabled": true,
+				"disable_group_highlight":  true,
 				// Dropped upstream keys; must not appear on wire:
 				"attachments":        "must not cross",
 				"force_notification": true,
@@ -533,7 +615,7 @@ func postWithPropsWebhookEnvelope() *TransportEnvelope {
 // the framework-set RemoteUsername / RemoteEmail / OriginalRemoteId
 // keys, plus a customStatus payload, plus the Timezone map.
 func userWithTimezoneAndPropsEnvelope() *TransportEnvelope {
-	remoteID := "remote-low"
+	remoteID := "remoteloaaaaaaaaaaaaaaaaaa"
 	user := &mmModel.User{
 		Id:        userA,
 		CreateAt:  1700000000000,
@@ -555,14 +637,14 @@ func userWithTimezoneAndPropsEnvelope() *TransportEnvelope {
 			"customStatus":     `{"emoji":":coffee:","text":"deep focus"}`,
 			"RemoteUsername":   "alice",
 			"RemoteEmail":      "alice@server-a.example.com",
-			"OriginalRemoteId": "remote-low",
+			"OriginalRemoteId": "remoteloaaaaaaaaaaaaaaaaaa",
 			// Unknown upstream key; must not appear on wire:
 			"some_local_setting": "drop me",
 		},
 		RemoteId: &remoteID,
 	}
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-19",
+		Id:        "sm19aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: user},
 	}), "epoch19aaaaaaaaaaaaaaaaaaa", 1)
@@ -583,7 +665,7 @@ func botUserEnvelope() *TransportEnvelope {
 		BotLastIconUpdate: 1712000000000,
 	}
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-20",
+		Id:        "sm20aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userBot: bot},
 		Posts: []*mmModel.Post{{
@@ -604,7 +686,7 @@ func botUserEnvelope() *TransportEnvelope {
 // envelopes always flow.
 func metadataOrphanReactionEnvelope() *TransportEnvelope {
 	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
-		Id:        "sm-21",
+		Id:        "sm21aaaaaaaaaaaaaaaaaaaaaa",
 		ChannelId: chanID,
 		Users:     map[string]*mmModel.User{userA: alice()},
 		Reactions: []*mmModel.Reaction{{
@@ -616,4 +698,31 @@ func metadataOrphanReactionEnvelope() *TransportEnvelope {
 			ChannelId: chanID,
 		}},
 	}), "epoch21aaaaaaaaaaaaaaaaaaa", 1)
+}
+
+// 22: System message (user added to channel). Exercises <Post><Type>
+// for system_* markers plus the PostProps that carry system-message
+// data (AddedUserId, AddChannelMember). Mattermost renders these as
+// "<actor> added <target> to the channel"; the receiver replays the
+// system message verbatim by feeding the typed wire form back to
+// p.API.ReceiveSharedChannelSyncMsg.
+func systemAddToChannelEnvelope() *TransportEnvelope {
+	return withIndependentSession(baseEnvelope("nats-low-to-high", "general", &mmModel.SyncMsg{
+		Id:        "sm22aaaaaaaaaaaaaaaaaaaaaa",
+		ChannelId: chanID,
+		Users:     map[string]*mmModel.User{userA: alice(), userB: bob()},
+		Posts: []*mmModel.Post{{
+			Id:        postID3,
+			CreateAt:  1712958400000,
+			UpdateAt:  1712958400000,
+			UserId:    userA,
+			ChannelId: chanID,
+			Type:      "system_add_to_channel",
+			Message:   "added bob to the channel.",
+			Props: mmModel.StringInterface{
+				"addedUserId":        userB,
+				"add_channel_member": userB,
+			},
+		}},
+	}), "epoch22aaaaaaaaaaaaaaaaaaa", 1)
 }

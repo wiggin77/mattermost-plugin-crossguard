@@ -155,7 +155,7 @@ func (p *Plugin) handleTestNATSConnection(w http.ResponseWriter, conn Connection
 }
 
 func (p *Plugin) handleTestNATSOutbound(w http.ResponseWriter, nc *nats.Conn, conn ConnectionConfig) {
-	_, data, msgID, err := buildTestEnvelope(p.epoch)
+	_, data, msgID, err := buildTestEnvelope(conn.Name, p.epoch)
 	if err != nil {
 		p.API.LogError("Failed to build test envelope",
 			"error_code", errcode.APIBuildTestMessageFailed,

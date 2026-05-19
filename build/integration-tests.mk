@@ -58,6 +58,7 @@ servicebus-probe-run: servicebus-probe-build docker-servicebus-up
 # docker state, so cached PASS is meaningless.
 GO_TEST_INTEGRATION = MM_HOST=$(MM_HOST) MM_PORT_A=$(MM_PORT_A) MM_PORT_B=$(MM_PORT_B) \
 	DOCKER_COMPOSE_FILE=docker-compose.dev.yml \
+	CROSSGUARD_WIRE_VALIDATE=$(CROSSGUARD_WIRE_VALIDATE) \
 	go test -tags=integration -timeout=30m -count=1 -v ./server/integration/...
 
 ## Full Go integration suite. Self-contained: builds & deploys the
@@ -81,6 +82,17 @@ docker-integration-test: docker-check servicebus-probe-run docker-deploy
 	@echo ""
 	@echo "Running integration test suite (server/integration/)..."
 	@$(GO_TEST_INTEGRATION)
+
+## Same as docker-integration-test but with the wire-validation gate
+## enabled: every outbound envelope the plugin emits during the suite
+## is captured to /mattermost/wire-archive in each container, copied
+## back via `docker compose exec cat`, and validated against
+## schema/crossguard.xsd with xmllint. Adds one tmpfs write per
+## envelope plus an xmllint exec per envelope at teardown; otherwise
+## identical to docker-integration-test.
+.PHONY: docker-integration-test-validate-wire
+docker-integration-test-validate-wire:
+	@$(MAKE) CROSSGUARD_WIRE_VALIDATE=1 docker-integration-test
 
 # ---------------------------------------------------------------------
 # Single-test wrappers.
