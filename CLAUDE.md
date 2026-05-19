@@ -128,12 +128,6 @@ per-transport so per-transport sync paths (user-sync, membership-sync,
 post-sync, file-sync) are exercised on first contact for each
 transport.
 
-The first test alphabetically, `TestAARemoteWarmup_RegisterPluginPingRace`,
-is a TEMPORARY workaround that sleeps ~130s to absorb an upstream
-framework race in `RegisterPluginForSharedChannels`. Delete that file
-and the four `t.Skip` calls referencing PR #36592 once the upstream
-fixes ship in the dev container image.
-
 ## Architecture
 
 ### Backend Message Flow

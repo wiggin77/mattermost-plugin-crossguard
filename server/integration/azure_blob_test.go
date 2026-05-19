@@ -56,10 +56,6 @@ func TestAzureBlob(t *testing.T) {
 	})
 
 	t.Run("File", func(t *testing.T) {
-		t.Skip("blocked on Mattermost server PR #36592: gob-encoding bug " +
-			"in apiRPCServer.ReceiveSharedChannelAttachmentSyncMsg breaks " +
-			"the plugin<->server RPC. Re-enable once the fix is in the " +
-			"dev image.")
 		marker := fmt.Sprintf("azure-blob-file-test:%d-%d", time.Now().UnixNano(), os.Getpid())
 		fileID := UploadFile(t, usereClient, channelA.Id, "testdata/sample.pdf")
 		CreatePostWithFile(t, usereClient, channelA.Id, marker, fileID)
