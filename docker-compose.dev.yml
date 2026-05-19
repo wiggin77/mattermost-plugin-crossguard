@@ -132,7 +132,7 @@ services:
     # for example to target an official release like
     #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
     #   MATTERMOST_IMAGE_TAG=11.7
-    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5504435}
+    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5566604}
     restart: unless-stopped
     ports:
       - "${MM_PORT_A:-8075}:8065"
@@ -188,7 +188,7 @@ services:
     # for example to target an official release like
     #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
     #   MATTERMOST_IMAGE_TAG=11.7
-    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5504435}
+    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5566604}
     restart: unless-stopped
     ports:
       - "${MM_PORT_B:-8076}:8065"

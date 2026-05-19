@@ -8,7 +8,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue v1.0.1
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/mattermost/mattermost/server/public v0.3.0
+	github.com/mattermost/mattermost/server/public v0.4.1-0.20260519141200-5566604e030b
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
 	github.com/pkg/errors v0.9.1
@@ -77,5 +77,3 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/mattermost/mattermost/server/public => /Users/dlauder/Development/mattermost/mattermost/server/public
