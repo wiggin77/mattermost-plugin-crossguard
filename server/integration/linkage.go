@@ -72,12 +72,6 @@ func ensureSmokeLinkage(t *testing.T, h *Harness) (LinkedChannels, error) {
 	}
 	h.AddChannelMemberByUsername(t, h.B, lthB.Id, "userb")
 
-	// Match the makefile: wait briefly for fresh plugin connections to
-	// settle before issuing init-team. Five seconds is overkill in the
-	// common case (post-deploy) but it makes the test resilient to a
-	// recent `make docker-reset` without forcing every caller to wait.
-	time.Sleep(5 * time.Second)
-
 	cmds := []struct {
 		s       Server
 		channel string
@@ -100,6 +94,14 @@ func ensureSmokeLinkage(t *testing.T, h *Harness) (LinkedChannels, error) {
 				c.cmd, c.s.Name, resp.Text)
 		}
 	}
+
+	// Wait for both sides' frameworks to consider their counterpart remote
+	// online for the smoke channel before returning. Without this, the
+	// first post in a freshly deployed environment can hit the framework's
+	// retry-exhaustion window (the plugin remote is offline until
+	// pluginRemoteInitialPingDelay fires) and be dropped.
+	h.WaitForChannelRemotesOnline(t, h.A, lthA.Id, 60*time.Second)
+	h.WaitForChannelRemotesOnline(t, h.B, lthB.Id, 60*time.Second)
 
 	return LinkedChannels{LowToHighA: lthA.Id, LowToHighB: lthB.Id}, nil
 }

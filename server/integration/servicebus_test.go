@@ -54,6 +54,11 @@ func TestServiceBus(t *testing.T) {
 	h.ExecSlash(t, h.A, channelA.Id, "/crossguard init-channel outbound:"+connName)
 	h.ExecSlash(t, h.B, channelB.Id, "/crossguard init-channel inbound:"+connName)
 
+	// Wait for the framework to mark the remote online for this channel
+	// on the sending side before the first post; otherwise the first
+	// sync attempts can be dropped during the plugin's cold-start window.
+	h.WaitForChannelRemotesOnline(t, h.A, channelA.Id, 60*time.Second)
+
 	userfClient := h.ClientAs(t, h.A, username, "password")
 
 	t.Run("Message", func(t *testing.T) {

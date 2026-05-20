@@ -347,7 +347,9 @@ MM_PORT_B ?= 8076
 .PHONY: docker-start
 docker-start:
 	@echo "Starting dual Mattermost servers..."
-	@mkdir -p docker/postgres-a-data docker/postgres-b-data docker/azurite-data
+	@mkdir -p docker/postgres-a-data docker/postgres-b-data docker/azurite-data \
+		docker/wire-archive-a docker/wire-archive-b
+	@chmod 0777 docker/wire-archive-a docker/wire-archive-b
 	@$(DOCKER_COMPOSE) up -d
 
 ## Stop containers (preserves data)
@@ -368,7 +370,7 @@ docker-down:
 docker-clean:
 	@$(DOCKER_COMPOSE) down -v
 	@docker run --rm -v "$(CURDIR)/docker:/d" alpine sh -c \
-		"rm -rf /d/postgres-a-data /d/postgres-b-data /d/mattermost-a /d/mattermost-b /d/azurite-data /d/servicebus-mssql-data"
+		"rm -rf /d/postgres-a-data /d/postgres-b-data /d/mattermost-a /d/mattermost-b /d/azurite-data /d/servicebus-mssql-data /d/wire-archive-a /d/wire-archive-b"
 	@echo "Containers and data removed"
 
 ## Kill orphaned Docker containers on the MM ports (useful after deleting a worktree)

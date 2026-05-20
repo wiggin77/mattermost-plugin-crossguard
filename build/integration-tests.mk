@@ -92,6 +92,12 @@ docker-integration-test: docker-check servicebus-probe-run docker-deploy
 ## identical to docker-integration-test.
 .PHONY: docker-integration-test-validate-wire
 docker-integration-test-validate-wire:
+	@command -v xmllint >/dev/null 2>&1 || { \
+		echo >&2 "ERROR: xmllint not found on PATH (required for CROSSGUARD_WIRE_VALIDATE=1)."; \
+		echo >&2 "Install: sudo apt install libxml2-utils  (Debian/Ubuntu)"; \
+		echo >&2 "         brew install libxml2            (macOS)"; \
+		exit 1; \
+	}
 	@$(MAKE) CROSSGUARD_WIRE_VALIDATE=1 docker-integration-test
 
 # ---------------------------------------------------------------------

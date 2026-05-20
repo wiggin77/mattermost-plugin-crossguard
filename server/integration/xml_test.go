@@ -56,6 +56,10 @@ func TestXMLRelay(t *testing.T) {
 			h.ExecSlash(t, h.A, channelA.Id, "/crossguard init-channel "+tc.outConn)
 			h.ExecSlash(t, h.B, channelB.Id, "/crossguard init-channel "+tc.inConn)
 
+			// Gate the first post on the sending-side framework reporting
+			// the remote online for this channel.
+			h.WaitForChannelRemotesOnline(t, h.A, channelA.Id, 60*time.Second)
+
 			usercClient := h.ClientAs(t, h.A, "userc", "password")
 			marker := fmt.Sprintf("%s:%d-%d", tc.marker, time.Now().UnixNano(), os.Getpid())
 
