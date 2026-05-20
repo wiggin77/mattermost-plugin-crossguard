@@ -82,50 +82,55 @@ upstream limits.
 | `UsersType.User` | 1000 | Author of the post + reaction/ack authors filtered to this post | Per the one-post-per-envelope fanout, realistically a handful | Generous — fine |
 | `ReactionsContainerType.Reaction` | 1000 | Reactions on a single post | Popular posts can accumulate hundreds, rarely >1000 | Likely fine; flag for monitoring |
 | `StatusesContainerType.Status` | 1000 | Status snapshots in metadata envelopes | Bulk presence syncs; product behavior bounded | Likely fine |
-| `MembershipChangesContainerType.MembershipChange` | 1000 | Channel join/leave events in metadata envelopes | Mass-onboarding (bulk add) or mass-departure can plausibly exceed 1000 | **Investigate** — see open questions below |
+| `MembershipChangesContainerType.MembershipChange` | 1000 | Channel join/leave events in metadata envelopes | Producer caps fetch at `ConnectedWorkspacesSettingsDefaultMemberSyncBatchSize` = 20 per cycle (`sync_send_remote.go:373-376, 481-482`); excess history triggers another cycle via `resultRepeat`, not a larger SyncMsg | Two orders of magnitude headroom — fine |
 | `AcknowledgementsContainerType.PostAcknowledgement` | 1000 | Acks on a single post | Same shape as reactions; rarely >1000 | Likely fine |
-| `MentionTransformsType.Transform` | **100** | Full channel-level transform map, attached to every per-post envelope. Accumulates as the channel sees more distinct mentions over its lifetime | Long-lived busy channels accumulate hundreds of distinct mentioners | **Tight — propose raise to 1000** |
+| `MentionTransformsType.Transform` | **100** | Per-sync-batch transform map: unique `@mention -> userID` pairs from posts in the current batch only. Map is initialized fresh per syncData and populated in `fetchPostUsersForSync` (`sync_send_remote.go:59, 621-651, 675-684`). NOT channel-scoped or accumulating | Typical sync batches: well under 100. Large catch-up syncs (long-paused remote reconnecting): could plausibly exceed 100 across many posts | **Borderline** — raise to 1000 as cheap headroom; not urgent |
 | `StringMapType.Entry` | 100 | `User.Timezone` map | 3 keys per user | Generous — fine |
 | `FileIdsType.Id` | 10 | File attachments on a post | `MaxFileAttachments` = 10 | Exact match — fine |
 
-**Two `maxOccurs` caps deserve attention:**
+**One `maxOccurs` cap deserves attention:**
 
-1. **`MentionTransformsType.Transform/@maxOccurs="100"`** (firm).
-   The `MentionTransforms` map is the channel-scoped collection of
-   source-server mention strings and their receiver-server
-   rewrites. It is forwarded verbatim from each upstream
-   `mmModel.SyncMsg` and rides with **every** per-post envelope
-   produced by the fanout in `buildOutboundEnvelopes`
-   (`server/transport.go:198`). In a long-lived channel with
-   hundreds of distinct mentioners, the map exceeds 100 entries and
-   every subsequent envelope from that channel fails strict
-   validation. **Propose: raise to 1000** to match the other
-   per-envelope caps.
+1. **`MentionTransformsType.Transform/@maxOccurs="100"`** (borderline,
+   not urgent). The upstream producer builds `MentionTransforms`
+   per-sync-batch from the mentions in the posts carried by that
+   batch (`sync_send_remote.go:59, 621-651, 675-684`), so the map
+   does **not** accumulate across the channel's lifetime, contrary
+   to an earlier reading of this plan. Practical sizes for normal
+   traffic are well under 100. A large catch-up sync (e.g., a
+   long-paused remote reconnecting and replaying many posts in a
+   single batch) could still plausibly exceed 100 distinct mentions.
+   **Propose: raise to 1000** as cheap headroom that matches the
+   other per-envelope caps; not blocking.
 
-2. **`MembershipChangesContainerType.MembershipChange/@maxOccurs="1000"`**
-   (soft / needs telemetry). Bulk membership operations (mass add,
-   team merge, group-sync ingestion) can plausibly produce a single
-   `mmModel.SyncMsg` with more than 1000 membership deltas. The
-   producer-side fanout does not currently split this; if the
-   framework hands us a sync with >1000 changes, we'd fail
-   validation. **Propose: investigate whether the framework batches
-   above 1000 in real deployments; if yes, either raise to 5000 or
-   split membership deltas into multiple metadata envelopes.**
+   `MembershipChangesContainerType.MembershipChange/@maxOccurs="1000"`
+   was previously flagged as soft. After reading the upstream
+   producer (`sync_send_remote.go:373-376, 481-482`) the framework
+   caps each sync's `MembershipChanges` at
+   `ConnectedWorkspacesSettingsDefaultMemberSyncBatchSize = 20` rows
+   from `ChannelMemberHistory().GetMembershipChanges` and uses
+   `resultRepeat` to iterate when more history is pending, so the
+   1000 cap has two orders of magnitude headroom over the default.
+   No change needed.
 
 ### Cross-references to producer behavior
 
 The cap analysis interacts with the producer code:
 
-- The mention-transforms cap (item 1 above) is reachable today
-  because `buildOutboundEnvelopes` does not subset the map per
-  envelope; it forwards the full channel-level map. Even raising the
-  cap, a separate optimization to subset transforms to mentions
-  actually referenced by the carried post would reduce wire size and
-  defer the cap concern indefinitely. That is an optional follow-up
+- The mention-transforms cap (item 1 above) is reachable only by
+  batches with many posts that collectively mention >100 distinct
+  users. `buildOutboundEnvelopes` forwards the per-batch map
+  verbatim to every fanned-out per-post envelope, so the same map
+  rides with every envelope from one inbound sync. An optimization
+  to subset transforms to the mentions actually referenced by the
+  carried post would reduce wire size and defer this cap concern
+  indefinitely. That is an optional follow-up
   noted here so it isn't lost.
-- The membership cap (item 2) is reachable only if the framework
-  batches above 1000. Telemetry from the wire-layer error codes
-  added by plan 01 will reveal whether this fires in practice.
+- The membership cap is not reachable under default settings
+  (producer batch size 20). Any validation failure on this container
+  would indicate either a non-default
+  `ConnectedWorkspacesSettings.MemberSyncBatchSize` configured
+  unusually high, or an upstream change in batching behavior, and
+  should be investigated rather than papered over with a cap raise.
 
 ## Proposed schema change
 
@@ -145,21 +150,63 @@ No other cap changes are proposed at this time. A second change for
 
 ## Open questions (to resolve before promoting this plan from draft)
 
-1. **Mention-transforms scope.** Confirm with the framework team that
-   the upstream `mmModel.SyncMsg.MentionTransforms` map is
-   channel-scoped (accumulating across the channel's life) rather
-   than sync-batch-scoped (only the mentions in the current batch).
-   If the latter, the cap of 100 is already comfortably above
-   typical sync-batch sizes and no change is needed.
-2. **Membership-change batching.** Confirm whether
-   `OnSharedChannelsSyncMsg` is ever invoked with
-   `MembershipChanges` containing >1000 entries, or whether the
-   framework caps batch size below that. The integration test suite
-   may be the cheapest way to answer this empirically.
-3. **Bundle vs. iterate.** Is this single cap change enough to take
-   to the compliance team now, or should we wait for the post-Phase-A
-   telemetry to identify any additional caps that fire in practice
-   and bundle a single review?
+1. **Mention-transforms scope.** *Resolved by reading upstream code.*
+   The `mmModel.SyncMsg.MentionTransforms` map is **per-sync-batch**,
+   not channel-scoped. The map is initialized fresh on every sync in
+   the per-task `syncData`
+   (`server/platform/services/sharedchannel/sync_send_remote.go:59`)
+   and populated in `fetchPostUsersForSync` by iterating
+   `sd.posts` (the posts in the current batch only), calling
+   `MentionsToTeamMembers` per post message, and recording one entry
+   per `(mention, userID)` pair that survives the
+   `mentionUserID == userID` filter
+   (`sync_send_remote.go:621-651, 675-684`). The map is then assigned
+   to `msg.MentionTransforms` in `sendPostSyncData`
+   (`sync_send_remote.go:900`).
+   - **Practical bound:** unique mention strings across the posts in
+     a single sync batch. For typical batches this is well under 100,
+     so the current cap is comfortably above normal traffic.
+   - **Edge case:** large catch-up syncs (e.g., a long-paused remote
+     reconnecting) can collect many posts in one batch and could
+     plausibly produce more than 100 distinct mentions across them.
+     Raising the cap to 1000 to match the other per-envelope caps is
+     still defensible as cheap headroom, but is no longer urgent
+     and could be deferred until telemetry justifies it.
+
+2. **Membership-change batching.** *Resolved by reading upstream
+   code.* The producer caps the fetch at the database query before
+   ever building the `SyncMsg`, and does **not** chunk further before
+   invoking the plugin hook. `fetchMembershipsForSync` reads at most
+   `GetMemberSyncBatchSize()` raw history rows from
+   `ChannelMemberHistory().GetMembershipChanges`
+   (`server/platform/services/sharedchannel/sync_send_remote.go:373-376`),
+   dedupes them by user, and appends the survivors to
+   `sd.membershipChanges`
+   (`sync_send_remote.go:385-460`). `sendMembershipSyncData` assigns
+   that slice verbatim to `msg.MembershipChanges`
+   (`sync_send_remote.go:481-482`). The configured batch size defaults
+   to `ConnectedWorkspacesSettingsDefaultMemberSyncBatchSize = 20`
+   (`server/public/model/config.go:294, 3803-3804`) and is exposed by
+   `Service.GetMemberSyncBatchSize`
+   (`server/platform/services/sharedchannel/service.go:236-241`). If
+   the fetch hits the limit, `sd.resultRepeat = true` schedules another
+   cycle (`sync_send_remote.go:464-467`) rather than producing a
+   larger `SyncMsg`.
+   - **Conclusion:** the current cap of 1000 is two orders of
+     magnitude above the default batch size and remains safe even if
+     an operator multiplies the batch size by 10x. **No change
+     needed.** A `MembershipChange` validation failure in production
+     would indicate either a configuration anomaly (extreme batch
+     size) or an upstream change in batching behavior, and should be
+     treated as a signal, not a routine cap-raise.
+
+3. **Bundle vs. iterate.** Process question, not a server-code
+   question. Recommendation given the answers to (1) and (2): the
+   mention-transforms raise is the only proposed cap change, and the
+   urgency is lower than originally thought (per-batch, not
+   channel-scoped). Either land it alone as a small change request,
+   or defer until telemetry from plan 01 surfaces other caps and
+   bundle a single review. Defer is the cheaper option.
 
 ## Next steps
 

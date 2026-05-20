@@ -23,7 +23,7 @@
     * Status uses an enumeration of the four documented presence values.
     * maxOccurs upper bounds derived from product limits (FileIds=10)
       or generous per-envelope batch caps (User/Reaction/Status/etc.=1000,
-      Transform=100, StringMap Entry=100).
+      Transform=1000, StringMap Entry=100).
 -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
            elementFormDefault="unqualified">
@@ -281,7 +281,7 @@
 
   <xs:complexType name="MentionTransformsType">
     <xs:sequence>
-      <xs:element name="Transform" minOccurs="0" maxOccurs="100">
+      <xs:element name="Transform" minOccurs="0" maxOccurs="1000">
         <xs:complexType>
           <xs:attribute name="key"   type="MentionKeyType"   use="required"/>
           <xs:attribute name="value" type="MentionValueType" use="required"/>
