@@ -43,83 +43,83 @@
   <!-- Channel/team slug or connection name: lowercase alnum, hyphens, underscores -->
   <xs:simpleType name="SlugType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9][a-z0-9_\-]{0,63}"/>
-      <xs:maxLength value="64"/>
+      <xs:pattern value="[a-z0-9][a-z0-9_\-]{0,95}"/>
+      <xs:maxLength value="96"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Mattermost username: lowercase alnum, hyphens, underscores, periods -->
   <xs:simpleType name="UsernameType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9][a-z0-9_\-\.]{0,63}"/>
-      <xs:maxLength value="64"/>
+      <xs:pattern value="[a-z0-9][a-z0-9_\-\.]{0,95}"/>
+      <xs:maxLength value="96"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Display name for webhook overrides: looser than UsernameType, still bounded -->
   <xs:simpleType name="DisplayNameType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="128"/>
+      <xs:maxLength value="192"/>
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- RFC 5321 capped email length (254) with a permissive local-part pattern -->
+  <!-- Email length capped at 50% above RFC 5321 (254) for headroom -->
   <xs:simpleType name="EmailType">
     <xs:restriction base="xs:string">
       <xs:pattern value="[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"/>
-      <xs:maxLength value="254"/>
+      <xs:maxLength value="381"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- BCP 47-shaped locale code, e.g. en, en-US, zh-Hant-TW -->
   <xs:simpleType name="LocaleType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}"/>
-      <xs:maxLength value="35"/>
+      <xs:pattern value="[A-Za-z]{2,5}(-[A-Za-z0-9]{2,12}){0,3}"/>
+      <xs:maxLength value="53"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Space-separated Mattermost role names (system_user, system_admin, etc.) -->
   <xs:simpleType name="RolesType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[a-z0-9_ ]{0,1024}"/>
-      <xs:maxLength value="1024"/>
+      <xs:pattern value="[a-z0-9_ ]{0,1536}"/>
+      <xs:maxLength value="1536"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Emoji name: alnum, underscore, hyphen, plus -->
   <xs:simpleType name="EmojiNameType">
     <xs:restriction base="xs:string">
-      <xs:pattern value="[A-Za-z0-9_\-\+]{1,64}"/>
-      <xs:maxLength value="64"/>
+      <xs:pattern value="[A-Za-z0-9_\-\+]{1,96}"/>
+      <xs:maxLength value="96"/>
     </xs:restriction>
   </xs:simpleType>
 
-  <!-- URL bounded to 2048 (browser-safe limit) -->
+  <!-- URL bounded to 50% above the browser-safe 2048 limit for headroom -->
   <xs:simpleType name="UrlType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="2048"/>
+      <xs:maxLength value="3072"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Short free-form text (Nickname, FirstName, LastName, etc.) -->
   <xs:simpleType name="ShortTextType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="128"/>
+      <xs:maxLength value="192"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Medium free-form text (Position, BotDescription, CustomStatus) -->
   <xs:simpleType name="MediumTextType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="1024"/>
+      <xs:maxLength value="1536"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- Hashtags string: space-separated #tags -->
   <xs:simpleType name="HashtagsType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="1024"/>
+      <xs:maxLength value="1536"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -133,7 +133,7 @@
   <!-- Post.Type: typically empty or a "system_*" marker string -->
   <xs:simpleType name="PostTypeStringType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="64"/>
+      <xs:maxLength value="96"/>
     </xs:restriction>
   </xs:simpleType>
 
@@ -150,26 +150,26 @@
   <!-- StringMap entry attribute key/value (Timezone keys, etc.) -->
   <xs:simpleType name="MapKeyType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="128"/>
+      <xs:maxLength value="192"/>
     </xs:restriction>
   </xs:simpleType>
 
   <xs:simpleType name="MapValueType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="4096"/>
+      <xs:maxLength value="6144"/>
     </xs:restriction>
   </xs:simpleType>
 
   <!-- MentionTransforms key/value: source mention vs. transformed mention -->
   <xs:simpleType name="MentionKeyType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="256"/>
+      <xs:maxLength value="384"/>
     </xs:restriction>
   </xs:simpleType>
 
   <xs:simpleType name="MentionValueType">
     <xs:restriction base="xs:string">
-      <xs:maxLength value="256"/>
+      <xs:maxLength value="384"/>
     </xs:restriction>
   </xs:simpleType>
 
