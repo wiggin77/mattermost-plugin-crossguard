@@ -8,7 +8,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue v1.0.1
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/mattermost/mattermost/server/public v0.4.1-0.20260519141200-5566604e030b
+	github.com/mattermost/mattermost/server/public v0.3.2-0.20260519191509-de117ab1cc09
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
 	github.com/pkg/errors v0.9.1

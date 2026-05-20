@@ -125,14 +125,13 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-    # The plugin's min_server_version requires features only present in
-    # post-release builds of the server. Default to a CI image built from
-    # master at a known-good commit (mattermostdevelopment/mm-ee-test:<sha>).
+    # Default to the official Enterprise Edition release that contains the
+    # shared-channels plugin API features this plugin depends on.
     # Override either part with MATTERMOST_IMAGE_REPO / MATTERMOST_IMAGE_TAG,
-    # for example to target an official release like
-    #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
-    #   MATTERMOST_IMAGE_TAG=11.7
-    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5566604}
+    # for example to target a CI build from master:
+    #   MATTERMOST_IMAGE_REPO=mattermostdevelopment/mm-ee-test
+    #   MATTERMOST_IMAGE_TAG=<sha>
+    image: ${MATTERMOST_IMAGE_REPO:-mattermost/mattermost-enterprise-edition}:${MATTERMOST_IMAGE_TAG:-11.7.1}
     restart: unless-stopped
     ports:
       - "${MM_PORT_A:-8075}:8065"
@@ -181,14 +180,13 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
-    # The plugin's min_server_version requires features only present in
-    # post-release builds of the server. Default to a CI image built from
-    # master at a known-good commit (mattermostdevelopment/mm-ee-test:<sha>).
+    # Default to the official Enterprise Edition release that contains the
+    # shared-channels plugin API features this plugin depends on.
     # Override either part with MATTERMOST_IMAGE_REPO / MATTERMOST_IMAGE_TAG,
-    # for example to target an official release like
-    #   MATTERMOST_IMAGE_REPO=mattermost/mattermost-enterprise-edition
-    #   MATTERMOST_IMAGE_TAG=11.7
-    image: ${MATTERMOST_IMAGE_REPO:-mattermostdevelopment/mm-ee-test}:${MATTERMOST_IMAGE_TAG:-5566604}
+    # for example to target a CI build from master:
+    #   MATTERMOST_IMAGE_REPO=mattermostdevelopment/mm-ee-test
+    #   MATTERMOST_IMAGE_TAG=<sha>
+    image: ${MATTERMOST_IMAGE_REPO:-mattermost/mattermost-enterprise-edition}:${MATTERMOST_IMAGE_TAG:-11.7.1}
     restart: unless-stopped
     ports:
       - "${MM_PORT_B:-8076}:8065"
