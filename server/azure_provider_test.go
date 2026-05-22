@@ -822,7 +822,7 @@ func TestNewAzureProvider_InvalidCredential(t *testing.T) {
 		QueueServiceURL: "https://acct.queue.core.windows.net",
 		QueueName:       "q1",
 	}
-	_, err := newAzureProvider(cfg, api)
+	_, err := newAzureProvider(context.Background(), cfg, api)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared key credential")
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azqueue"
 	"github.com/mattermost/mattermost/server/public/plugin"
@@ -69,49 +70,66 @@ func buildBlobContainerURL(serviceURL, containerName string) string {
 	return strings.TrimRight(serviceURL, "/") + "/" + containerName
 }
 
-func newAzureProvider(cfg AzureQueueProviderConfig, api plugin.API) (QueueProvider, error) {
-	queueCred, err := azqueue.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+// newAzureProvider constructs the azure-queue provider. The ctx argument
+// is the plugin-lifetime context; in shared-key mode it bounds the initial
+// auto-Create probe, in SP mode it threads through to the SDK clients.
+func newAzureProvider(ctx context.Context, cfg AzureQueueProviderConfig, api plugin.API) (QueueProvider, error) {
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Queue shared key credential: %w", err)
-	}
-	queueClient, err := azqueue.NewQueueClientWithSharedKeyCredential(buildQueueURL(cfg.QueueServiceURL, cfg.QueueName), queueCred, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Queue client: %w", err)
+		return nil, fmt.Errorf("azure-queue config: %w", err)
 	}
 
-	// Ensure the queue exists (idempotent, returns success if already created).
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, createErr := queueClient.Create(ctx, nil); createErr != nil {
-		// Ignore "already exists" (409 Conflict); warn on other errors.
-		if !strings.Contains(createErr.Error(), azureErrQueueAlreadyExists) {
-			api.LogWarn("Azure Queue: could not create queue (may already exist)",
-				"error_code", errcode.AzureQueueCreateQueueFailed,
-				"queue", cfg.QueueName, "error", createErr.Error())
+	queueURL := buildQueueURL(cfg.QueueServiceURL, cfg.QueueName)
+
+	var queueClient *azqueue.QueueClient
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := newAzureProviderSPCredential(cfg, azCloud, api)
+		if credErr != nil {
+			return nil, credErr
 		}
+		opts := &azqueue.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		queueClient, err = azqueue.NewQueueClient(queueURL, cred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("azure-queue NewQueueClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		queueCred, credErr := azqueue.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return nil, fmt.Errorf("azure-queue shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &azqueue.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		queueClient, err = azqueue.NewQueueClientWithSharedKeyCredential(queueURL, queueCred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("azure-queue NewQueueClientWithSharedKeyCredential: %s", sanitizeAzureError(err))
+		}
+	default:
+		// Defense-in-depth: validateAzureQueueConnection already rejects
+		// unknown auth_mode at config-save time. If we get here, the
+		// validator was bypassed; fail closed.
+		return nil, fmt.Errorf("azure-queue: unknown auth_mode %q (expected %q or %q)", cfg.AuthMode, AzureAuthSharedKey, AzureAuthServicePrincipal)
+	}
+
+	// Auto-Create runs only in shared-key mode. In SP mode the operator is
+	// expected to pre-provision the queue (least-privilege RBAC).
+	if authMode != AzureAuthServicePrincipal {
+		createCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if _, createErr := queueClient.Create(createCtx, nil); createErr != nil {
+			if !strings.Contains(createErr.Error(), azureErrQueueAlreadyExists) {
+				api.LogWarn("Azure Queue: could not create queue (may already exist)",
+					"error_code", errcode.AzureQueueCreateQueueFailed,
+					"queue", cfg.QueueName, "error", sanitizeAzureError(createErr))
+			}
+		}
+		cancel()
 	}
 
 	var blobOps azureBlobOps
 	if cfg.BlobContainerName != "" {
-		blobCred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
-		if credErr != nil {
-			return nil, fmt.Errorf("failed to create Azure Blob shared key credential: %w", credErr)
-		}
-		containerClient, clientErr := container.NewClientWithSharedKeyCredential(buildBlobContainerURL(cfg.BlobServiceURL, cfg.BlobContainerName), blobCred, nil)
-		if clientErr != nil {
-			return nil, fmt.Errorf("failed to create Azure Blob container client: %w", clientErr)
-		}
-		blobOps = &containerClientAdapter{client: containerClient}
-
-		// Ensure the blob container exists (fresh timeout, independent of queue creation).
-		blobCtx, blobCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer blobCancel()
-		if createErr := blobOps.CreateContainer(blobCtx); createErr != nil {
-			if !strings.Contains(createErr.Error(), azureErrContainerAlreadyExists) {
-				api.LogWarn("Azure Blob: could not create container (may already exist)",
-					"error_code", errcode.AzureQueueCreateContainerFail,
-					"container", cfg.BlobContainerName, "error", createErr.Error())
-			}
+		blobOps, err = newAzureProviderBlobSidecar(ctx, cfg, authMode, azCloud, api)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -132,6 +150,75 @@ func newAzureProvider(cfg AzureQueueProviderConfig, api plugin.API) (QueueProvid
 		queuePoll:       queuePoll,
 		blobPoll:        blobPoll,
 	}, nil
+}
+
+// newAzureProviderSPCredential constructs an azidentity ClientSecretCredential
+// from the inline cfg.ClientSecret. Emits an audit log line on success so
+// operators have a record of which AAD identity is authenticating each
+// connection.
+func newAzureProviderSPCredential(cfg AzureQueueProviderConfig, azCloud azcoreCloudConfig, api plugin.API) (azcore.TokenCredential, error) {
+	cred, err := buildClientSecretCredential(azureServicePrincipalParams{
+		TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+	})
+	if err != nil {
+		api.LogError("Azure Queue: service principal credential failed",
+			"error_code", errcode.AzureQueueSPCredentialFailed,
+			"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(err))
+		return nil, err
+	}
+	logAzureAuthAudit(api, ProviderAzureQueue, cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
+	return cred, nil
+}
+
+// newAzureProviderBlobSidecar builds the optional blob container client
+// for the azure-queue provider's file-transfer path. Uses the same auth
+// mode as the parent queue (single-account assumption). Skips auto-Create
+// in SP mode; in legacy mode auto-Creates the container as before.
+func newAzureProviderBlobSidecar(ctx context.Context, cfg AzureQueueProviderConfig, authMode string, azCloud azcoreCloudConfig, api plugin.API) (azureBlobOps, error) {
+	containerURL := buildBlobContainerURL(cfg.BlobServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, err := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("azure-queue blob sidecar SP credential: %w", err)
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		var clientErr error
+		containerClient, clientErr = container.NewClient(containerURL, cred, opts)
+		if clientErr != nil {
+			return nil, fmt.Errorf("azure-queue blob sidecar NewClient: %s", sanitizeAzureError(clientErr))
+		}
+	case "", AzureAuthSharedKey:
+		blobCred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return nil, fmt.Errorf("azure-queue blob sidecar shared key: %s", sanitizeAzureError(credErr))
+		}
+		var clientErr error
+		containerClient, clientErr = container.NewClientWithSharedKeyCredential(containerURL, blobCred, nil)
+		if clientErr != nil {
+			return nil, fmt.Errorf("azure-queue blob sidecar NewClientWithSharedKeyCredential: %s", sanitizeAzureError(clientErr))
+		}
+	default:
+		return nil, fmt.Errorf("azure-queue blob sidecar: unknown auth_mode %q", authMode)
+	}
+
+	blobOps := &containerClientAdapter{client: containerClient}
+	if authMode != AzureAuthServicePrincipal {
+		blobCtx, blobCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer blobCancel()
+		if createErr := blobOps.CreateContainer(blobCtx); createErr != nil {
+			if !strings.Contains(createErr.Error(), azureErrContainerAlreadyExists) {
+				api.LogWarn("Azure Blob: could not create container (may already exist)",
+					"error_code", errcode.AzureQueueCreateContainerFail,
+					"container", cfg.BlobContainerName, "error", sanitizeAzureError(createErr))
+			}
+		}
+	}
+	return blobOps, nil
 }
 
 func (a *azureProvider) Publish(ctx context.Context, data []byte) error {
@@ -319,31 +406,65 @@ func (a *azureProvider) Close() error {
 	return nil
 }
 
-// testAzureQueueConnection tests connectivity to Azure Queue Storage by sending and receiving a test message.
+// testAzureQueueConnection tests connectivity to Azure Queue Storage by
+// sending and immediately deleting a test message. In SP mode the AAD
+// GetToken probe is the primary credential check; the enqueue/delete then
+// validates data-plane RBAC on the queue resource. Shared-key mode runs
+// the same enqueue/delete probe over the shared-key credential.
 func testAzureQueueConnection(cfg AzureQueueProviderConfig) error {
-	cred, err := azqueue.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return fmt.Errorf("failed to create shared key credential: %w", err)
-	}
-	queueClient, err := azqueue.NewQueueClientWithSharedKeyCredential(buildQueueURL(cfg.QueueServiceURL, cfg.QueueName), cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create queue client: %w", err)
+		return fmt.Errorf("azure-queue config: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Ensure the queue exists before testing.
-	if _, createErr := queueClient.Create(ctx, nil); createErr != nil {
-		if !strings.Contains(createErr.Error(), azureErrQueueAlreadyExists) {
-			return fmt.Errorf("failed to create queue: %w", createErr)
+	queueURL := buildQueueURL(cfg.QueueServiceURL, cfg.QueueName)
+
+	var queueClient *azqueue.QueueClient
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			return fmt.Errorf("service principal credential: %s", sanitizeAzureError(credErr))
 		}
+		if probeErr := probeAzureCredential(ctx, cred, azureStorageScope); probeErr != nil {
+			return probeErr
+		}
+		opts := &azqueue.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		queueClient, err = azqueue.NewQueueClient(queueURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("failed to create queue client: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		cred, credErr := azqueue.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return fmt.Errorf("failed to create shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &azqueue.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		queueClient, err = azqueue.NewQueueClientWithSharedKeyCredential(queueURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("failed to create queue client: %s", sanitizeAzureError(err))
+		}
+		// Auto-Create the queue only in shared-key mode (SP mode expects
+		// pre-provisioned resources under least-privilege RBAC).
+		if _, createErr := queueClient.Create(ctx, nil); createErr != nil {
+			if !strings.Contains(createErr.Error(), azureErrQueueAlreadyExists) {
+				return fmt.Errorf("failed to create queue: %s", sanitizeAzureError(createErr))
+			}
+		}
+	default:
+		return fmt.Errorf("azure-queue: unknown auth_mode %q", cfg.AuthMode)
 	}
 
 	testMsg := base64.StdEncoding.EncodeToString([]byte("crossguard-test-" + time.Now().Format(time.RFC3339)))
 	enqResp, err := queueClient.EnqueueMessage(ctx, testMsg, nil)
 	if err != nil {
-		return fmt.Errorf("failed to enqueue test message: %w", err)
+		return wrapAzureResourceError(err, "queue", cfg.QueueName, authMode)
 	}
 
 	if len(enqResp.Messages) > 0 && enqResp.Messages[0].MessageID != nil && enqResp.Messages[0].PopReceipt != nil {

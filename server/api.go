@@ -230,23 +230,10 @@ func (p *Plugin) handleTestAzureQueueConnection(w http.ResponseWriter, conn Conn
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureQueue.QueueServiceURL) == "" {
-		writeJSONError(w, "queue_service_url is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.AccountName) == "" {
-		writeJSONError(w, "account_name is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.AccountKey) == "" {
-		writeJSONError(w, "account_key is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureQueue.QueueName) == "" {
-		writeJSONError(w, "queue_name is required", http.StatusBadRequest)
+	// Delegate field validation to validateAzureQueueConnection so the
+	// "test" button enforces the same per-auth-mode rules as config save.
+	if errs := validateAzureQueueConnection(conn, "connection "+conn.Name); len(errs) > 0 {
+		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return
 	}
 
@@ -272,29 +259,9 @@ func (p *Plugin) handleTestAzureBlobConnection(w http.ResponseWriter, conn Conne
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureBlob.ServiceURL) == "" {
-		writeJSONError(w, "service_url is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.AccountName) == "" {
-		writeJSONError(w, "account_name is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.AccountKey) == "" {
-		writeJSONError(w, "account_key is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureBlob.BlobContainerName) == "" {
-		writeJSONError(w, "blob_container_name is required", http.StatusBadRequest)
-		return
-	}
-
-	// Share the same numeric validation as config persistence so the "test"
-	// button catches out-of-range flush_interval_seconds / blob_lock_max_age_seconds
-	// before we even try to connect.
+	// Delegate field validation to validateAzureBlobConnection so the
+	// "test" button enforces the same per-auth-mode rules and numeric
+	// bounds as config save.
 	if errs := validateAzureBlobConnection(conn, "connection "+conn.Name); len(errs) > 0 {
 		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return
@@ -322,19 +289,9 @@ func (p *Plugin) handleTestAzureServiceBusConnection(w http.ResponseWriter, conn
 		return
 	}
 
-	if strings.TrimSpace(conn.AzureServiceBus.ConnectionString) == "" {
-		writeJSONError(w, "connection_string is required", http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(conn.AzureServiceBus.QueueName) == "" {
-		writeJSONError(w, "queue_name is required", http.StatusBadRequest)
-		return
-	}
-
-	// Share the same validation as config persistence so the "test" button
-	// catches name-regex violations, out-of-range MaxMessageSizeBytes, etc.
-	// before we even try to connect.
+	// Delegate field validation to validateAzureServiceBusConnection so the
+	// "test" button enforces the same per-auth-mode rules and name-regex /
+	// MaxMessageSizeBytes bounds as config save.
 	if errs := validateAzureServiceBusConnection(conn, "connection "+conn.Name); len(errs) > 0 {
 		writeJSONError(w, strings.Join(errs, "; "), http.StatusBadRequest)
 		return

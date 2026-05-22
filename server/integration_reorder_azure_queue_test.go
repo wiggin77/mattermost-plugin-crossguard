@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"testing"
@@ -42,7 +43,7 @@ func TestIntegrationReorderAzureQueue(t *testing.T) {
 		AccountKey:      azuriteAccountKey,
 		QueueName:       queueName,
 	}
-	provider, err := newAzureProvider(cfg, api)
+	provider, err := newAzureProvider(context.Background(), cfg, api)
 	if err != nil {
 		t.Skipf("Azure Queue provider could not be constructed: %v", err)
 	}

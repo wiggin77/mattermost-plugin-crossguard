@@ -43,6 +43,14 @@ const (
 const (
 	ConfigSameConfigPassed = 12000
 	ConfigValidationWarn   = 12001
+
+	// AzureSPAuditConstructed is emitted once per successful Azure
+	// Service Principal credential construction across the three Azure
+	// providers. The corresponding INFO log records tenant_id, client_id,
+	// azure_cloud, and the first 12 hex chars of SHA-256(secret) so
+	// operators can correlate "which SP/secret was active" without
+	// exposing the secret value itself.
+	AzureSPAuditConstructed = 12010
 )
 
 // command.go (13000-13999)
@@ -224,6 +232,11 @@ const (
 	AzureBlobFileDownloadFailed            = 18046
 	AzureBlobFileHandlerError              = 18047
 	AzureBlobFileDeleteFailed              = 18048
+
+	// AzureBlobSPCredentialFailed is emitted when constructing the
+	// azidentity ClientSecretCredential for the Azure Blob provider in
+	// service-principal mode fails (e.g., malformed tenant_id).
+	AzureBlobSPCredentialFailed = 18049
 )
 
 // azure_provider.go (19000-19999)
@@ -238,6 +251,11 @@ const (
 	AzureQueueBlobDownloadFailed  = 19007
 	AzureQueueBlobHandlerError    = 19008
 	AzureQueueBlobDeleteFailed    = 19009
+
+	// AzureQueueSPCredentialFailed is emitted when constructing the
+	// azidentity ClientSecretCredential for the Azure Queue provider in
+	// service-principal mode fails.
+	AzureQueueSPCredentialFailed = 19010
 )
 
 // nats_provider.go (20000-20999)
@@ -327,6 +345,11 @@ const (
 	ServiceBusRedelivery         = 26004
 	ServiceBusMalformedBody      = 26005
 	APIAzureServiceBusTestFailed = 26006
+
+	// ServiceBusSPCredentialFailed is emitted when constructing the
+	// azidentity ClientSecretCredential for the Azure Service Bus
+	// provider in service-principal mode fails.
+	ServiceBusSPCredentialFailed = 26007
 )
 
 // plugin.go (27000-27999)
@@ -429,6 +452,7 @@ var AllCodes = []int{
 
 	ConfigSameConfigPassed,
 	ConfigValidationWarn,
+	AzureSPAuditConstructed,
 
 	CommandOpenConnDialogFailed,
 
@@ -569,6 +593,7 @@ var AllCodes = []int{
 	AzureBlobFileDownloadFailed,
 	AzureBlobFileHandlerError,
 	AzureBlobFileDeleteFailed,
+	AzureBlobSPCredentialFailed,
 
 	AzureQueueCreateQueueFailed,
 	AzureQueueCreateContainerFail,
@@ -580,6 +605,7 @@ var AllCodes = []int{
 	AzureQueueBlobDownloadFailed,
 	AzureQueueBlobHandlerError,
 	AzureQueueBlobDeleteFailed,
+	AzureQueueSPCredentialFailed,
 
 	NATSDownloadFileFailed,
 	NATSFileHandlerError,
@@ -651,6 +677,7 @@ var AllCodes = []int{
 	ServiceBusRedelivery,
 	ServiceBusMalformedBody,
 	APIAzureServiceBusTestFailed,
+	ServiceBusSPCredentialFailed,
 
 	PluginRegisterFailed,
 	PluginUnregisterFailed,

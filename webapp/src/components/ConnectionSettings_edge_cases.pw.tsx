@@ -838,7 +838,13 @@ test.describe('ConnectionSettings Edge Cases', () => {
             const saved = JSON.parse(calls.onChange[calls.onChange.length - 1].value);
             expect(saved).toHaveLength(1);
             expect(saved[0].provider).toBe('azure-servicebus');
-            expect(saved[0].azure_servicebus.connection_string).toContain('servicebus.windows.net');
+
+            // loadConnectionForEdit replaces every populated secret with
+            // SECRET_SENTINEL so the form never displays cleartext. The
+            // server's mergeOneConnectionSecrets restores the stored value
+            // before validation; that step is server-side, not in the form
+            // round-trip we're testing here.
+            expect(saved[0].azure_servicebus.connection_string).toBe('__CROSSGUARD_SECRET_UNCHANGED__');
             expect(saved[0].azure_servicebus.queue_name).toBe('sb-queue');
             expect(saved[0].nats).toBeUndefined();
             expect(saved[0].azure_queue).toBeUndefined();

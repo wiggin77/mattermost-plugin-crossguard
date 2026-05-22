@@ -53,6 +53,17 @@ type RedactedConnection struct {
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
 	QueueName           string `json:"queue_name,omitempty"`
 	BlobContainerName   string `json:"blob_container_name,omitempty"`
+
+	// Service Principal-related fields. These are operational identifiers
+	// (which AAD identity is in use, which cloud, which namespace), NOT
+	// secrets, so they are safe to expose to admin status views. The
+	// corresponding secret fields (ClientSecret, AccountKey,
+	// ConnectionString, BlobAccountKey) MUST never appear here.
+	AuthMode            string `json:"auth_mode,omitempty"`
+	AzureCloud          string `json:"azure_cloud,omitempty"`
+	TenantID            string `json:"tenant_id,omitempty"`
+	ClientID            string `json:"client_id,omitempty"`
+	ServiceBusNamespace string `json:"service_bus_namespace,omitempty"`
 }
 
 // GlobalStatusResponse is the JSON response for the system-wide status endpoint.
@@ -1029,15 +1040,29 @@ func redactConnection(conn ConnectionConfig, direction string) RedactedConnectio
 	if conn.AzureQueue != nil {
 		rc.QueueName = conn.AzureQueue.QueueName
 		rc.BlobContainerName = conn.AzureQueue.BlobContainerName
+		rc.AuthMode = conn.AzureQueue.AuthMode
+		rc.AzureCloud = conn.AzureQueue.AzureCloud
+		rc.TenantID = conn.AzureQueue.TenantID
+		rc.ClientID = conn.AzureQueue.ClientID
 	}
 	if conn.AzureBlob != nil {
 		rc.BlobContainerName = conn.AzureBlob.BlobContainerName
+		rc.AuthMode = conn.AzureBlob.AuthMode
+		rc.AzureCloud = conn.AzureBlob.AzureCloud
+		rc.TenantID = conn.AzureBlob.TenantID
+		rc.ClientID = conn.AzureBlob.ClientID
 	}
 	if conn.AzureServiceBus != nil {
-		// Only safe-to-expose fields: queue name and (optional) blob container.
-		// ConnectionString and BlobAccountKey MUST never appear on the redacted view.
+		// Only safe-to-expose fields: queue name, blob container, SP
+		// identifiers, namespace, cloud. ConnectionString, BlobAccountKey,
+		// and ClientSecret MUST never appear on the redacted view.
 		rc.QueueName = conn.AzureServiceBus.QueueName
 		rc.BlobContainerName = conn.AzureServiceBus.BlobContainerName
+		rc.AuthMode = conn.AzureServiceBus.AuthMode
+		rc.AzureCloud = conn.AzureServiceBus.AzureCloud
+		rc.TenantID = conn.AzureServiceBus.TenantID
+		rc.ClientID = conn.AzureServiceBus.ClientID
+		rc.ServiceBusNamespace = conn.AzureServiceBus.ServiceBusNamespace
 	}
 	return rc
 }

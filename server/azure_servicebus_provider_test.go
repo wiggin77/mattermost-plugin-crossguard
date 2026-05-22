@@ -751,7 +751,7 @@ func TestServiceBusPollQueue_DeliveryCountLogged(t *testing.T) {
 const serviceBusTestConnStr = "Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=root;SharedAccessKey=YWJjMTIzCg==;UseDevelopmentEmulator=false"
 
 func TestNewAzureServiceBusProvider_HappyPath(t *testing.T) {
-	p, err := newAzureServiceBusProvider(AzureServiceBusProviderConfig{
+	p, err := newAzureServiceBusProvider(context.Background(), AzureServiceBusProviderConfig{
 		ConnectionString: serviceBusTestConnStr,
 		QueueName:        "test-queue",
 	}, newTestAPI())
@@ -769,7 +769,7 @@ func TestNewAzureServiceBusProvider_HappyPath(t *testing.T) {
 }
 
 func TestNewAzureServiceBusProvider_CustomTunables(t *testing.T) {
-	p, err := newAzureServiceBusProvider(AzureServiceBusProviderConfig{
+	p, err := newAzureServiceBusProvider(context.Background(), AzureServiceBusProviderConfig{
 		ConnectionString:        serviceBusTestConnStr,
 		QueueName:               "q1",
 		MaxMessageSizeBytes:     50 * 1024,
@@ -784,7 +784,7 @@ func TestNewAzureServiceBusProvider_CustomTunables(t *testing.T) {
 }
 
 func TestNewAzureServiceBusProvider_InvalidConnString(t *testing.T) {
-	_, err := newAzureServiceBusProvider(AzureServiceBusProviderConfig{
+	_, err := newAzureServiceBusProvider(context.Background(), AzureServiceBusProviderConfig{
 		ConnectionString: "not-a-valid-connection-string",
 		QueueName:        "q1",
 	}, newTestAPI())
@@ -798,7 +798,7 @@ func TestNewAzureServiceBusProvider_InvalidConnString(t *testing.T) {
 func TestNewAzureServiceBusProvider_EmptyQueueName(t *testing.T) {
 	// An empty queue name reaches NewSender/NewReceiverForQueue. The SDK
 	// returns an error rather than constructing a receiver against "".
-	_, err := newAzureServiceBusProvider(AzureServiceBusProviderConfig{
+	_, err := newAzureServiceBusProvider(context.Background(), AzureServiceBusProviderConfig{
 		ConnectionString: serviceBusTestConnStr,
 		QueueName:        "",
 	}, newTestAPI())

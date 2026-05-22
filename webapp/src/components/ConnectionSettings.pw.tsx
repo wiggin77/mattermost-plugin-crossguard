@@ -1074,14 +1074,15 @@ test.describe('ConnectionSettings', () => {
             const providerSelect = component.locator('select').first();
             await providerSelect.selectOption('azure-queue');
             await component.locator('input[placeholder="https://myaccount.queue.core.windows.net"]').fill('https://test.queue.core.windows.net');
-            await component.locator('input[placeholder="https://myaccount.blob.core.windows.net"]').fill('https://test.blob.core.windows.net');
             await component.locator('input[placeholder="myaccount"]').fill('test');
             await component.locator('input[placeholder="Paste key from Azure portal"]').fill('dGVzdA==');
             const queueInput = component.locator('input[placeholder="crossguard-messages"]');
             await queueInput.fill('test-queue');
 
-            // Enable file transfer to reveal blob container field
+            // Enable file transfer to reveal the blob service URL and container fields.
+            // Per the 0656890 SP cleanup, Blob Service URL lives inside the file-transfer block.
             await component.getByText('Enable File Transfer').click();
+            await component.locator('input[placeholder="https://myaccount.blob.core.windows.net"]').fill('https://test.blob.core.windows.net');
             const blobInput = component.locator('input[placeholder="crossguard-files"]');
             await blobInput.fill('my-blob-container');
 

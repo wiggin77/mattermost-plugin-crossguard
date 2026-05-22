@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -279,25 +280,65 @@ type azureBlobProvider struct {
 }
 
 // newAzureBlobProvider constructs an azure-blob provider. If isOutbound is
-// true, the provider immediately runs WAL crash recovery and starts the flush
-// loop using the supplied ctx (which should be the plugin lifetime context).
+// true, the provider immediately runs WAL crash recovery and starts the
+// flush loop using the supplied ctx (which should be the plugin lifetime
+// context).
+//
+// Auth mode (cfg.AuthMode) selects between shared-key (legacy default)
+// and service-principal (Client Secret). In SP mode the container is
+// expected to be pre-provisioned under data-plane RBAC (Storage Blob
+// Data Contributor); auto-Create is skipped.
 func newAzureBlobProvider(ctx context.Context, cfg AzureBlobProviderConfig, api plugin.API, kv kvClient, nodeID, connName string, isOutbound bool) (*azureBlobProvider, error) {
-	cred, err := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Blob shared key credential: %w", err)
+		return nil, fmt.Errorf("azure-blob config: %w", err)
 	}
-	containerClient, err := container.NewClientWithSharedKeyCredential(buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName), cred, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Azure Blob container client: %w", err)
+
+	containerURL := buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			api.LogError("Azure Blob: service principal credential failed",
+				"error_code", errcode.AzureBlobSPCredentialFailed,
+				"tenant_id", cfg.TenantID, "client_id", cfg.ClientID, "error", sanitizeAzureError(credErr))
+			return nil, credErr
+		}
+		logAzureAuthAudit(api, ProviderAzureBlob, cfg.TenantID, cfg.ClientID, cfg.AzureCloud, cfg.ClientSecret)
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClient(containerURL, cred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("azure-blob NewClient: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		cred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return nil, fmt.Errorf("failed to create Azure Blob shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClientWithSharedKeyCredential(containerURL, cred, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Azure Blob container client: %s", sanitizeAzureError(err))
+		}
+	default:
+		return nil, fmt.Errorf("azure-blob: unknown auth_mode %q (expected %q or %q)", cfg.AuthMode, AzureAuthSharedKey, AzureAuthServicePrincipal)
 	}
 
 	ops := &containerClientAdapter{client: containerClient}
 
-	// Ensure container exists (idempotent). Retry with exponential backoff on
-	// transient errors so a brief Azure blip at plugin activation does not
-	// prevent startup.
-	if err := ensureContainerWithRetry(ctx, ops, api, cfg.BlobContainerName); err != nil {
-		return nil, err
+	// Auto-Create runs only in shared-key mode. In SP mode the operator
+	// is expected to pre-provision the container with least-privilege
+	// data-plane RBAC; the plugin's SP usually lacks control-plane
+	// permission to create.
+	if authMode != AzureAuthServicePrincipal {
+		if err := ensureContainerWithRetry(ctx, ops, api, cfg.BlobContainerName); err != nil {
+			return nil, err
+		}
 	}
 
 	return newAzureBlobProviderFromOps(ctx, cfg, api, kv, nodeID, connName, isOutbound, ops)
@@ -1219,37 +1260,75 @@ func isContainerAlreadyExists(err error) bool {
 	return strings.Contains(err.Error(), azureErrContainerAlreadyExists)
 }
 
-// testAzureBlobConnection probes an azure-blob connection by creating a test
-// blob and deleting it.
+// testAzureBlobConnection probes an azure-blob connection by creating a
+// test blob and deleting it. In SP mode the AAD GetToken probe runs first;
+// the upload/delete then validates data-plane RBAC on the container
+// resource. Shared-key mode runs the same upload/delete probe directly.
 func testAzureBlobConnection(cfg AzureBlobProviderConfig) error {
-	cred, err := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+	authMode := normalizeAzureAuthMode(cfg.AuthMode)
+	azCloud, err := resolveAzureCloud(cfg.AzureCloud)
 	if err != nil {
-		return fmt.Errorf("failed to create shared key credential: %w", err)
+		return fmt.Errorf("azure-blob config: %w", err)
 	}
-	containerClient, err := container.NewClientWithSharedKeyCredential(buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName), cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create container client: %w", err)
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return testAzureBlobConnectionOps(ctx, &containerClientAdapter{client: containerClient})
+
+	containerURL := buildBlobContainerURL(cfg.ServiceURL, cfg.BlobContainerName)
+
+	var containerClient *container.Client
+	switch authMode {
+	case AzureAuthServicePrincipal:
+		cred, credErr := buildClientSecretCredential(azureServicePrincipalParams{
+			TenantID: cfg.TenantID, ClientID: cfg.ClientID, Secret: cfg.ClientSecret, Cloud: azCloud,
+		})
+		if credErr != nil {
+			return fmt.Errorf("service principal credential: %s", sanitizeAzureError(credErr))
+		}
+		if probeErr := probeAzureCredential(ctx, cred, azureStorageScope); probeErr != nil {
+			return probeErr
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClient(containerURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("failed to create container client: %s", sanitizeAzureError(err))
+		}
+	case "", AzureAuthSharedKey:
+		cred, credErr := container.NewSharedKeyCredential(cfg.AccountName, cfg.AccountKey)
+		if credErr != nil {
+			return fmt.Errorf("failed to create shared key credential: %s", sanitizeAzureError(credErr))
+		}
+		opts := &container.ClientOptions{ClientOptions: azcore.ClientOptions{Cloud: azCloud}}
+		containerClient, err = container.NewClientWithSharedKeyCredential(containerURL, cred, opts)
+		if err != nil {
+			return fmt.Errorf("failed to create container client: %s", sanitizeAzureError(err))
+		}
+	default:
+		return fmt.Errorf("azure-blob: unknown auth_mode %q", cfg.AuthMode)
+	}
+
+	return testAzureBlobConnectionOps(ctx, &containerClientAdapter{client: containerClient}, authMode, cfg.BlobContainerName)
 }
 
 // testAzureBlobConnectionOps contains the provider-agnostic core of the
 // connection test. Extracted so tests can inject a fake azureBlobOps.
-func testAzureBlobConnectionOps(ctx context.Context, ops azureBlobOps) error {
-	if createErr := ops.CreateContainer(ctx); createErr != nil {
-		if !isContainerAlreadyExists(createErr) {
-			return fmt.Errorf("failed to create container: %w", createErr)
+// In SP mode, auto-Create is skipped (the operator is expected to
+// pre-provision the container under data-plane RBAC).
+func testAzureBlobConnectionOps(ctx context.Context, ops azureBlobOps, authMode, containerName string) error {
+	if authMode != AzureAuthServicePrincipal {
+		if createErr := ops.CreateContainer(ctx); createErr != nil {
+			if !isContainerAlreadyExists(createErr) {
+				return wrapAzureResourceError(createErr, "container", containerName, authMode)
+			}
 		}
 	}
 
 	key := fmt.Sprintf("crossguard-test-%d", time.Now().UnixMilli())
 	if err := ops.UploadBlob(ctx, key, []byte("ok"), nil); err != nil {
-		return fmt.Errorf("failed to upload test blob: %w", err)
+		return wrapAzureResourceError(err, "container", containerName, authMode)
 	}
 	if err := ops.DeleteBlob(ctx, key); err != nil {
-		return fmt.Errorf("failed to delete test blob: %w", err)
+		return wrapAzureResourceError(err, "container", containerName, authMode)
 	}
 	return nil
 }

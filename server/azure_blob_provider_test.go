@@ -971,16 +971,25 @@ func TestAzureBlobProvider_RecoverDirectory(t *testing.T) {
 func TestTestAzureBlobConnectionOps(t *testing.T) {
 	t.Run("create error not-exists is wrapped", func(t *testing.T) {
 		ops := &fakeBlobOps{createFn: func(ctx context.Context) error { return errors.New("permission") }}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
+		err := testAzureBlobConnectionOps(t.Context(), ops, AzureAuthSharedKey, "c1")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to create container")
+		assert.Contains(t, err.Error(), "container")
+		assert.Contains(t, err.Error(), "c1")
 	})
 
 	t.Run("already exists error continues", func(t *testing.T) {
 		ops := &fakeBlobOps{
 			createFn: func(ctx context.Context) error { return errors.New(azureErrContainerAlreadyExists) },
 		}
-		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), ops))
+		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), ops, AzureAuthSharedKey, "c1"))
+	})
+
+	t.Run("SP mode skips auto-create", func(t *testing.T) {
+		ops := &fakeBlobOps{
+			// CreateContainer must not be called in SP mode.
+			createFn: func(ctx context.Context) error { return errors.New("should not be called") },
+		}
+		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), ops, AzureAuthServicePrincipal, "c1"))
 	})
 
 	t.Run("upload error wrapped", func(t *testing.T) {
@@ -989,22 +998,22 @@ func TestTestAzureBlobConnectionOps(t *testing.T) {
 				return errors.New("u")
 			},
 		}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
+		err := testAzureBlobConnectionOps(t.Context(), ops, AzureAuthSharedKey, "c1")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to upload test blob")
+		assert.Contains(t, err.Error(), "c1")
 	})
 
 	t.Run("delete error wrapped", func(t *testing.T) {
 		ops := &fakeBlobOps{
 			deleteFn: func(ctx context.Context, name string) error { return errors.New("d") },
 		}
-		err := testAzureBlobConnectionOps(t.Context(), ops)
+		err := testAzureBlobConnectionOps(t.Context(), ops, AzureAuthSharedKey, "c1")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to delete test blob")
+		assert.Contains(t, err.Error(), "c1")
 	})
 
 	t.Run("happy path", func(t *testing.T) {
-		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), &fakeBlobOps{}))
+		assert.NoError(t, testAzureBlobConnectionOps(t.Context(), &fakeBlobOps{}, AzureAuthSharedKey, "c1"))
 	})
 }
 

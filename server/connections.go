@@ -278,7 +278,7 @@ func (p *Plugin) createProvider(cfg ConnectionConfig, direction string) (QueuePr
 		if cfg.AzureQueue == nil {
 			return nil, errMissingAzureQueueConfig
 		}
-		return newAzureProvider(*cfg.AzureQueue, p.API)
+		return newAzureProvider(p.ctx, *cfg.AzureQueue, p.API)
 	case ProviderAzureBlob:
 		if cfg.AzureBlob == nil {
 			return nil, errMissingAzureBlobConfig
@@ -289,7 +289,7 @@ func (p *Plugin) createProvider(cfg ConnectionConfig, direction string) (QueuePr
 		if cfg.AzureServiceBus == nil {
 			return nil, errMissingAzureServiceBusConfig
 		}
-		return newAzureServiceBusProvider(*cfg.AzureServiceBus, p.API)
+		return newAzureServiceBusProvider(p.ctx, *cfg.AzureServiceBus, p.API)
 	default:
 		return nil, errUnknownProvider(cfg.Provider)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -32,7 +33,7 @@ func TestIntegrationReorderServiceBus(t *testing.T) {
 		ConnectionString: "Endpoint=sb://127.0.0.1;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true",
 		QueueName:        queueName,
 	}
-	provider, err := newAzureServiceBusProvider(cfg, api)
+	provider, err := newAzureServiceBusProvider(context.Background(), cfg, api)
 	if err != nil {
 		// Emulator may be reachable on TCP but the queue may not be
 		// pre-created. Skip with a clear message; the docker harness
