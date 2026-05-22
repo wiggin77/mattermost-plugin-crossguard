@@ -315,7 +315,7 @@ After setup:
 ### Frontend
 - React 18.2, TypeScript 5.9, Redux 5.0, Webpack 5.105
 - Mattermost Redux
-- Node.js 20.11
+- Node.js 24.11
 
 ### Testing
 - Go: `stretchr/testify`

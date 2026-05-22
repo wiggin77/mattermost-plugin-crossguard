@@ -9,7 +9,7 @@ For the architecture, threat model, and design rationale, see the [Cross Guard W
 ### Prerequisites
 
 - Go 1.26+
-- Node.js 20+
+- Node.js 24.11
 - Docker (for local development environment)
 
 ### Quick Start
