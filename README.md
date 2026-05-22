@@ -35,7 +35,7 @@ After `make docker-setup`:
 
 - **Server A (Low)**: http://low.test:8075
   - Admin: `admin / password`
-  - User: `usera / password`
+  - Users: `usera / password`, `useraa / password`
   - Team: Test A
 - **Server B (High)**: http://high.test:8076
   - Admin: `admin / password`
@@ -69,7 +69,7 @@ Each connection's `message_format` setting chooses how Cross Guard serializes th
 |--------|------|-----|
 | When to use | Default. Fast, compact, the natural choice when both sides are Cross Guard plugins. | Integrations with cross-domain solutions (CDS), content filters, or data-diode shuttles that speak XML natively. |
 | Schema | `schema/crossguard-api.yaml` (OpenAPI 3.1) models the JSON envelope and payloads. | [`schema/crossguard.xsd`](schema/crossguard.xsd) is the normative XML Schema; every outbound payload is schema-valid by construction. |
-| Examples | [REST API reference](public/help/api.html) shows full request/response shapes. | [`schema/examples/`](schema/examples/) contains one schema-valid `.xml` file per message type (post, update, delete, reaction add/remove, test) plus a [README](schema/examples/README.md) walking through them. |
+| Examples | [REST API reference](public/help/api.html) shows full request/response shapes. | [`schema/examples/`](schema/examples/) contains schema-valid `.xml` fixtures covering each message type (post variants, update, delete, reaction add/remove, test, membership change, status, post acknowledgement, mention transforms, user/bot, metadata orphan reaction, system messages) plus a [README](schema/examples/README.md) walking through them. |
 | Inbound detection | Auto-detected by [`model.DetectFormat`](server/model/message.go): the first non-whitespace byte decides (`<` means XML, anything else means JSON). | Same. Inbound connections do not need to be told which format to expect; outbound connections do. |
 | BOM | N/A. | A leading UTF-8 BOM on inbound XML is stripped automatically before format detection. |
 
@@ -105,10 +105,10 @@ Once the plugin is deployed, use `/crossguard` to manage cross-domain relay:
 
 | Command | Description |
 |---------|-------------|
-| `/crossguard init-team [connection-name]` | Link a NATS connection to this team (requires team admin or system admin) |
-| `/crossguard init-channel [connection-name]` | Link a NATS connection to this channel (requires channel admin or higher) |
-| `/crossguard teardown-team [connection-name]` | Unlink a NATS connection from this team (requires team admin or system admin) |
-| `/crossguard teardown-channel [connection-name]` | Unlink a NATS connection from this channel (requires channel admin or higher) |
+| `/crossguard init-team [connection-name]` | Link a connection to this team (requires team admin or system admin) |
+| `/crossguard init-channel [connection-name]` | Link a connection to this channel (requires channel admin or higher) |
+| `/crossguard teardown-team [connection-name]` | Unlink a connection from this team (requires team admin or system admin) |
+| `/crossguard teardown-channel [connection-name]` | Unlink a connection from this channel (requires channel admin or higher) |
 | `/crossguard reset-prompt <connection-name>` | Clear a pending team connection prompt (requires team admin) |
 | `/crossguard reset-channel-prompt <connection-name>` | Clear a pending channel connection prompt (requires team admin) |
 | `/crossguard rewrite-team [name] [team]` | Set or clear a remote team name rewrite for an inbound connection (requires team admin) |
