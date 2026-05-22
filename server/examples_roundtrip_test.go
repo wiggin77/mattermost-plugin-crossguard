@@ -133,7 +133,6 @@ func TestExampleFilesValidateAgainstSchema(t *testing.T) {
 	xmllint := requireXmllint(t)
 	dir := examplesDir()
 	for _, tc := range exampleCases() {
-		tc := tc
 		t.Run(tc.file, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join(dir, tc.file)) //nolint:gosec // example fixture path is a constant under the repo
 			require.NoError(t, err)

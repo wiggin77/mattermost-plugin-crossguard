@@ -60,7 +60,7 @@ func TestArchiveEnvelopeUniqueFilenames(t *testing.T) {
 		// Multiple writes in the same nanosecond would collide on
 		// the timestamp portion; the seq counter prevents overwrite.
 		env := &TransportEnvelope{ConnName: "c", Type: TransportTypeSyncMsg}
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			archiveEnvelope(env, []byte("<x/>"))
 		}
 	})
