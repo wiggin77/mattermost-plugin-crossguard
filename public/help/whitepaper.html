@@ -48,39 +48,59 @@
             multi-tenant architectures.
         </p>
         <p>
-            The plugin relays posts, edits, deletes, and reactions bidirectionally while keeping each
-            Mattermost server fully independent. No database synchronization, no direct API calls between
-            servers, and no shared authentication. Each server maintains its own users, teams, channels,
-            and data store. Cross Guard operates purely at the message level, publishing serialized
-            envelopes (JSON or XML) onto the configured transport (a NATS subject, an Azure Storage
-            queue, a batched WAL blob in an Azure Blob container, or an Azure Service Bus queue) and
-            consuming them on the other side.
+            The plugin integrates with Mattermost's shared-channels framework. Outbound, it
+            receives sync events from the framework hooks
+            (<code>OnSharedChannelsSyncMsg</code>, <code>OnSharedChannelsAttachmentSyncMsg</code>,
+            <code>OnSharedChannelsProfileImageSyncMsg</code>, <code>OnSharedChannelsPing</code>);
+            inbound, it hands sync events back to the framework via
+            <code>ReceiveSharedChannelSyncMsg</code>. Each Mattermost server keeps its own
+            users, teams, channels, and data store. Cross Guard operates purely at the message
+            level, marshalling each sync event into a plugin-owned XML or JSON envelope (the
+            two serializations are field-for-field equivalent) and publishing it onto the
+            configured transport. File attachments and profile images ride a separate file-
+            upload channel with HTTP-style headers carrying the routing metadata.
         </p>
         <p>
-            Administrative controls enforce explicit opt-in at both the team and channel level. No
-            messages flow until an administrator deliberately links a connection to a team and then to
-            specific channels within that team. Inbound connections require interactive acceptance via
-            admin prompts before any data crosses the boundary.
+            The wire envelope splits each upstream sync cycle into at most one post per
+            envelope, with non-post content (orphan reactions, memberships, statuses,
+            acknowledgements, mention transforms) riding an optional metadata envelope. This
+            <em>one-post-per-envelope</em> contract is a deliberate compliance-content-
+            inspection blast-radius control: rejecting one post does not lose other content as
+            collateral damage. Every outbound envelope is stamped with an <code>Epoch</code>
+            (sender process generation) and a per-channel <code>Sequence</code> so the receiver
+            can detect duplicates, reorder short gaps, and audit lost ranges. Inbound work is
+            single-active across the cluster: only one node per inbound connection subscribes
+            at a time, gated by a KV TTL lease, so duplicate processing in a multi-node
+            deployment is impossible.
+        </p>
+        <p>
+            Administrative controls enforce explicit opt-in at both the team and channel level.
+            No messages flow until an administrator deliberately links a connection to a team
+            and then to specific channels within that team. Inbound connections require
+            interactive acceptance via admin prompts before any data crosses the boundary. In
+            locked-down deployments (<code>RestrictToSystemAdmins</code>) the plugin
+            additionally supports two opt-in request-mode flows so team admins
+            (<code>AllowTeamAdminRequests</code>) or channel admins
+            (<code>AllowChannelAdminRequests</code>) can submit link requests that a higher-
+            privilege admin approves via interactive DM prompts.
         </p>
         <p>
             Transport security supports TLS 1.2+ across all providers and provider-specific
             authentication: NATS supports mutual certificate authentication (mTLS), token or
-            credentials authentication, and ACLs for subject-level access control; Azure Queue and
-            Azure Blob use either Azure Storage shared-key credentials or an Azure AD Service
-            Principal (client-credentials flow) over TLS-always endpoints; Azure Service Bus uses
-            either a SAS connection string (with SAS material sanitized out of error logs, and
-            scoped SAS rules supported over the namespace-wide root key) or an Azure AD Service
-            Principal. Service Principal mode allows credentials to be scoped via Azure RBAC and
-            rotated in Azure AD without touching plugin config; admin guidance for SP setup, the
-            minimum required data-plane roles, and the Federal-grade pattern for keeping the
-            <code>client_secret</code> out of plugin config (Mattermost env-var substitution of
-            the connections JSON) are documented in the admin guide. Permission lockdown is
-            configurable via the <code>RestrictToSystemAdmins</code> setting.
+            credentials authentication, and ACLs for subject-level access control; Azure Queue,
+            Azure Blob, and Azure Service Bus each support either their legacy default
+            credential (storage shared key or SAS connection string) or an Azure AD Service
+            Principal (client-credentials flow) over TLS-always endpoints. Service Principal
+            mode allows credentials to be scoped via Azure RBAC and rotated in Azure AD without
+            touching plugin config; admin guidance for SP setup, the minimum required data-
+            plane roles, and the Federal-grade pattern for keeping the <code>client_secret</code>
+            out of plugin config (Mattermost env-var substitution of the connections JSON) are
+            documented in the admin guide.
         </p>
         <p>
-            This whitepaper provides a comprehensive technical analysis of Cross Guard's architecture,
-            message lifecycle, security model, and deployment topologies for audiences evaluating the
-            plugin for cross-domain use.
+            This whitepaper provides a comprehensive technical analysis of Cross Guard's
+            architecture, message lifecycle, security model, and deployment topologies for
+            audiences evaluating the plugin for cross-domain use.
         </p>
 
         <!-- Section 2: The Cross Domain Problem -->
@@ -577,9 +597,10 @@ Topology 3: Guard Network (Classified)
             </li>
             <li>
                 <strong>KV store:</strong> Mattermost's built-in plugin key-value store, used
-                for all persistent state (team/channel linkage, post mappings, prompt state,
-                rewrite indexes). An optional caching layer wraps the KV store with 15-minute TTL
-                and cluster-aware invalidation.
+                for all persistent state (team and channel linkage, prompt and request state,
+                rewrite indexes, single-active-receiver leases, and inbound sequencer
+                cursors). An optional caching layer wraps the KV store with 15-minute TTL and
+                cluster-aware invalidation.
             </li>
         </ul>
 
@@ -610,309 +631,296 @@ Topology 3: Guard Network (Classified)
         <!-- Section 5: Message Relay Lifecycle (Outbound) -->
         <h2>5. Message Relay Lifecycle (Outbound)</h2>
         <p>
-            This section traces the complete path of a message from the moment a user posts in a
-            channel on Server A to the moment it is published to the transport layer (NATS, Azure
-            Queue Storage, Azure Blob Storage, or Azure Service Bus).
+            This section traces the complete path of a sync event from the moment Mattermost's
+            shared-channels framework hands it to the plugin on Server A to the moment it is
+            published to the transport layer (NATS, Azure Queue Storage, Azure Blob Storage, or
+            Azure Service Bus).
         </p>
 
-        <h3>Step 1: Post Lifecycle Hook Fires</h3>
+        <h3>Step 1: Shared-Channels Hook Fires</h3>
         <p>
-            Mattermost's plugin API provides lifecycle hooks that fire after post events. Cross Guard
-            implements five hooks in <code>hooks.go</code>:
+            Mattermost's shared-channels framework drives every cross-server sync. Cross Guard
+            implements four shared-channels hooks in <code>server/hooks.go</code>:
         </p>
         <ul>
-            <li><code>MessageHasBeenPosted()</code> for new posts</li>
-            <li><code>MessageHasBeenUpdated()</code> for edits</li>
-            <li><code>MessageHasBeenDeleted()</code> for deletes</li>
-            <li><code>ReactionHasBeenAdded()</code> for new reactions</li>
-            <li><code>ReactionHasBeenRemoved()</code> for reaction removals</li>
+            <li><code>OnSharedChannelsSyncMsg()</code> for sync content (posts, edits, deletes, users, reactions, statuses, membership changes, post acknowledgements, mention transforms).</li>
+            <li><code>OnSharedChannelsAttachmentSyncMsg()</code> for file attachments.</li>
+            <li><code>OnSharedChannelsProfileImageSyncMsg()</code> for user avatars.</li>
+            <li><code>OnSharedChannelsPing()</code> for the framework's per-remote health check.</li>
         </ul>
         <p>
-            Each hook receives the relevant post or reaction object from Mattermost and begins the
-            relay evaluation pipeline.
+            Each hook receives an <code>mmModel.SyncMsg</code> (or attachment / image payload)
+            and the originating <code>RemoteCluster</code>. The plugin no longer subscribes to
+            the post lifecycle directly; the framework owns post-event detection, filtering of
+            already-synced content, and retry semantics. The hook returns an error to defer
+            cursor advancement, which causes the framework to retry on its own schedule.
         </p>
 
-        <h3>Step 2: Filtering (What Does NOT Get Relayed)</h3>
+        <h3>Step 2: Outbound Connection Resolution</h3>
         <p>
-            Before any relay occurs, the hook applies a series of filters to determine whether the
-            event should be relayed. Events that match any filter are silently skipped:
-        </p>
-        <table>
-            <thead>
-                <tr>
-                    <th>Filter</th>
-                    <th>Check</th>
-                    <th>Purpose</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td>System messages</td>
-                    <td><code>post.IsSystemMessage()</code> returns true</td>
-                    <td>Prevents system-generated messages (join/leave, header change, etc.) from relaying</td>
-                </tr>
-                <tr>
-                    <td>Bot posts</td>
-                    <td><code>post.UserId == p.botUserID</code></td>
-                    <td>Prevents bot announcements (init, teardown, prompts) from relaying</td>
-                </tr>
-                <tr>
-                    <td>Already-relayed posts</td>
-                    <td><code>post.GetProp("crossguard_relayed") != nil</code></td>
-                    <td>Primary loop prevention: stops inbound posts from being re-relayed outbound</td>
-                </tr>
-                <tr>
-                    <td>Sync user reactions</td>
-                    <td><code>user.Position == "crossguard-sync"</code></td>
-                    <td>Prevents reactions added by sync users from being relayed back</td>
-                </tr>
-            </tbody>
-        </table>
-        <p>
-            <strong>Note:</strong> Not all filters apply to every hook. The system message and
-            <code>crossguard_relayed</code> checks apply to post create and update hooks. The delete
-            hook uses bot user ID and a deleting flag instead. Reaction hooks use bot user ID and
-            sync-user position filtering.
+            <code>connNameForRemote(rc.RemoteId)</code> maps the framework's remote ID to the
+            corresponding Cross Guard outbound connection name. A sync event arriving from
+            connection A's remote never re-leaves on connection A; this is the per-remote
+            outbound suppression that prevents framework-level relay loops. If no outbound
+            connection is registered for the remote, the hook returns silently.
         </p>
 
-        <h3>Step 3: Channel and Team Validation</h3>
+        <h3>Step 3: Envelope Fanout (One Post Per Envelope)</h3>
         <p>
-            The <code>isChannelRelayEnabled()</code> function checks whether the channel and its
-            parent team are linked to any outbound connections:
+            <code>buildOutboundEnvelopes</code> in <code>server/transport.go</code> splits each
+            upstream <code>*mmModel.SyncMsg</code> into a fan-out of envelopes, one per Post,
+            plus an optional metadata envelope carrying non-post content (orphan reactions,
+            memberships, statuses, acknowledgements, mention transforms) from the same cycle.
+            Each envelope carries at most one <code>&lt;Post&gt;</code> child of
+            <code>&lt;SyncMsg&gt;</code>; metadata envelopes have no <code>&lt;Post&gt;</code>
+            element at all. This one-post-per-envelope contract is a deliberate compliance-
+            content-inspection blast-radius control: rejecting one post does not lose other
+            content as collateral damage.
         </p>
-        <ol>
-            <li>Look up the channel's linked connections from the KV store (key: <code>crossguard-channelinit-{channelID}</code>)</li>
-            <li>Look up the team's linked connections from the KV store (key: <code>crossguard-teaminit-{teamID}</code>)</li>
-            <li>Return the channel connections after verifying the team also has connections. The effective intersection happens at publish time via <code>isOutboundLinked()</code>.</li>
-        </ol>
         <p>
-            If no connections match, the message is not relayed. This ensures that both team-level
-            and channel-level opt-in are required.
-        </p>
-
-        <h3>Step 4: Envelope Construction</h3>
-        <p>
-            The hook fetches source metadata (user, channel, team) via the Plugin API and builds
-            a type-specific payload:
-        </p>
-        <table>
-            <thead>
-                <tr>
-                    <th>Message Type</th>
-                    <th>Payload Fields</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td><code>crossguard_post</code> / <code>crossguard_update</code></td>
-                    <td><code>post_id</code>, <code>root_id</code>, <code>channel_id</code>, <code>channel_name</code>, <code>team_id</code>, <code>team_name</code>, <code>user_id</code>, <code>username</code>, <code>message</code>, <code>create_at</code></td>
-                </tr>
-                <tr>
-                    <td><code>crossguard_delete</code></td>
-                    <td><code>post_id</code>, <code>channel_id</code>, <code>channel_name</code>, <code>team_id</code>, <code>team_name</code></td>
-                </tr>
-                <tr>
-                    <td><code>crossguard_reaction_add</code> / <code>crossguard_reaction_remove</code></td>
-                    <td><code>post_id</code>, <code>channel_id</code>, <code>channel_name</code>, <code>team_id</code>, <code>team_name</code>, <code>user_id</code>, <code>username</code>, <code>emoji_name</code></td>
-                </tr>
-            </tbody>
-        </table>
-        <p>
-            The payload is embedded in a <code>model.Envelope</code> struct with a type constant
-            and an RFC 3339 UTC timestamp, then serialized via <code>model.Marshal()</code> to
-            JSON or XML bytes depending on the connection's <code>message_format</code> setting.
+            On the conversion boundary, upstream <code>mmModel</code> types are projected into
+            plugin-owned wire types (<code>server/wire/</code>) via per-type
+            <code>XFromModel</code> functions. Receiver-overwritten fields (e.g.
+            <code>Post.ReplyCount</code>, <code>Post.Participants</code>) and source-only
+            fields (<code>MessageSource</code>, <code>PendingPostId</code>) are dropped at the
+            boundary so they never appear on the wire.
+            <code>Post.Props</code> and <code>User.Props</code> are projected through the
+            typed <code>PostProps</code> and <code>UserProps</code> whitelists; any
+            non-whitelisted upstream Props key is dropped.
         </p>
 
-        <h3>Step 5: Semaphore Acquisition and Async Dispatch</h3>
+        <h3>Step 4: Epoch and Sequence Stamping</h3>
         <p>
-            The relay operation is dispatched asynchronously to avoid blocking the Mattermost
-            post lifecycle:
+            <code>publishToOutboundConn</code> stamps two ordering fields on every sender-
+            originated envelope before it goes onto the wire:
         </p>
-        <ol>
-            <li>Non-blocking attempt to acquire a slot from the relay semaphore (buffered channel of capacity 256)</li>
-            <li>If the semaphore is full (256 concurrent relays already in progress): drop the message and log a warning. This is a deliberate design choice to prevent unbounded goroutine spawning.</li>
-            <li>If a slot is acquired: increment the WaitGroup counter and spawn a goroutine for the publish operation</li>
-        </ol>
+        <ul>
+            <li>
+                <code>Epoch</code>: a 26-character Mattermost ID generated once at
+                <code>OnActivate</code> and held in process memory for the lifetime of the
+                plugin instance. It identifies the sender process generation; a restart yields
+                a new Epoch so the receiver can reset its per-channel sequence cursor without
+                conflating cycles.
+            </li>
+            <li>
+                <code>Sequence</code>: a per-<code>(ConnName, ChannelId)</code> monotonic
+                counter via <code>KVStore.BumpSequenceCounter</code>. Lets the receiver detect
+                duplicates and reorder short gaps. Stamped on <code>sync_msg</code> envelopes
+                only; absent on <code>test</code> envelopes (no channel scope).
+            </li>
+        </ul>
+
+        <h3>Step 5: Serialization</h3>
+        <p>
+            <code>MarshalEnvelope</code> serializes each envelope according to the outbound
+            connection's <code>message_format</code> setting. XML is the current default and
+            the existing wire format; JSON is the immediate follow-up implementation, and the
+            two formats are field-for-field equivalent (see
+            <a href="transport-interface.html">the Transport Interface Reference</a> and
+            <a href="../../schema/crossguard.xsd"><code>schema/crossguard.xsd</code></a>).
+            When the <code>CROSSGUARD_ENVELOPE_ARCHIVE_DIR</code> environment variable is set,
+            <code>MarshalEnvelope</code> also writes a copy of every marshalled envelope to
+            disk so the integration test suite can validate them against the XSD; the archive
+            path is the chokepoint that every outbound publish flows through.
+        </p>
 
         <h3>Step 6: Publish to Transport</h3>
         <p>
-            Inside the goroutine, for each outbound connection whose name matches a linked
-            connection from Step 3:
+            Each envelope is handed to <code>QueueProvider.Publish</code> on the resolved
+            outbound connection. Provider-specific behaviour:
         </p>
-        <ol>
-            <li>Check connection health via application-level tracking (success/failure of recent publishes, rechecked every 30 seconds). If unhealthy, skip the connection silently.</li>
-            <li>Call <code>provider.Publish(ctx, data)</code> with the serialized bytes (JSON or XML, per connection config)</li>
-            <li>Provider-specific behavior: <strong>NATS</strong> checks <code>IsConnected()</code>/<code>IsReconnecting()</code>, retries up to 3 times with exponential backoff (500ms, 1s, 2s), and flushes. <strong>Azure Queue Storage</strong> enqueues as Base64 without application-level retries (Azure SDK handles its own transport retries). <strong>Azure Blob Storage</strong> appends the serialized envelope to an in-memory write-ahead log buffer; the buffer is sealed and uploaded as a batch blob every <code>flush_interval_seconds</code> (default 60). <strong>Azure Service Bus</strong> sends the AMQP message via the Service Bus SDK and enforces a per-connection <code>max_message_size_bytes</code> (default 192,000) at the client boundary before sending; SAS-bearing error messages are sanitized before logging.</li>
-            <li>On failure: log an error and drop the message (no queuing)</li>
-            <li>Context cancellation is respected during backoff waits for graceful shutdown</li>
-        </ol>
+        <ul>
+            <li>
+                <strong>NATS</strong> calls <code>conn.Publish</code> on the configured subject
+                and returns. The shared-channels framework owns retry: an error from the hook
+                leaves the framework cursor unadvanced, so the framework re-fires the hook.
+            </li>
+            <li>
+                <strong>Azure Queue Storage</strong> Base64-encodes the bytes and enqueues with
+                a single Azure SDK call. The plugin enforces a 48,000-byte cap below the 64 KB
+                Azure Queue wire ceiling (Base64 expansion fits).
+            </li>
+            <li>
+                <strong>Azure Blob Storage</strong> appends the envelope to an in-memory write-
+                ahead log buffer that is sealed and uploaded as a batch blob every
+                <code>flush_interval_seconds</code> (default 60). Many envelopes ride per blob.
+            </li>
+            <li>
+                <strong>Azure Service Bus</strong> sends the AMQP message via the Service Bus
+                SDK and enforces a per-connection <code>max_message_size_bytes</code> (default
+                192,000) at the client boundary before sending. SAS-bearing error messages are
+                sanitized before logging.
+            </li>
+        </ul>
         <p>
-            After publishing (or dropping), the semaphore slot is released and the WaitGroup
-            counter is decremented.
+            File attachments and profile images take a parallel path: the corresponding
+            <code>OnSharedChannelsAttachmentSyncMsg</code> / <code>...ProfileImageSyncMsg</code>
+            hook downloads bytes from Mattermost and routes them through
+            <code>QueueProvider.UploadFile</code> with the metadata-carrying
+            <code>X-Crossguard-*</code> header set described in
+            <a href="transport-interface.html#file-upload-headers">File-Upload Headers</a>. The
+            XML envelope path is not used for file payloads.
+        </p>
+        <p>
+            The hook returns when every envelope has been handed to the provider. There is no
+            plugin-level relay semaphore; concurrency is bounded by the framework's per-remote
+            dispatch and by the provider's own client-side limits.
         </p>
 
         <!-- Section 6: Message Relay Lifecycle (Inbound) -->
         <h2>6. Message Relay Lifecycle (Inbound)</h2>
         <p>
-            This section traces the complete path of a message from the moment it arrives via
-            the transport layer (a NATS subject, an Azure Storage queue, a leased Azure Blob batch
-            blob, or an Azure Service Bus queue) to the moment it appears as a local post on
-            Server B.
+            This section traces the complete path of a sync envelope from the moment it arrives
+            via the transport layer (a NATS subject, an Azure Storage queue, a leased Azure Blob
+            batch blob, or an Azure Service Bus queue) to the moment it is handed back to the
+            shared-channels framework on Server B for application to local state.
         </p>
 
-        <h3>Step 1: Transport Delivers Message</h3>
+        <h3>Step 1: Single-Active Subscription</h3>
         <p>
-            The <code>handleInboundMessage()</code> closure receives raw bytes (<code>[]byte</code>)
-            from the transport provider: a NATS subscription callback, an Azure Queue Storage poller
-            (5-second cadence, batches of up to 32), an Azure Blob Storage lease-based reader (one
+            Across a Mattermost cluster, exactly one node holds the active subscription for a
+            given inbound connection at a time. <code>server/inbound_election.go</code> runs an
+            elector goroutine per inbound connection that takes and renews a KV TTL lease (45 s
+            TTL, 15 s renewal, 3x safety ratio). Only the lease-holder calls
+            <code>QueueProvider.Subscribe</code>; the other nodes idle and watch for the lease
+            to age out, then race to take it. This design makes duplicate processing in a
+            multi-node deployment impossible (the receiver-side sequencer additionally drops
+            duplicates that survive a handoff).
+        </p>
+        <p>
+            File events (<code>QueueProvider.WatchFiles</code>) follow the same single-active
+            pattern under the same lease, so a node either runs both subscriptions or neither.
+        </p>
+
+        <h3>Step 2: Bytes In, Envelope Out</h3>
+        <p>
+            Raw bytes arrive at <code>processInboundMessage</code>
+            (<code>server/inbound.go</code>) from one of the four providers: a NATS
+            subscription callback, an Azure Queue Storage poller (configurable cadence,
+            default 5 s, batches of up to 32), an Azure Blob Storage lease-based reader (one
             batch blob at a time, scoped by a short-lived blob lease), or an Azure Service Bus
-            PeekLock receiver (batches of up to 32 with a 5-second max wait, Complete on success
-            and Abandon on error). Like outbound, it performs a non-blocking semaphore acquisition
-            from the same 256-slot pool. If the semaphore is full, the message is dropped with a
-            warning log. If a slot is acquired, a goroutine is spawned.
+            PeekLock receiver (batches of up to 32 with a 5 s max wait; Complete on success,
+            Abandon on error). <code>UnmarshalEnvelope</code> deserializes the bytes; format is
+            auto-detected by the first non-whitespace byte (<code>&lt;</code> for XML,
+            <code>{</code> for JSON), and a leading UTF-8 BOM on XML is stripped before
+            detection. The inbound handler is deliberately serial under the single-active
+            lease (no relay semaphore), so the sequencer below can reason about a single
+            ordered input stream per connection.
         </p>
 
-        <h3>Step 2: Envelope Deserialization</h3>
+        <h3>Step 3: Sequencer Admission</h3>
         <p>
-            <code>model.DetectFormat(data)</code> auto-detects the wire format (JSON or XML)
-            by inspecting the first non-whitespace byte, then <code>model.Unmarshal()</code>
-            decodes the envelope. The handler dispatches by <code>envelope.Type</code>:
-        </p>
-        <table>
-            <thead>
-                <tr>
-                    <th>Type</th>
-                    <th>Handler</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr><td><code>crossguard_post</code></td><td><code>handleInboundPost()</code></td></tr>
-                <tr><td><code>crossguard_update</code></td><td><code>handleInboundUpdate()</code></td></tr>
-                <tr><td><code>crossguard_delete</code></td><td><code>handleInboundDelete()</code></td></tr>
-                <tr><td><code>crossguard_reaction_add</code></td><td><code>handleInboundReaction(add=true)</code></td></tr>
-                <tr><td><code>crossguard_reaction_remove</code></td><td><code>handleInboundReaction(add=false)</code></td></tr>
-                <tr><td><code>crossguard_test</code></td><td>Log and discard (connection testing)</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Step 3: Team and Channel Resolution</h3>
-        <p>
-            The <code>resolveTeamAndChannel()</code> function maps the remote team and channel
-            names to local entities:
-        </p>
-        <ol>
-            <li>
-                <strong>Check rewrite index first:</strong> <code>GetTeamRewriteIndex(connName, remoteTeamName)</code>
-                looks up KV key <code>crossguard-rwi-{connName}::{remoteTeamName}</code>. If a rewrite rule exists,
-                use the local team ID from the index.
-            </li>
-            <li>
-                <strong>If no rewrite:</strong> <code>GetTeamByName(teamName)</code> assumes the remote and local
-                team names match.
-            </li>
-            <li>
-                <strong>Verify team linkage:</strong> Check KV store (<code>crossguard-teaminit-{teamID}</code>)
-                to confirm this team is linked to the inbound connection.
-            </li>
-            <li>
-                <strong>If not linked:</strong> Trigger <code>handleUnlinkedInbound()</code>, which posts an
-                Accept/Block prompt to <code>#town-square</code>. The message is dropped (it will not be retried).
-            </li>
-            <li>
-                <strong>Resolve channel:</strong> <code>GetChannelByName(teamID, channelName)</code> to find the
-                local channel.
-            </li>
-            <li>
-                <strong>Verify channel linkage:</strong> Check KV store for channel-level connection linkage.
-            </li>
-            <li>
-                <strong>If channel not linked:</strong> Trigger <code>handleUnlinkedInboundChannel()</code>, which
-                posts a prompt in the channel itself. The message is dropped.
-            </li>
-        </ol>
-
-        <h3>Step 4: User Resolution</h3>
-        <p>
-            The <code>resolveInboundUser()</code> function determines which local user will be
-            the author of the relayed post. This is governed by the <code>UsernameLookup</code>
-            setting:
+            <code>inboundSequencer.Admit</code> (<code>server/inbound_sequencer.go</code>) keys
+            on <code>(Epoch, ConnName, ChannelId, Sequence)</code> and enforces three
+            invariants:
         </p>
         <ul>
             <li>
-                <strong>If UsernameLookup enabled (default):</strong> Call <code>GetUserByUsername(username)</code>.
-                If a matching local user is found and their <code>Position</code> is not <code>"crossguard-sync"</code>,
-                use the real local user. Messages appear as if that user posted them.
+                <strong>Deduplication.</strong> Any envelope whose <code>Sequence</code> is at
+                or below the per-channel cursor is dropped. Combined with the single-active
+                lease, this absorbs both at-least-once redeliveries from the provider and
+                replays caused by a sender restart.
             </li>
             <li>
-                <strong>If not found or lookup disabled:</strong> Create or fetch a synthetic "sync user" with:
-                <ul>
-                    <li>Username: <code>{remoteUsername}.{connName}</code> (truncated to 64 characters)</li>
-                    <li>Email: <code>crossguard.synthetic_user.{randomID}@crossguard.local</code></li>
-                    <li>Position: <code>crossguard-sync</code></li>
-                    <li>FirstName: remote username</li>
-                    <li>LastName: <code>(via {connName})</code></li>
-                    <li>Props: <code>CrossguardRemoteUsername: {originalUsername}</code></li>
-                </ul>
+                <strong>Bounded reorder buffer.</strong> An envelope whose Sequence is ahead of
+                the cursor is held in a small in-memory buffer; gap-fill envelopes promote the
+                cursor and release any buffered successors in order.
             </li>
             <li>
-                <strong>Race-safe creation:</strong> Uses atomic create with retry on conflict. If two
-                messages arrive simultaneously for the same unknown user, only one sync user is created.
+                <strong>Audited gap-deadline.</strong> A 1-second ticker drains the sequencer
+                of envelopes whose missing predecessors never arrived. The lost ranges are
+                audited via the <code>InboundSeq*</code> numeric error codes (see
+                <a href="error-codes.html">Error Codes</a>) so operators can surface compliance-
+                relevant gaps without losing the surviving content.
             </li>
         </ul>
         <p>
-            After user resolution, <code>ensureMembership()</code> adds the user to the target team
-            and channel if they are not already a member.
+            A new <code>Epoch</code> resets the per-channel cursor (the sender process
+            generation has changed; the previous cursor is no longer authoritative). A 5-
+            second checkpoint ticker persists cursors to KV under
+            <code>crossguard-seqcur-{connName}-{channelID}</code> so leadership handoff
+            resumes from where the previous active node left off.
         </p>
 
-        <h3>Step 5: Post Creation (New Posts)</h3>
-        <ol>
-            <li>Build a <code>mmModel.Post</code> with the resolved user ID, channel ID, and message text</li>
-            <li>If threaded (<code>RootID</code> present in envelope): look up the local root post via post mapping to preserve thread structure</li>
-            <li>Set <code>post.AddProp("crossguard_relayed", true)</code> to prevent re-relay (primary loop prevention)</li>
-            <li>Call <code>p.API.CreatePost(post)</code> to create the post locally</li>
-            <li>Store the mapping: <code>SetPostMapping(connName, remotePostID, localPostID)</code> for future edits/deletes</li>
-        </ol>
+        <h3>Step 4: Channel ID Rewriting</h3>
+        <p>
+            Admitted envelopes pass through <code>rewriteChannelIDs</code>, which translates
+            source-side channel IDs (carried inside the <code>SyncMsg</code>) into local
+            channel IDs using the rewrite index in KV
+            (<code>crossguard-rwi-{connName}-{remoteTeamName}</code> for team-level rewrites
+            plus the framework's own channel-pairing state). If the team or channel is not
+            linked to this inbound connection, the handler posts an interactive Accept / Block
+            prompt to <code>#town-square</code> (for team-level prompts) or to the target
+            channel (for channel-level prompts) and drops the current envelope; subsequent
+            envelopes follow the receiver-side prompt state until an admin acts.
+        </p>
 
-        <h3>Step 5 (alt): Post Update</h3>
-        <ol>
-            <li>Look up local post ID via <code>GetPostMapping(connName, remotePostID)</code></li>
-            <li>If no mapping exists: log a warning and skip (the original post may not have been relayed, e.g., if the channel was linked after the original was posted)</li>
-            <li>Fetch the local post, replace the <code>Message</code> field, call <code>UpdatePost()</code></li>
-        </ol>
+        <h3>Step 5: Handoff to the Shared-Channels Framework</h3>
+        <p>
+            With the envelope admitted and the IDs rewritten, the inner <code>wire.SyncMsg</code>
+            is projected back into <code>*mmModel.SyncMsg</code> via the per-type
+            <code>ToModel</code> functions and handed to
+            <code>p.API.ReceiveSharedChannelSyncMsg</code>. From this point the framework owns
+            everything: creating, updating, or deleting posts; upserting users; applying
+            reactions and acknowledgements; resolving thread parents; and stamping each
+            received user with a non-empty <code>RemoteId</code> that prevents the framework
+            from re-syncing the content back out. The plugin does not maintain its own post-ID
+            mapping or sync-user table.
+        </p>
 
-        <h3>Step 5 (alt): Post Delete</h3>
-        <ol>
-            <li>Look up local post ID via post mapping</li>
-            <li>Set <code>SetDeletingFlag(localPostID)</code> in KV store (prevents the <code>MessageHasBeenDeleted</code> hook from re-relaying this delete)</li>
-            <li>Call <code>DeletePost(localPostID)</code></li>
-            <li>Clear <code>ClearDeletingFlag(localPostID)</code></li>
-            <li>Delete the post mapping entry</li>
-        </ol>
-
-        <h3>Step 5 (alt): Reaction Add/Remove</h3>
-        <ol>
-            <li>Look up local post ID via post mapping</li>
-            <li>Resolve user (same logic as for posts)</li>
-            <li>Call <code>AddReaction()</code> or <code>RemoveReaction()</code> with the local user ID and post ID</li>
-        </ol>
+        <h3>Step 6: File-Channel Receipt</h3>
+        <p>
+            File payloads (<code>attachment</code> and <code>profile_image</code>) arrive on
+            the file channel, not the envelope channel: <code>QueueProvider.WatchFiles</code>
+            delivers raw bytes plus the metadata-bearing <code>X-Crossguard-*</code> headers
+            (see <a href="transport-interface.html#file-upload-headers">File-Upload Headers</a>).
+            The handler reads <code>X-Crossguard-Kind</code> to discriminate attachments from
+            profile images, runs the same rewrite-then-by-name resolution as the envelope
+            path, and hands off to the framework's attachment / profile-image upsert APIs.
+        </p>
 
         <!-- Section 7: Data Boundary Control -->
         <h2>7. Data Boundary Control</h2>
         <p>
             Understanding exactly what data crosses the domain boundary is critical for CDS
-            evaluation. This section documents every field in the transport envelope, its source,
-            whether it is user-controlled, and how it is used on the receiving side. The envelope
-            format is identical across all four transport providers (NATS, Azure Queue Storage,
-            Azure Blob Storage, and Azure Service Bus).
+            evaluation. This section documents the wire envelope, its payload, and the
+            whitelisting policy that determines which upstream fields are carried and which are
+            dropped at the boundary. The envelope shape is identical across all four transport
+            providers (NATS, Azure Queue Storage, Azure Blob Storage, and Azure Service Bus).
+            JSON and XML are field-for-field equivalent serializations of the same semantic
+            envelope; the XSD at <a href="../../schema/crossguard.xsd"><code>schema/crossguard.xsd</code></a>
+            is the normative structural contract.
         </p>
 
-        <h3>Data That Crosses the Boundary (Transport Envelope)</h3>
-
-        <h4>Envelope Fields</h4>
+        <h3>Two Delivery Paths</h3>
         <p>
-            The envelope is a single-layer structure (payloads are embedded directly, not
-            serialized as strings). It may be serialized as JSON or XML depending on the
-            outbound connection's <code>message_format</code> setting.
+            The four envelope types are routed through two distinct delivery paths:
+        </p>
+        <ul>
+            <li>
+                <strong>XML / JSON envelope path</strong>
+                (<code>QueueProvider.Publish</code> / <code>Subscribe</code>): carries
+                <code>sync_msg</code> and <code>test</code> envelopes. The
+                <code>&lt;CrossGuardEnvelope&gt;</code> wraps a <code>&lt;SyncMsg&gt;</code> (for
+                <code>sync_msg</code>) or a <code>&lt;TestID&gt;</code> (for <code>test</code>).
+                Each <code>sync_msg</code> envelope carries at most one Post.
+            </li>
+            <li>
+                <strong>File-upload path</strong>
+                (<code>QueueProvider.UploadFile</code> / <code>WatchFiles</code>): carries
+                <code>attachment</code> and <code>profile_image</code> payloads. The raw file
+                bytes ride the transport's native file-upload channel; routing metadata travels
+                as HTTP-style <code>X-Crossguard-*</code> headers on the file blob (see
+                <a href="transport-interface.html#file-upload-headers">File-Upload Headers</a>).
+                The XML / JSON envelope is not used for file payloads.
+            </li>
+        </ul>
+
+        <h3>Envelope Schema</h3>
+        <p>
+            Each <code>&lt;CrossGuardEnvelope&gt;</code> carries the following envelope-level
+            fields. Compliance content inspection can route and audit envelopes by inspecting
+            these alone, without parsing the inner <code>SyncMsg</code>.
         </p>
         <table>
             <thead>
@@ -925,242 +933,242 @@ Topology 3: Guard Network (Classified)
             </thead>
             <tbody>
                 <tr>
-                    <td><code>type</code></td>
-                    <td>Message type constant (e.g., <code>crossguard_post</code>)</td>
-                    <td>No (set by plugin code)</td>
-                    <td>Handler dispatch</td>
+                    <td><code>version</code> (attribute)</td>
+                    <td>Integer, currently always <code>1</code></td>
+                    <td>No</td>
+                    <td>Wire-format versioning</td>
                 </tr>
                 <tr>
-                    <td><code>timestamp</code></td>
-                    <td>RFC 3339 UTC timestamp</td>
-                    <td>No (set by plugin code)</td>
-                    <td>Logging only</td>
+                    <td><code>type</code> (attribute)</td>
+                    <td>One of <code>sync_msg</code>, <code>test</code>, <code>attachment</code>, <code>profile_image</code></td>
+                    <td>No</td>
+                    <td>Envelope dispatch (only <code>sync_msg</code> and <code>test</code> appear in the XML envelope itself)</td>
                 </tr>
                 <tr>
-                    <td><code>post_message</code></td>
-                    <td>Post or update payload</td>
-                    <td>Contains user-controlled fields (see below)</td>
-                    <td>Create or update a post</td>
+                    <td><code>ConnName</code></td>
+                    <td>Outbound connection name (URL-safe slug, max 96 chars)</td>
+                    <td>No (admin-set)</td>
+                    <td>Routing, audit, per-channel sequence scoping</td>
                 </tr>
                 <tr>
-                    <td><code>delete_message</code></td>
-                    <td>Delete payload</td>
-                    <td>No (IDs only)</td>
-                    <td>Delete a post</td>
+                    <td><code>Timestamp</code></td>
+                    <td>RFC 3339 UTC timestamp set at marshal time</td>
+                    <td>No</td>
+                    <td>Audit / logging</td>
                 </tr>
                 <tr>
-                    <td><code>reaction_message</code></td>
-                    <td>Reaction payload</td>
-                    <td>Partially (emoji name is user-selected)</td>
-                    <td>Add or remove a reaction</td>
+                    <td><code>Epoch</code></td>
+                    <td>Sender process generation (26-char Mattermost ID, generated at plugin activation)</td>
+                    <td>No</td>
+                    <td>Sequence cursor reset on sender restart; replay detection</td>
                 </tr>
                 <tr>
-                    <td><code>test_message</code></td>
-                    <td>Test payload</td>
-                    <td>No (generated ID)</td>
+                    <td><code>Sequence</code></td>
+                    <td>Per-<code>(ConnName, ChannelId)</code> monotonic counter (sync_msg only)</td>
+                    <td>No</td>
+                    <td>Duplicate detection, bounded reorder</td>
+                </tr>
+                <tr>
+                    <td><code>TeamName</code></td>
+                    <td>Source team name (URL-safe slug, max 96 chars)</td>
+                    <td>Indirectly (admin-set)</td>
+                    <td>Routing via name resolution and the rewrite index</td>
+                </tr>
+                <tr>
+                    <td><code>ChannelName</code></td>
+                    <td>Source channel name (URL-safe slug, max 96 chars)</td>
+                    <td>Indirectly (admin-set)</td>
+                    <td>Routing via name resolution</td>
+                </tr>
+                <tr>
+                    <td><code>SyncMsg</code></td>
+                    <td>Plugin-owned <code>wire.SyncMsg</code> (see below); present when <code>type</code> is <code>sync_msg</code></td>
+                    <td>Contains user-controlled fields (see SyncMsg Contents below)</td>
+                    <td>Post / user / reaction / status / membership / acknowledgement upserts</td>
+                </tr>
+                <tr>
+                    <td><code>TestID</code></td>
+                    <td>26-char ID echoed back by the receiver; present when <code>type</code> is <code>test</code></td>
+                    <td>No</td>
                     <td>Connectivity verification</td>
                 </tr>
             </tbody>
         </table>
 
-        <h4>Wire Format Encoding (JSON or XML)</h4>
+        <h3>Wire Format Encoding: JSON and XML</h3>
         <p>
             Each outbound connection chooses its on-the-wire encoding via the
-            <code>message_format</code> setting (<code>"json"</code> or <code>"xml"</code>). The
-            envelope structure above is identical in both encodings; only the surface syntax
-            differs. JSON uses snake_case field names (<code>post_message</code>); XML uses
-            PascalCase elements rooted at <code>&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;</code>
-            and validated against <code>schema/crossguard.xsd</code>. Inbound connections do not
-            require format configuration: the parser inspects the first non-whitespace byte
-            (<code>&lt;</code> means XML, otherwise JSON) and strips a leading UTF-8 BOM if a CDS
-            device prepended one.
+            <code>message_format</code> setting (<code>"xml"</code> or <code>"json"</code>).
+            JSON field names exactly mirror the XML element / attribute names, so the two
+            serializations are field-for-field equivalent and the same semantic envelope
+            schema applies. XML is rooted at <code>&lt;CrossGuardEnvelope&gt;</code> (no XML
+            namespace) and validated against <code>schema/crossguard.xsd</code> by
+            construction. Inbound connections do not require format configuration: the parser
+            inspects the first non-whitespace byte (<code>&lt;</code> means XML,
+            <code>{</code> means JSON) and strips a leading UTF-8 BOM if an upstream device
+            prepended one.
         </p>
         <p>
-            The repository ships 12 schema-valid XML sample payloads under
-            <code>schema/examples/</code>, one per message-type variant the plugin emits. Each
-            file is byte-for-byte identical to <code>model.Marshal(env, FormatXML)</code> plus a
-            trailing newline. The byte-equality contract is enforced by
-            <code>TestExampleFiles_Symmetric</code> in
-            <code>server/model/examples_roundtrip_test.go</code>, which also verifies that
-            <code>Unmarshal</code> followed by <code>Marshal</code> is a fixed point and that
-            marshalling is deterministic. Operators evaluating the protocol for CDS approval can
-            point at these example files as the canonical wire shape and at the test as the
-            evidence that the plugin will not silently drift away from them. Detailed JSON and
-            XML field references live in
+            The repository ships 22 schema-valid XML sample payloads under
+            <a href="../../schema/examples/"><code>schema/examples/</code></a>. Each file is
+            byte-for-byte identical to the bytes <code>MarshalEnvelope</code> produces.
+            <code>TestExampleFiles</code> in <code>server/examples_roundtrip_test.go</code>
+            enforces that contract and verifies that
+            <code>UnmarshalEnvelope</code> followed by <code>MarshalEnvelope</code> is a fixed
+            point. Operators evaluating the protocol for CDS approval can point at these
+            example files as the canonical wire shape and at the test as evidence that the
+            plugin will not silently drift away from them. Field-level references for both
+            serializations live in
             <a href="transport-interface.html">transport-interface.html</a>.
         </p>
 
-        <h4>PostMessage Payload Fields</h4>
-        <table>
-            <thead>
-                <tr>
-                    <th>Field</th>
-                    <th>Source</th>
-                    <th>User-Controlled?</th>
-                    <th>Used On Receive</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td><code>post_id</code></td>
-                    <td><code>post.Id</code> (26-char Mattermost ID)</td>
-                    <td>No</td>
-                    <td>Post mapping key for edits/deletes</td>
-                </tr>
-                <tr>
-                    <td><code>root_id</code></td>
-                    <td><code>post.RootId</code></td>
-                    <td>No</td>
-                    <td>Thread parent resolution via post mapping</td>
-                </tr>
-                <tr>
-                    <td><code>channel_id</code></td>
-                    <td><code>post.ChannelId</code></td>
-                    <td>No</td>
-                    <td>Not used directly (name-based routing)</td>
-                </tr>
-                <tr>
-                    <td><code>channel_name</code></td>
-                    <td><code>channel.Name</code></td>
-                    <td>Indirectly (admin-set)</td>
-                    <td>Routing: <code>GetChannelByName()</code></td>
-                </tr>
-                <tr>
-                    <td><code>team_id</code></td>
-                    <td><code>channel.TeamId</code></td>
-                    <td>No</td>
-                    <td>Not used directly</td>
-                </tr>
-                <tr>
-                    <td><code>team_name</code></td>
-                    <td><code>team.Name</code></td>
-                    <td>Indirectly (admin-set)</td>
-                    <td>Routing: <code>GetTeamByName()</code> or rewrite lookup</td>
-                </tr>
-                <tr>
-                    <td><code>user_id</code></td>
-                    <td><code>post.UserId</code></td>
-                    <td>No</td>
-                    <td>Not used on receive</td>
-                </tr>
-                <tr>
-                    <td><code>username</code></td>
-                    <td><code>user.Username</code></td>
-                    <td>Yes (users choose usernames)</td>
-                    <td>User resolution: <code>resolveInboundUser()</code></td>
-                </tr>
-                <tr>
-                    <td><code>message</code></td>
-                    <td><code>post.Message</code></td>
-                    <td><strong>Yes</strong> (full post content)</td>
-                    <td>Post body text</td>
-                </tr>
-                <tr>
-                    <td><code>create_at</code></td>
-                    <td><code>post.CreateAt</code></td>
-                    <td>No</td>
-                    <td>Not used on receive</td>
-                </tr>
-            </tbody>
-        </table>
-
-        <h4>DeleteMessage Payload Fields</h4>
+        <h3>SyncMsg Contents</h3>
         <p>
-            Contains <code>post_id</code>, <code>channel_id</code>, <code>channel_name</code>,
-            <code>team_id</code>, <code>team_name</code>. No user-controlled content beyond the
-            admin-set team and channel names.
+            The <code>&lt;SyncMsg&gt;</code> payload is a plugin-owned wire-pruned subset of
+            Mattermost's upstream <code>mmModel.SyncMsg</code>. The wire types live under
+            <code>server/wire/</code>; each is a pruned version of the corresponding upstream
+            type with source-only fields stripped and receiver-overwritten fields dropped at
+            the source. The compliance-relevant constraints:
+        </p>
+        <ul>
+            <li>
+                <strong>One Post per envelope.</strong> Sender-side fanout (<code>buildOutboundEnvelopes</code>)
+                splits each upstream sync cycle into one envelope per Post, plus an optional
+                metadata envelope (no <code>&lt;Post&gt;</code>) carrying non-post content from
+                the same cycle. This bounds the compliance blast radius: rejecting one post
+                envelope cannot lose other content.
+            </li>
+            <li>
+                <strong>Whitelisted typed Props.</strong> <code>Post.Props</code> and
+                <code>User.Props</code> are not pass-through maps. They are the typed
+                <code>PostProps</code> and <code>UserProps</code> structs with a fixed set of
+                keys (15 keys on <code>PostProps</code>, 4 on <code>UserProps</code>). Any
+                non-whitelisted upstream key is dropped at the boundary, regardless of which
+                plugin set it. The full key list lives in
+                <a href="transport-interface.html#wire-postprops">PostProps</a> and
+                <a href="transport-interface.html#wire-userprops">UserProps</a>.
+            </li>
+            <li>
+                <strong>Dropped at source.</strong> Upstream fields the receiver overwrites
+                (<code>Post.ReplyCount</code>, <code>Post.LastReplyAt</code>,
+                <code>Post.Participants</code>, <code>Post.Metadata</code>,
+                <code>User.AuthService</code>, <code>User.NotifyProps</code>, etc.) or that the
+                framework computes locally (<code>Post.Filenames</code>) never appear on the
+                wire.
+            </li>
+            <li>
+                <strong>Username scrubbing.</strong> Colon-tagged remote usernames
+                (<code>alice.high</code>) are resolved to their pre-tag form before being
+                placed in <code>Username</code>. The colon-bearing form, if needed downstream,
+                is recovered from <code>UserProps.RemoteUsername</code> on the receiver. This
+                keeps source-side remote topology off the wire.
+            </li>
+            <li>
+                <strong>Status pruning.</strong> Source-local <code>ActiveChannel</code> on
+                presence updates is dropped at the boundary.
+            </li>
+        </ul>
+        <p>
+            The complete per-type field list, with all whitelisted keys and XSD-enforced
+            length caps, is in
+            <a href="transport-interface.html#syncmsg">the SyncMsg Payload reference</a>.
         </p>
 
-        <h4>ReactionMessage Payload Fields</h4>
+        <h3>File-Upload Path: Headers, Not Envelopes</h3>
         <p>
-            Contains <code>post_id</code>, <code>channel_id</code>, <code>channel_name</code>,
-            <code>team_id</code>, <code>team_name</code>, <code>user_id</code>,
-            <code>username</code> (user-controlled), and <code>emoji_name</code>
-            (user-selected from Mattermost's emoji set).
+            File attachments and profile images do not ride the XML / JSON envelope. They flow
+            through <code>QueueProvider.UploadFile</code> as raw bytes with a small set of
+            HTTP-style headers. Each transport maps the header set onto its native metadata
+            mechanism (NATS object store headers, Azure Blob metadata, Azure Service Bus blob
+            sidecar metadata). The header set is documented in
+            <a href="transport-interface.html#file-upload-headers">File-Upload Headers</a>;
+            the key facts:
         </p>
-
-        <h3>Data Intentionally Excluded</h3>
-        <div class="alert alert-tip">
-            <p class="alert-title">Minimal data boundary</p>
-            <p>
-                Cross Guard intentionally excludes the following from the relay envelope. This
-                minimizes the attack surface and prevents accidental data spillage.
-            </p>
-        </div>
-        <table>
-            <thead>
-                <tr>
-                    <th>Excluded Data</th>
-                    <th>Why Excluded</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td>File attachments (<code>post.FileIds</code>)</td>
-                    <td>File transfer is disabled by default. When enabled per connection, files are uploaded to a NATS JetStream Object Store (NATS provider) or Azure Blob Storage (Azure provider) and downloaded by the receiving side. For Azure Blob Storage, blobs are stored with the key format <code>{postId}/{randomId}</code>, where <code>postId</code> is the Mattermost post ID and <code>randomId</code> is a newly generated unique identifier. Administrators can restrict transfers using allow/deny file type filtering and a 100 MB size limit. Files may contain embedded metadata or classified content, so explicit opt-in and filtering are required.</td>
-                </tr>
-                <tr>
-                    <td>Post properties (<code>post.Props</code>)</td>
-                    <td>Props may contain plugin-specific data from other plugins (webhooks, integrations, custom metadata). Relaying them could leak internal system information.</td>
-                </tr>
-                <tr>
-                    <td>User metadata (email, profile image, custom fields, roles, auth data)</td>
-                    <td>User profiles may contain PII, classification markings, or organizational data that should not cross domain boundaries.</td>
-                </tr>
-                <tr>
-                    <td>Channel metadata (purpose, header, type)</td>
-                    <td>Channel headers may contain sensitive operational information. Public/private distinction is not meaningful across domains.</td>
-                </tr>
-                <tr>
-                    <td>Hashtags, pinned status, edit history</td>
-                    <td>Operational metadata that adds attack surface without proportional value.</td>
-                </tr>
-                <tr>
-                    <td>Interactive message elements (buttons, menus)</td>
-                    <td>Interactive elements contain callback URLs and action IDs that reference the source server's internal state. Relaying them would create non-functional UI elements or potential SSRF vectors.</td>
-                </tr>
-                <tr>
-                    <td>File previews, embedded links, Open Graph data</td>
-                    <td>Preview data may contain fetched content from the source domain's network, which should not be exposed to the receiving domain.</td>
-                </tr>
-            </tbody>
-        </table>
+        <ul>
+            <li>
+                File transfer is <strong>opt-in per connection</strong> via the
+                <code>file_transfer_enabled</code> setting (default false).
+            </li>
+            <li>
+                File extension allow / deny filters can be configured per connection via
+                <code>file_filter_mode</code> and <code>file_filter_types</code>; the policy
+                applies on both the outbound and inbound sides.
+            </li>
+            <li>
+                File size is bounded by Mattermost's <code>FileSettings.MaxFileSize</code>
+                (default 100 MB).
+            </li>
+            <li>
+                File attachments include <code>X-File-Info</code>, a Base64-encoded JSON
+                <code>mmModel.FileInfo</code>. Base64 wraps the JSON so it survives provider
+                metadata-encoding rules; the receiver decodes it and trusts only the framework
+                to apply the attachment to the local post.
+            </li>
+            <li>
+                Object keys follow stable patterns
+                (<code>attachment/{postID}/{fileID}</code> for attachments,
+                <code>profile_image/{userID}</code> for profile images), and the receiver
+                cross-checks the key prefix against the <code>X-Crossguard-Kind</code> header
+                so a mistyped upload cannot escape its lane.
+            </li>
+        </ul>
 
         <!-- Section 8: User Identity Across Domains -->
         <h2>8. User Identity Across Domains</h2>
         <p>
-            Cross Guard supports two identity models for how inbound messages are attributed to
-            local users. The choice between them is a security/usability tradeoff controlled by
-            the <code>UsernameLookup</code> plugin setting.
+            User identity is handled by Mattermost's shared-channels framework, not by Cross
+            Guard. Every <code>User</code> record that arrives in an inbound
+            <code>SyncMsg</code> is stamped with a non-empty <code>RemoteId</code> identifying
+            the source remote. The framework upserts these users as <em>remote users</em>:
+            local accounts that are clearly distinguishable from native users by their
+            <code>RemoteId</code>, by the framework-managed <code>RemoteUsername</code>
+            in the typed <code>UserProps</code>, and by the webapp's "Relayed from" indicator
+            on the user popover. There is no username-collision impersonation risk: the
+            framework will not silently merge a remote user into an existing local account
+            that has a different <code>RemoteId</code> (including the empty
+            <code>RemoteId</code> that identifies native users).
         </p>
-
-        <h3>Model 1: Username Lookup (Default, UsernameLookup=true)</h3>
-        <table class="field-table">
-            <tbody>
-                <tr><td>Behavior</td><td>Inbound messages are posted as the matching local user if a user with the same username exists on the receiving server.</td></tr>
-                <tr><td>Advantage</td><td>Seamless user experience. Messages appear to come from the "right" person. No visual distinction between local and relayed posts.</td></tr>
-                <tr><td>Risk</td><td>If Remote Domain A has a user "jsmith" and Local Domain B also has "jsmith", messages from Remote jsmith appear as if Local jsmith wrote them. This is username impersonation if the two accounts belong to different people.</td></tr>
-                <tr><td>Appropriate When</td><td>The same identity provider (LDAP, Active Directory, SSO) provisions users on both servers, so a username match implies the same person.</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Model 2: Sync Users (UsernameLookup=false, or No Match Found)</h3>
-        <table class="field-table">
-            <tbody>
-                <tr><td>Behavior</td><td>A synthetic "sync user" is created with a munged username (e.g., <code>alice.relay-from-a</code>). All inbound messages from that remote user are posted under this sync user.</td></tr>
-                <tr><td>Sync User Properties</td><td><code>Position="crossguard-sync"</code>, <code>LastName="(via connName)"</code>, <code>Props.CrossguardRemoteUsername=original</code></td></tr>
-                <tr><td>Advantage</td><td>Clear visual distinction between local and relayed users. No impersonation risk. The webapp UserPopover component shows "Relayed from: alice (via relay-from-a)" when hovering over the sync user.</td></tr>
-                <tr><td>Appropriate When</td><td>Usernames do not match across domains, or when impersonation risk is unacceptable (recommended for CDS deployments).</td></tr>
-            </tbody>
-        </table>
-
-        <h3>Hybrid Behavior</h3>
         <p>
-            When username lookup is enabled, resolution is per-message. If a matching local user
-            exists, that user is used. If no match is found, a sync user is created for that
-            specific remote username. This means messages in the same channel may appear from a
-            mix of real local users and sync users, depending on which remote usernames have
-            local matches.
+            On the outbound side, the plugin normalizes usernames before they reach the wire
+            so colon-tagged remote forms (e.g. <code>alice.high</code>) are resolved to the
+            pre-tag form (<code>alice</code>) and stored in the wire <code>Username</code>
+            field. The colon-bearing form, if needed downstream, is carried in
+            <code>UserProps.RemoteUsername</code> for the receiving framework to recover. This
+            keeps source-side remote topology off the wire while preserving the receiver's
+            ability to display the canonical attribution.
+        </p>
+        <p>
+            User identity at the boundary is therefore the responsibility of the framework
+            plus the wire-types whitelist:
+        </p>
+        <ul>
+            <li>
+                <strong>What crosses the boundary:</strong> the whitelisted <code>wire.User</code>
+                fields (Id, identity strings, names, position, roles, locale, optional
+                Timezone, and the four-key <code>UserProps</code> whitelist). Credentials,
+                <code>AuthService</code>, <code>NotifyProps</code>, MFA state, password-update
+                timestamps, and similar source-local data are dropped at the boundary; see
+                Section 7.
+            </li>
+            <li>
+                <strong>What stops at the boundary:</strong> any upstream Props key not in the
+                <code>UserProps</code> whitelist. Plugin-specific or compliance-marking Props
+                that other plugins might set on a user are dropped at the wire types
+                conversion, regardless of which plugin produced them.
+            </li>
+            <li>
+                <strong>What the framework guarantees:</strong> received users land in the
+                local user table with a stable, non-empty <code>RemoteId</code>; further sync
+                events from the same source resolve to the same local user record, even after
+                renames on the source side, because the framework keys on (RemoteId, source
+                Id) rather than on username.
+            </li>
+        </ul>
+        <p>
+            The webapp's <code>CrossguardUserPopover</code> component reads
+            <code>UserProps.RemoteUsername</code> and <code>RemoteId</code> to display a
+            "Relayed from: alice (via high-side)" attribution on synced users, so the operator
+            audience can always tell which conversation came from which domain.
         </p>
 
         <!-- Section 9: Connection Management and Administrative Workflows -->
@@ -1274,6 +1282,69 @@ Topology 3: Guard Network (Classified)
             <li>The same flow repeats at the channel level once the team is accepted</li>
         </ol>
 
+        <h3>Request-Mode Workflows (Locked-Down Deployments)</h3>
+        <p>
+            In deployments where <code>RestrictToSystemAdmins</code> is enabled, team and
+            channel admins lose direct access to <code>init-team</code> and
+            <code>init-channel</code>. Two opt-in settings restore a request-and-approve flow
+            so non-sysadmin admins can still drive cross-domain setup without granting them
+            unsupervised linking authority.
+        </p>
+        <h4>Team Admin Requests (<code>AllowTeamAdminRequests</code>)</h4>
+        <ol>
+            <li>
+                A Team Admin runs <code>/crossguard init-team [connection]</code>. The plugin
+                detects request mode and, instead of linking, persists a request entry under
+                <code>crossguard-connreq-{teamID}-{connName}</code> via CAS.
+            </li>
+            <li>
+                The plugin sends a direct-message announcement to every System Admin with an
+                interactive prompt carrying Approve and Deny buttons. The prompt summarizes
+                the requesting team, the proposed connection, and the requester's user info.
+            </li>
+            <li>
+                Approve triggers <code>POST /api/v1/request/approve</code>: the team is
+                linked, the standard init announcement is posted in the requesting team, and
+                the request entry is removed.
+            </li>
+            <li>
+                Deny triggers <code>POST /api/v1/request/deny</code>, which opens an
+                interactive dialog so the System Admin can record an optional reason. The
+                dialog submit is handled by <code>POST /api/v1/request/deny-submit</code>,
+                which removes the request and DMs the requester with the reason.
+            </li>
+            <li>
+                <code>teardown-team</code> remains available to Team Admins in request mode
+                (no approval needed; unlinking does not enlarge attack surface).
+            </li>
+        </ol>
+        <h4>Channel Admin Requests (<code>AllowChannelAdminRequests</code>)</h4>
+        <ol>
+            <li>
+                A Channel Admin runs <code>/crossguard init-channel [connection]</code>. The
+                plugin persists a channel-level request under
+                <code>crossguard-chanconnreq-{channelID}-{connName}</code> via CAS, mirroring
+                the team-level flow.
+            </li>
+            <li>
+                Approval and denial go to <strong>Team Admins</strong> rather than System
+                Admins, via <code>POST /api/v1/channel-request/approve</code>,
+                <code>.../deny</code>, and <code>.../deny-submit</code>. Team Admins are
+                already trusted to link channels in non-restricted deployments, so this
+                preserves the existing trust boundary.
+            </li>
+            <li>
+                <code>teardown-channel</code> remains available to Channel Admins in request
+                mode.
+            </li>
+        </ol>
+        <p>
+            Both request-mode flows are <strong>opt-in</strong> and require
+            <code>RestrictToSystemAdmins</code> to be on. With
+            <code>RestrictToSystemAdmins</code> off, the legacy direct-link flow applies and
+            the request endpoints are inert.
+        </p>
+
         <h3>Team Name Rewriting</h3>
         <p>
             For environments where the remote and local team names differ (common in multi-domain
@@ -1299,62 +1370,68 @@ Topology 3: Guard Network (Classified)
 
         <h3>The Loop Problem</h3>
         <p>
-            Relay loops are the most critical failure mode for any message relay system. Without
-            prevention, the following cycle occurs:
+            Relay loops are the most critical failure mode for any message relay system.
+            Without prevention, content received from a remote could be re-emitted back to
+            that remote (or to other remotes), multiplying messages indefinitely.
         </p>
-        <ol>
-            <li>Server A user posts a message</li>
-            <li>Cross Guard on Server A relays the message to Server B via the transport layer</li>
-            <li>Cross Guard on Server B creates the post locally via the Plugin API</li>
-            <li>This triggers Server B's <code>MessageHasBeenPosted</code> hook</li>
-            <li>Without prevention: Server B would relay the message back to Server A via the transport layer</li>
-            <li>Server A receives it, creates it locally, triggering its own hook</li>
-            <li>Infinite loop: messages multiply exponentially</li>
-        </ol>
+
+        <h3>Mechanism 1: Framework Cursors and RemoteId</h3>
         <p>
-            Cross Guard uses four independent mechanisms to prevent this, following a defense-in-depth
-            approach where no single mechanism is solely responsible.
+            Mattermost's shared-channels framework is the primary loop-prevention mechanism.
+            Every <code>User</code> upserted from an inbound <code>SyncMsg</code> is stamped
+            with a non-empty <code>RemoteId</code> identifying the source remote, and every
+            Post / Reaction / Acknowledgement is similarly attributed. The framework's sync
+            cursors key on <code>(RemoteId, source content ID)</code> rather than on local
+            timestamps. Content marked as having come from a remote is not eligible to be
+            re-synced out by the framework, because the framework recognises it as already
+            present at the source. This is the framework-intrinsic guarantee Cross Guard
+            inherits by virtue of running on top of the shared-channels API.
         </p>
 
-        <h3>Mechanism 1: crossguard_relayed Post Property (Primary)</h3>
-        <ul>
-            <li>Every inbound post is created with <code>post.AddProp("crossguard_relayed", true)</code></li>
-            <li>Every outbound hook checks <code>post.GetProp("crossguard_relayed") != nil</code> and skips if present</li>
-            <li>This defense applies to post create and update hooks. Delete hooks use a separate deleting flag mechanism, and reaction hooks use sync-user position filtering.</li>
-        </ul>
+        <h3>Mechanism 2: Per-Remote Outbound Suppression</h3>
+        <p>
+            On top of the framework's intrinsic guarantee, the plugin's outbound hooks resolve
+            the destination connection via <code>connNameForRemote(rc.RemoteId)</code> in
+            <code>server/hooks.go</code>. If the framework asks the plugin to sync content
+            <em>to</em> the same remote it came <em>from</em>, the plugin returns silently
+            instead of publishing. A sync envelope that arrived on connection A never re-leaves
+            on connection A, even if the framework cursor logic ever produced a candidate
+            outbound event for it.
+        </p>
 
-        <h3>Mechanism 2: Bot User Filtering (Secondary)</h3>
-        <ul>
-            <li>All outbound hooks check <code>post.UserId == p.botUserID</code> and skip bot posts</li>
-            <li>Prevents bot announcements (init/teardown messages, interactive prompts) from being relayed</li>
-            <li>Also provides loop protection if a relayed post were somehow attributed to the bot user</li>
-        </ul>
+        <h3>Mechanism 3: Connection Linkage Validation</h3>
+        <p>
+            Envelopes are only published to outbound connections explicitly linked to the
+            originating team. Inbound envelopes are only processed if the target team and
+            channel are linked to the receiving inbound connection. Both directions enforce
+            opt-in: an unlinked context posts an Accept / Block prompt rather than applying
+            content, and a misconfigured connection cannot leak content to a team that has not
+            consented to relay.
+        </p>
 
-        <h3>Mechanism 3: Sync User Reaction Filtering (Tertiary)</h3>
-        <ul>
-            <li>Reaction hooks check <code>user.Position == "crossguard-sync"</code> and skip sync user reactions</li>
-            <li>When an inbound reaction is added by a sync user, the local reaction hook fires but is filtered out</li>
-            <li>Prevents reaction loops that would otherwise occur with sync users</li>
-        </ul>
-
-        <h3>Mechanism 4: Delete Flag (Delete-Specific)</h3>
-        <ul>
-            <li>Problem: inbound delete calls <code>DeletePost()</code>, which fires the <code>MessageHasBeenDeleted</code> hook</li>
-            <li>Solution: before deleting, set <code>SetDeletingFlag(localPostID)</code> in the KV store</li>
-            <li>The outbound delete hook checks <code>IsDeletingFlagSet(post.Id)</code> and skips if set</li>
-            <li>Flag is cleared after the delete completes</li>
-            <li>Prevents infinite delete-relay loops</li>
-        </ul>
+        <h3>Mechanism 4: Inbound Deduplication (Sequencer)</h3>
+        <p>
+            The inbound sequencer (<code>server/inbound_sequencer.go</code>) keys on
+            <code>(Epoch, ConnName, ChannelId, Sequence)</code> and rejects any envelope it
+            has already admitted. Combined with the single-active-receiver KV TTL lease
+            (<code>server/inbound_election.go</code>), this catches duplicates that a
+            misbehaving or at-least-once provider redelivers, replays caused by a sender
+            restart, and any handoff window during leader change in a clustered deployment.
+            Lost ranges are audited via the <code>InboundSeq*</code> numeric error codes so
+            operators can detect compliance-relevant gaps without losing the surviving
+            content.
+        </p>
 
         <h3>Defense in Depth</h3>
         <div class="alert alert-info">
-            <p class="alert-title">Multiple independent mechanisms</p>
+            <p class="alert-title">Layered, independent mechanisms</p>
             <p>
-                These four mechanisms operate independently. Even if the <code>crossguard_relayed</code>
-                property were somehow lost (e.g., a Mattermost bug stripping props), bot user
-                filtering would catch bot-posted messages. Even if a race condition occurred in
-                the delete flag, the post property check would catch the re-relay attempt. No
-                single failure mode can cause a loop.
+                The four mechanisms operate independently. The framework guarantees no
+                content-marked-as-remote ever re-sources to the framework's own outbound
+                queue. The plugin's per-remote suppression catches anything the framework's
+                guarantee might miss. Connection linkage validation enforces explicit opt-in.
+                The sequencer absorbs duplicate delivery from the transport. No single failure
+                mode can cause a loop without simultaneously defeating all four layers.
             </p>
         </div>
 
@@ -1468,13 +1545,67 @@ Topology 3: Guard Network (Classified)
         </table>
 
         <h3 id="azure-transport-security">Azure Transport Security</h3>
+        <p>
+            All three Azure providers support two authentication modes, selected per
+            connection via <code>auth_mode</code>:
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Provider</th>
+                    <th>Legacy mode (<code>auth_mode</code> default)</th>
+                    <th>Service Principal mode (<code>auth_mode: "service-principal"</code>)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Azure Queue Storage</td>
+                    <td><code>shared-key</code>: <code>account_name</code> + <code>account_key</code></td>
+                    <td><code>tenant_id</code> + <code>client_id</code> + <code>client_secret</code>; <code>account_key</code> must be empty</td>
+                </tr>
+                <tr>
+                    <td>Azure Blob Storage</td>
+                    <td><code>shared-key</code>: <code>account_name</code> + <code>account_key</code></td>
+                    <td><code>tenant_id</code> + <code>client_id</code> + <code>client_secret</code>; <code>account_key</code> must be empty</td>
+                </tr>
+                <tr>
+                    <td>Azure Service Bus</td>
+                    <td><code>connection-string</code>: SAS connection string (<code>Endpoint=sb://...;SharedAccessKeyName=...;SharedAccessKey=...</code>)</td>
+                    <td><code>tenant_id</code> + <code>client_id</code> + <code>client_secret</code> + <code>service_bus_namespace</code>; <code>connection_string</code> must be empty</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            <strong>Why Service Principal mode matters for CDS.</strong> Shared keys and SAS
+            connection strings cannot be scoped via Azure RBAC and cannot be rotated through
+            Azure AD; rotation requires regenerating the storage key (which rotates every
+            consumer) or revoking the SAS rule on the Service Bus namespace. Service Principal
+            mode authenticates through the Azure AD client-credentials flow and accepts a
+            <code>azure_cloud</code> setting (<code>public</code>, <code>usgov</code>,
+            <code>china</code>) so the Azure AD authority matches the deployment cloud. The
+            credential can be scoped via Azure RBAC role assignments on the specific resource
+            (<em>Storage Queue Data Contributor</em> on the queue, <em>Storage Blob Data
+            Contributor</em> on the container, <em>Azure Service Bus Data Sender/Receiver</em>
+            on the queue) and rotated in Azure AD without touching plugin config. Service
+            Principal mode is the recommended posture for Federal and any production
+            deployment.
+        </p>
+        <p>
+            <strong>Auto-provisioning policy.</strong> In legacy / shared-key mode the Azure
+            Queue and Azure Blob providers auto-create their queue and container on startup.
+            In Service Principal mode auto-provisioning is <strong>skipped</strong>:
+            operators must pre-provision the queue (and, for file transfer, the container) so
+            the Service Principal can run with data-plane-only RBAC. The Service Bus provider
+            never auto-creates queues in either mode; operators must pre-create the queue
+            with the desired <code>LockDuration</code> and <code>MaxDeliveryCount</code>.
+        </p>
         <ul>
-            <li><strong>Storage Account Credentials (Azure Queue, Azure Blob):</strong> The Azure Storage connection string (or account name plus shared key) contains the storage account credentials and must be treated as a secret. See <a href="#secret-storage">Secret Storage and Env-Var Injection</a> below for how to keep it out of <code>config.json</code>.</li>
-            <li><strong>Service Bus SAS Connection String (Azure Service Bus):</strong> The Service Bus namespace is authenticated with a SAS connection string of the form <code>Endpoint=sb://&lt;namespace&gt;.servicebus.windows.net/;SharedAccessKeyName=&lt;rule&gt;;SharedAccessKey=&lt;key&gt;</code>. The plugin sanitizes <code>SharedAccessKey=</code>, <code>SharedAccessSignature=</code>, and <code>sig=</code> query parameters out of any error messages it logs (<code>sanitizeServiceBusError()</code>) so SAS material does not leak into operator-visible logs. See <a href="#secret-storage">Secret Storage and Env-Var Injection</a> below for how to keep it out of <code>config.json</code>.</li>
-            <li><strong>Independent Sidecar Credentials:</strong> When the Azure Service Bus provider has <code>file_transfer_enabled</code>, its blob sidecar takes its own storage account credentials separate from the Service Bus namespace credentials. The two stores can live in different Azure subscriptions and have independent access policies. Audit and rotate the two credentials independently.</li>
-            <li><strong>Network Security:</strong> Azure Storage and Azure Service Bus both support Virtual Network service endpoints and private endpoints to restrict access to specific networks.</li>
-            <li><strong>Encryption in Transit and at the Provider:</strong> All Azure Storage traffic uses TLS, and Azure Service Bus uses AMQP over TLS. Data at rest is encrypted by Azure Storage Service Encryption (SSE) and by Service Bus's managed encryption at rest. (See the next subsection for credential storage on the Mattermost side, which is a separate concern.)</li>
-            <li><strong>Access Control:</strong> Use Azure RBAC, shared access signatures (SAS), or scoped Service Bus SAS rules for fine-grained access control in production. Prefer scoped Service Bus SAS rules over the namespace-wide <code>RootManageSharedAccessKey</code> so an exposed credential grants only the minimum needed rights.</li>
+            <li><strong>Credential handling.</strong> Shared keys, SAS connection strings, and Service Principal <code>client_secret</code> values are treated as secrets. The plugin sanitizes <code>SharedAccessKey=</code>, <code>SharedAccessSignature=</code>, and <code>sig=</code> material out of any Service Bus error messages it logs (<code>sanitizeServiceBusError()</code>). See <a href="#secret-storage">Secret Storage and Env-Var Injection</a> below for how to keep credentials out of <code>config.json</code>.</li>
+            <li><strong>Independent sidecar credentials (Service Bus).</strong> When the Azure Service Bus provider has <code>file_transfer_enabled</code> and the parent uses connection-string mode, the blob sidecar takes its own <code>blob_account_name</code> / <code>blob_account_key</code> credentials separate from the Service Bus namespace. The two stores can live in different Azure subscriptions and have independent access policies. In Service Principal mode the sidecar inherits the parent Service Principal credential (mixed-mode sidecars are not supported), so the SP must hold blob RBAC on the sidecar container in addition to the Service Bus queue.</li>
+            <li><strong>Network security.</strong> Azure Storage and Azure Service Bus both support Virtual Network service endpoints and private endpoints to restrict access to specific networks. Service Principal mode is compatible with both.</li>
+            <li><strong>Encryption in transit and at the provider.</strong> All Azure Storage traffic uses TLS, and Azure Service Bus uses AMQP over TLS. Data at rest is encrypted by Azure Storage Service Encryption (SSE) and by Service Bus's managed encryption at rest. (See the next subsection for credential storage on the Mattermost side, which is a separate concern.)</li>
+            <li><strong>Access control posture.</strong> For shared-key and connection-string modes, prefer scoped Service Bus SAS rules over the namespace-wide <code>RootManageSharedAccessKey</code> so an exposed credential grants only the minimum needed rights. For Service Principal mode, scope role assignments to the specific resource (queue, container) rather than the storage account or namespace.</li>
+            <li><strong>SP credential audit.</strong> On each successful Service Principal credential construction, the plugin emits an INFO-level audit log (error code <code>12010</code>, <code>AzureSPAuditConstructed</code>) recording the tenant ID, client ID, Azure cloud, and the first 12 hex characters of SHA-256 of the secret. This gives operators an audit trail for SP rotations without ever logging the secret value.</li>
         </ul>
 
         <h3 id="secret-storage">Secret Storage and Env-Var Injection</h3>
@@ -1706,45 +1837,62 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 <tr>
                     <td><code>crossguard-teaminit-{teamID}</code></td>
                     <td><code>[]TeamConnection</code> (JSON array)</td>
-                    <td>Which connections are linked to this team</td>
+                    <td>Which connections are linked to this team.</td>
                 </tr>
                 <tr>
                     <td><code>crossguard-channelinit-{channelID}</code></td>
                     <td><code>[]TeamConnection</code> (JSON array)</td>
-                    <td>Which connections are linked to this channel</td>
+                    <td>Which connections are linked to this channel.</td>
                 </tr>
                 <tr>
                     <td><code>crossguard-initialized-teams</code></td>
                     <td><code>[]string</code> (team IDs)</td>
-                    <td>Global list of initialized teams for status reporting</td>
-                </tr>
-                <tr>
-                    <td><code>pm-{connName}-{remotePostID}</code></td>
-                    <td><code>string</code> (local post ID)</td>
-                    <td>Maps remote post IDs to local post IDs for edits/deletes</td>
-                </tr>
-                <tr>
-                    <td><code>crossguard-deleting-{localPostID}</code></td>
-                    <td><code>true</code></td>
-                    <td>Flag set during inbound delete to prevent loop</td>
+                    <td>Global list of initialized teams for status reporting.</td>
                 </tr>
                 <tr>
                     <td><code>crossguard-connprompt-{teamID}-{connName}</code></td>
                     <td><code>ConnectionPrompt</code> (JSON)</td>
-                    <td>Team-level inbound acceptance prompt state</td>
+                    <td>Team-level inbound acceptance prompt state (pending or blocked).</td>
                 </tr>
                 <tr>
                     <td><code>crossguard-chanprompt-{channelID}-{connName}</code></td>
                     <td><code>ConnectionPrompt</code> (JSON)</td>
-                    <td>Channel-level inbound acceptance prompt state</td>
+                    <td>Channel-level inbound acceptance prompt state.</td>
                 </tr>
                 <tr>
-                    <td><code>crossguard-rwi-{connName}::{remoteTeamName}</code></td>
+                    <td><code>crossguard-connreq-{teamID}-{connName}</code></td>
+                    <td><code>ConnectionRequest</code> (JSON)</td>
+                    <td>Pending team-admin link request awaiting System Admin approval (request-mode flow).</td>
+                </tr>
+                <tr>
+                    <td><code>crossguard-chanconnreq-{channelID}-{connName}</code></td>
+                    <td><code>ChannelConnectionRequest</code> (JSON)</td>
+                    <td>Pending channel-admin link request awaiting Team Admin approval (request-mode flow).</td>
+                </tr>
+                <tr>
+                    <td><code>crossguard-rwi-{connName}-{remoteTeamName}</code></td>
                     <td><code>string</code> (local team ID)</td>
-                    <td>Team name rewrite reverse index</td>
+                    <td>Team-name rewrite reverse index.</td>
+                </tr>
+                <tr>
+                    <td><code>crossguard-actinb-{connName}</code></td>
+                    <td>Lease record (node ID + expiry)</td>
+                    <td>Single-active-receiver KV TTL lease (45 s TTL, 15 s renewal). Holder is the cluster node currently subscribed for this inbound connection.</td>
+                </tr>
+                <tr>
+                    <td><code>crossguard-seqcur-{connName}-{channelID}</code></td>
+                    <td><code>SeqCursor</code> (Epoch + last admitted Sequence)</td>
+                    <td>Inbound sequencer checkpoint, persisted every 5 s so leadership handoff resumes from the previous holder's position.</td>
                 </tr>
             </tbody>
         </table>
+        <p>
+            There is no post-ID mapping store and no per-post deleting-flag store; both
+            mechanisms belonged to the pre-shared-channels lifecycle and were removed when the
+            framework took ownership of the post-state lifecycle. The framework's own state
+            (sync cursors, remote-user records) lives in Mattermost's main database, outside
+            the plugin KV namespace.
+        </p>
 
         <h3>Caching Layer</h3>
         <p>
@@ -1803,40 +1951,76 @@ Server B acts as a relay point. Each hop is independent.</pre>
 
         <!-- Section 14: Concurrency Model -->
         <h2>14. Concurrency Model</h2>
-
-        <h3>Relay Semaphore</h3>
         <p>
-            The relay semaphore is a buffered channel of capacity 256, shared by both inbound
-            and outbound relay operations. It provides backpressure to prevent unbounded goroutine
-            spawning under high message volume:
+            Cross Guard's concurrency story is deliberately small: the framework owns
+            outbound dispatch concurrency, the single-active-receiver election owns inbound
+            concurrency across the cluster, and the inbound sequencer owns admission ordering.
+            No plugin-level relay semaphore exists; there is no buffered channel of relay
+            slots and no drop-when-full policy.
+        </p>
+
+        <h3>Single-Active Inbound Receiver</h3>
+        <p>
+            For each inbound connection, exactly one cluster node holds the active
+            subscription at any given moment. An elector goroutine
+            (<code>server/inbound_election.go</code>) per inbound connection takes and renews
+            a KV TTL lease (<code>crossguard-actinb-{connName}</code>) with a 45-second TTL
+            and a 15-second renewal interval (a 3x safety ratio). Only the lease-holder calls
+            <code>QueueProvider.Subscribe</code> and <code>WatchFiles</code>. Other nodes idle,
+            observe the lease's <code>ExpiresAt</code> field, and race to take it when it
+            ages out. The lease is released cleanly on graceful shutdown and ages out on
+            crash. This design makes duplicate inbound processing in a multi-node cluster
+            structurally impossible during steady state; the sequencer described next handles
+            the narrow handoff window.
+        </p>
+
+        <h3>Inbound Sequencer</h3>
+        <p>
+            <code>inboundSequencer.Admit</code> in <code>server/inbound_sequencer.go</code> is
+            the single admission gate for inbound envelopes. It keys on
+            <code>(Epoch, ConnName, ChannelId, Sequence)</code> and enforces three
+            invariants:
         </p>
         <ul>
-            <li>Non-blocking acquisition: if the semaphore is full, the message is dropped with a warning log rather than blocking</li>
-            <li>Each relay operation: acquire slot, spawn goroutine, process message, release slot</li>
-            <li>The drop-when-full policy ensures the Mattermost server process is never starved of resources by relay operations</li>
+            <li>
+                <strong>Deduplication.</strong> Any envelope at or below the per-channel
+                cursor is dropped. Absorbs at-least-once redeliveries and any envelope a
+                previous lease holder may have processed before handoff.
+            </li>
+            <li>
+                <strong>Bounded reorder.</strong> Envelopes ahead of the cursor sit in a
+                small in-memory buffer; gap-fill envelopes promote the cursor and release
+                buffered successors in order.
+            </li>
+            <li>
+                <strong>Audited gap-deadline.</strong> A 1-second ticker drains the sequencer
+                of envelopes whose missing predecessors never arrived. Lost ranges are
+                audited via the <code>InboundSeq*</code> numeric error codes.
+            </li>
         </ul>
-
-        <h3>File Transfer Semaphore</h3>
         <p>
-            A separate file transfer semaphore (buffered channel of capacity 32) controls
-            concurrent file upload and download operations. This prevents file transfers from
-            consuming excessive bandwidth or memory:
+            A new <code>Epoch</code> resets the per-channel cursor (the sender process
+            generation has changed). A 5-second checkpoint ticker persists cursors to
+            <code>crossguard-seqcur-{connName}-{channelID}</code> so leadership handoff
+            resumes from the previous holder's position rather than from envelope zero.
         </p>
-        <ul>
-            <li>Outbound file uploads use non-blocking acquisition: if all 32 slots are in use, the file upload is skipped for that message</li>
-            <li>Inbound file downloads use blocking acquisition: the goroutine waits until a slot becomes available before downloading</li>
-            <li>This asymmetry ensures inbound files are reliably downloaded while outbound uploads do not block message relay</li>
-        </ul>
 
-        <h3>Goroutine Lifecycle</h3>
-        <ul>
-            <li>All relay goroutines are tracked via a <code>sync.WaitGroup</code></li>
-            <li>Context cancellation signals shutdown to all goroutines</li>
-            <li>OnDeactivate sequence: cancel context, close inbound subscriptions, wait for all goroutines, close outbound connections</li>
-            <li>This ensures no orphaned goroutines remain after plugin deactivation</li>
-        </ul>
+        <h3>Outbound Concurrency</h3>
+        <p>
+            On the outbound side, the shared-channels framework drives dispatch concurrency.
+            The framework invokes <code>OnSharedChannelsSyncMsg</code> serially per
+            <code>(remote, channel)</code> and waits for the return before advancing the
+            framework cursor. The plugin's hook is therefore reentrant by hook, not gated by
+            a plugin-side semaphore. Envelope marshalling, Epoch / Sequence stamping, and the
+            <code>QueueProvider.Publish</code> call all complete inside the hook;
+            framework-level retry on hook-return-error is the only retry layer.
+        </p>
 
-        <h3>Connection Pool Protection</h3>
+        <h3>Connection-Pool Protection</h3>
+        <p>
+            The outbound and inbound connection maps and the live plugin configuration each
+            sit behind a <code>sync.RWMutex</code>:
+        </p>
         <table>
             <thead>
                 <tr>
@@ -1850,14 +2034,14 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 <tr>
                     <td>Outbound connections</td>
                     <td><code>sync.RWMutex</code></td>
-                    <td>Publishing messages</td>
+                    <td>Publishing envelopes</td>
                     <td>Reconnection on config change</td>
                 </tr>
                 <tr>
                     <td>Inbound connections</td>
                     <td><code>sync.RWMutex</code></td>
                     <td>Subscription access</td>
-                    <td>Reconnection on config change</td>
+                    <td>Reconnection on config change, lease handoff</td>
                 </tr>
                 <tr>
                     <td>Configuration</td>
@@ -1868,82 +2052,64 @@ Server B acts as a relay point. Each hop is independent.</pre>
             </tbody>
         </table>
 
-        <h3>NATS Client Concurrency</h3>
-        <p>
-            The NATS Go client is goroutine-safe for publish operations. Subscription callbacks
-            run in separate NATS-managed goroutines. Cross Guard wraps these callbacks with
-            semaphore control to limit the total number of concurrent relay operations across
-            both directions.
-        </p>
+        <h3>Goroutine Lifecycle</h3>
+        <ul>
+            <li>Background goroutines (elector renewers, checkpoint ticker, gap-deadline ticker, transport readers) are tracked via a <code>sync.WaitGroup</code>.</li>
+            <li>Context cancellation signals shutdown to all goroutines.</li>
+            <li><code>OnDeactivate</code> sequence: cancel context, release inbound leases, close transport subscriptions, wait for the WaitGroup, close outbound providers. The framework hooks are not reentrant during shutdown; the framework will not call into a deactivating plugin.</li>
+        </ul>
 
         <!-- Section 15: Operational Monitoring and Troubleshooting -->
         <h2>15. Operational Monitoring and Troubleshooting</h2>
 
-        <h3>Key Log Messages</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Level</th>
-                    <th>Message</th>
-                    <th>Meaning</th>
-                    <th>Action</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td><span class="permission-tag permission-teamadmin">WARN</span></td>
-                    <td>"Relay semaphore full, dropping inbound message"</td>
-                    <td>Message volume exceeds processing capacity</td>
-                    <td>Check for message flood or consider scaling</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-teamadmin">WARN</span></td>
-                    <td>(no log message, connection silently skipped)</td>
-                    <td>Outbound connection is unhealthy (health check failed)</td>
-                    <td>Check transport server health and network connectivity. The connection will be rechecked after 30 seconds.</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-teamadmin">WARN</span></td>
-                    <td>"Inbound update: no post mapping found"</td>
-                    <td>Edit/delete arrived for a post that was not previously relayed</td>
-                    <td>Expected if channel was linked after the original post</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-teamadmin">WARN</span></td>
-                    <td>"Unknown inbound message type"</td>
-                    <td>Unexpected envelope type received</td>
-                    <td>Investigate possible message injection or version mismatch</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-sysadmin">ERROR</span></td>
-                    <td>"Failed to publish to outbound after retries"</td>
-                    <td>Transport unreachable after retry attempts</td>
-                    <td>Check transport server, network, TLS certificates</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-sysadmin">ERROR</span></td>
-                    <td>"Inbound post: create failed"</td>
-                    <td>Mattermost API rejected the post creation</td>
-                    <td>Check post content, channel permissions, server health</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-channeladmin">INFO</span></td>
-                    <td>"Inbound NATS reconnected"</td>
-                    <td>NATS connection recovered after interruption (NATS provider only; Azure uses polling, so there are no reconnect events)</td>
-                    <td>Normal recovery, verify message flow resumed</td>
-                </tr>
-                <tr>
-                    <td><span class="permission-tag permission-channeladmin">INFO</span></td>
-                    <td>"Outbound NATS reconnected"</td>
-                    <td>NATS connection recovered after interruption (NATS provider only; Azure uses polling, so there are no reconnect events)</td>
-                    <td>Normal recovery, verify message flow resumed</td>
-                </tr>
-            </tbody>
-        </table>
+        <h3>Numeric Error Codes</h3>
+        <p>
+            Every operator-facing log call (LogInfo, LogWarn, LogError) in non-test code
+            carries a unique numeric <code>error_code</code> as its first key-value pair,
+            sourced from <code>server/errcode/codes.go</code>. The integer is the stable
+            contract for log grep across plugin versions; the identifier (constant name) may
+            be renamed but the number never changes once assigned. Codes are allocated by
+            source file in 1000-wide blocks: <code>hooks.go</code> uses 10000-10999,
+            <code>inbound.go</code> uses 15000-15999, the inbound election uses 15200-range,
+            the inbound sequencer uses 15300-range, and so on. The complete list with
+            descriptions and troubleshooting steps lives in
+            <a href="error-codes.html">the Error Codes page</a>, regenerated from
+            <code>server/errcode/codes.go</code> by <code>make generate-error-codes</code>.
+        </p>
+        <p>
+            Operator-relevant code families include:
+        </p>
+        <ul>
+            <li>
+                <strong><code>OutboundSyncMsg*</code> / <code>OutboundAttachment*</code> /
+                <code>OutboundProfileImage*</code> / <code>Ping*</code> (10100-range):</strong>
+                outbound hook events: provider mismatches, channel lookup failures, publish
+                failures, file fetch failures, ping unhealthy.
+            </li>
+            <li>
+                <strong><code>InboundActive*</code> (15200-range):</strong> single-active
+                election events: lease acquired / renewed / released, leader handoff
+                detected, lease lost.
+            </li>
+            <li>
+                <strong><code>InboundSeq*</code> (15300-range):</strong> sequencer events:
+                gaps closed, gaps audited as lost, epoch reset, cursor checkpoint persisted.
+                These are the compliance-relevant audit codes for envelope ordering.
+            </li>
+            <li>
+                <strong><code>AzureSPAuditConstructed</code> (12010):</strong> Azure Service
+                Principal credential construction audit (logs tenant ID, client ID, Azure
+                cloud, and a short hash of the secret).
+            </li>
+            <li>
+                <strong><code>ServiceBusSPCredentialFailed</code> (26007):</strong> Service
+                Bus SP credential construction failure (sanitized error).
+            </li>
+        </ul>
 
         <h3>Status Commands</h3>
         <ul>
-            <li><code>/crossguard status</code>: Shows team and channel linkage state. System Admins see a global overview across all teams and connections. Team members see their team/channel status.</li>
+            <li><code>/crossguard status</code>: shows team and channel linkage state. System Admins see a global overview across all teams and connections. Team members see their team / channel status.</li>
         </ul>
 
         <h3>REST API Status Endpoints</h3>
@@ -1959,37 +2125,45 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 <tr>
                     <td><code>GET /api/v1/status</code></td>
                     <td>System Admin</td>
-                    <td>Global status with all teams, connections, and warnings</td>
+                    <td>Global status: all teams, connections, lease holders, and any orphaned KV state.</td>
                 </tr>
                 <tr>
                     <td><code>GET /api/v1/teams/{id}/status</code></td>
                     <td>Team member</td>
-                    <td>Team-specific status including orphaned connections</td>
+                    <td>Team-specific status, including pending or blocked prompts.</td>
                 </tr>
                 <tr>
                     <td><code>GET /api/v1/channels/{id}/status</code></td>
                     <td>Channel member</td>
-                    <td>Channel-specific status</td>
+                    <td>Channel-specific status.</td>
+                </tr>
+                <tr>
+                    <td><code>GET /api/v1/channels/connections?ids=...</code></td>
+                    <td>Channel member</td>
+                    <td>Bulk channel-connection lookup, used by the webapp sidebar.</td>
                 </tr>
             </tbody>
         </table>
 
         <h3>Connection Testing</h3>
         <p>
-            <code>POST /api/v1/test-connection</code> (System Admin only) tests transport connectivity
-            without affecting running connections:
+            <code>POST /api/v1/test-connection</code> (System Admin only) tests transport
+            connectivity without affecting running connections. The handler dispatches by
+            provider: NATS performs a connect-publish-flush cycle, Azure Queue performs a
+            queue probe, Azure Blob performs a container probe, and Azure Service Bus
+            performs an AMQP connect. Each test envelope carries the current <code>Epoch</code>
+            and a generated <code>TestID</code> the receiver echoes to audit logs.
         </p>
-        <ul>
-            <li>Outbound test: publishes a test message and confirms the flush succeeds</li>
-            <li>Inbound test: subscribes to the subject and confirms the subscription is active</li>
-        </ul>
 
-        <h3>Sync User Audit</h3>
+        <h3>Remote-User Audit</h3>
         <p>
-            To audit synthetic relay users, query Mattermost users with
-            <code>Position="crossguard-sync"</code>. Each sync user's <code>LastName</code>
-            shows the connection name (e.g., <code>(via relay-from-a)</code>), and
-            <code>Props.CrossguardRemoteUsername</code> shows the original remote username.
+            Users synced from a remote can be enumerated by querying for users with a
+            non-empty <code>RemoteId</code>. Each synced user carries
+            <code>UserProps.RemoteUsername</code> with the source-side username and
+            (optionally) <code>UserProps.OriginalRemoteId</code> indicating the upstream
+            remote when content has passed through intermediate relays. There is no
+            <code>Position</code>-based audit (the legacy <code>crossguard-sync</code>
+            convention was removed).
         </p>
 
         <!-- Section 16: Comparison with Alternative Approaches -->
@@ -2049,7 +2223,7 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 </tr>
                 <tr>
                     <td><strong>Thread support</strong></td>
-                    <td>Yes (root_id mapping)</td>
+                    <td>Yes (framework RootId resolution)</td>
                     <td>N/A</td>
                     <td>Possible</td>
                     <td>No</td>
@@ -2065,7 +2239,7 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 </tr>
                 <tr>
                     <td><strong>Transport security</strong></td>
-                    <td>TLS 1.2+, mTLS, ACLs (NATS) / TLS always, RBAC (Azure)</td>
+                    <td>TLS 1.2+, mTLS, ACLs (NATS); TLS always, RBAC or shared key (Azure)</td>
                     <td>DB TLS</td>
                     <td>HTTPS</td>
                     <td>SMTP TLS</td>
@@ -2073,7 +2247,7 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 </tr>
                 <tr>
                     <td><strong>Message authentication</strong></td>
-                    <td>NATS auth / Azure connection string</td>
+                    <td>NATS token / credentials / mTLS; Azure shared key, SAS, or Service Principal</td>
                     <td>DB auth</td>
                     <td>API auth</td>
                     <td>DKIM/SPF</td>
@@ -2097,7 +2271,7 @@ Server B acts as a relay point. Each hop is independent.</pre>
                 </tr>
                 <tr>
                     <td><strong>Audit trail</strong></td>
-                    <td>Plugin logs + post props</td>
+                    <td>Numeric error codes in plugin logs (stable grep contract); framework-side remote-user attribution</td>
                     <td>DB audit log</td>
                     <td>API logs</td>
                     <td>Mail logs</td>
@@ -2122,60 +2296,89 @@ Server B acts as a relay point. Each hop is independent.</pre>
             <li>
                 <strong>Enable <code>RestrictToSystemAdmins</code></strong>: Lock all connection
                 management commands to System Admins. Prevents Team Admins and Channel Admins
-                from enabling relay without organizational approval.
+                from enabling relay without organizational approval. If you need to delegate
+                linking to non-sysadmins without granting them unsupervised authority, enable
+                <code>AllowTeamAdminRequests</code> and / or <code>AllowChannelAdminRequests</code>
+                so the corresponding admin tier can submit link requests that a higher tier
+                approves via interactive DM (see Section 9, Request-Mode Workflows).
             </li>
             <li>
-                <strong>Disable <code>UsernameLookup</code></strong>: Force all inbound messages
-                through synthetic sync users. Eliminates impersonation risk
-                (<a href="threatmodel.html#t-spoof-1">T-SPOOF-1</a>).
+                <strong>Prefer Azure Service Principal authentication</strong>: For Azure Queue,
+                Azure Blob, and Azure Service Bus, configure <code>auth_mode: "service-principal"</code>
+                with <code>tenant_id</code>, <code>client_id</code>, and <code>client_secret</code>
+                (and <code>service_bus_namespace</code> for Service Bus). Scope each Service
+                Principal to data-plane-only RBAC on the specific queue, container, or
+                namespace; rotate the secret in Azure AD without touching plugin config. Pre-
+                provision queues and containers (auto-create is skipped in SP mode).
             </li>
             <li>
-                <strong>Enable TLS with mutual certificate authentication (NATS)</strong>: For NATS
-                connections, configure <code>tls_enabled</code>, <code>client_cert</code>,
-                <code>client_key</code>, and <code>ca_cert</code>. Ensures both the plugin and
-                the NATS server verify each other's identity. For Azure connections, TLS is
-                always enabled by the Azure endpoint.
+                <strong>Inject connections JSON via environment variables</strong>: Source the
+                <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> and
+                <code>...INBOUNDCONNECTIONS</code> variables from a secret store (Kubernetes
+                Secret, systemd <code>LoadCredential</code>, Vault, Key Vault). Keeps shared
+                keys, SAS connection strings, NATS tokens, and SP <code>client_secret</code>
+                values out of <code>config.json</code> on disk and out of the Mattermost
+                configuration database (see Section 11, Secret Storage and Env-Var Injection).
+            </li>
+            <li>
+                <strong>Enable TLS with mutual certificate authentication (NATS)</strong>: For
+                NATS connections, configure <code>tls_enabled</code>, <code>client_cert</code>,
+                <code>client_key</code>, and <code>ca_cert</code>. For Azure connections, TLS
+                is always enabled by the Azure endpoint.
             </li>
             <li>
                 <strong>Deploy a dedicated transport endpoint</strong>: For NATS, do not share
                 the NATS server with other applications. For Azure, use a dedicated Storage
-                account for Cross Guard traffic. Reduces the risk of message content exposure
+                account and a dedicated Service Bus namespace for Cross Guard traffic. Reduces
+                the risk of message content exposure
                 (<a href="threatmodel.html#t-info-1">T-INFO-1</a>).
             </li>
             <li>
                 <strong>Configure transport-level access control</strong>: For NATS, restrict
-                publish and subscribe permissions per subject per client via NATS ACLs. For Azure,
-                use Azure RBAC or SAS tokens to restrict access to the storage account. Ensure
-                each plugin instance can only access the resources it is configured for.
+                publish and subscribe permissions per subject per client via NATS ACLs. For
+                Azure, use Azure RBAC scoped to the queue / container / namespace. Avoid the
+                namespace-wide <code>RootManageSharedAccessKey</code> Service Bus rule in
+                production.
             </li>
             <li>
-                <strong>Use separate subjects per relay direction (NATS)</strong>: For NATS,
-                configure different subjects for each direction (e.g., <code>crossguard.a-to-b</code>
-                and <code>crossguard.b-to-a</code>). Prevents transport-level echo. For Azure,
-                use separate queues or storage accounts per direction.
+                <strong>Use separate subjects, queues, or namespaces per relay direction</strong>:
+                Configure independent transport resources for each direction (e.g. NATS
+                <code>crossguard.a-to-b</code> versus <code>crossguard.b-to-a</code>; separate
+                Azure queues or Service Bus namespaces). Prevents transport-level echo and
+                isolates the blast radius of a credential compromise.
             </li>
             <li>
                 <strong>Place the transport endpoint in a controlled network segment</strong>:
                 For NATS, deploy the server in a DMZ, enclave, or guard network between the two
-                domains. Firewall rules should allow only NATS traffic (port 4222) between
-                segments. For Azure, use private endpoints or VNet service endpoints to restrict
-                storage account access to authorized networks.
+                domains. For Azure, use private endpoints or VNet service endpoints to restrict
+                storage account and namespace access to authorized networks.
             </li>
             <li>
-                <strong>Monitor plugin logs</strong>: Watch for anomaly indicators: "Relay
-                semaphore full" (message flood), "Unknown inbound message type" (possible
-                injection), failed resolve warnings (misconfiguration or probing).
+                <strong>Monitor the operator-facing audit codes</strong>: Watch for
+                <code>InboundActive*</code> (15200-range; election anomalies),
+                <code>InboundSeq*</code> (15300-range; lost ranges, epoch resets, replay
+                detection), and the Service Principal credential audit
+                (<code>AzureSPAuditConstructed</code>, code 12010). The complete numeric error
+                code list is at <a href="error-codes.html">error-codes.html</a>.
             </li>
             <li>
-                <strong>Audit sync users periodically</strong>: Query users with
-                <code>Position="crossguard-sync"</code> to detect unexpected user creation
-                that might indicate unauthorized relay activity.
+                <strong>Validate emitted envelopes against the XSD</strong>: Run
+                <code>make docker-integration-test-validate-wire</code> as part of the release
+                pipeline. The mode archives every envelope the running plugin emits and
+                validates each against <code>schema/crossguard.xsd</code>, catching any
+                regression that would put non-conformant content on the wire.
             </li>
             <li>
-                <strong>Enforce <code>crossguard.</code> subject prefix</strong>: This is
-                validated in configuration. All NATS subjects must start with
-                <code>crossguard.</code> to prevent accidental subscription to unrelated
-                NATS traffic.
+                <strong>Audit synced remote users periodically</strong>: Enumerate users with a
+                non-empty <code>RemoteId</code> to verify the population of synced accounts
+                matches the expected remote topology. Each carries
+                <code>UserProps.RemoteUsername</code> showing the source-side username.
+            </li>
+            <li>
+                <strong>Enforce <code>crossguard.</code> subject prefix (NATS)</strong>: All
+                NATS subjects must start with <code>crossguard.</code> (enforced at
+                configuration time). Prevents accidental subscription to unrelated NATS
+                traffic.
             </li>
             <li>
                 <strong>Document and review team name rewrite rules</strong>: Maintain an
@@ -2190,7 +2393,7 @@ Server B acts as a relay point. Each hop is independent.</pre>
             <li>
                 <strong>Review the Threat Model</strong>: The
                 <a href="threatmodel.html">Threat Model page</a> provides a detailed STRIDE
-                analysis of 14 identified threats with severity ratings, code paths, mitigations,
+                analysis of identified threats with severity ratings, code paths, mitigations,
                 and residual risks.
             </li>
         </ol>
