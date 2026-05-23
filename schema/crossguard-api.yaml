@@ -5,12 +5,15 @@ info:
     Defines the message envelope, payload schemas, and connection
     configuration used by the Cross Guard plugin to relay events between
     Mattermost instances. Messages are transported over NATS, Azure
-    Queue Storage, or Azure Blob Storage (batched WAL) depending on the
-    connection's `provider` setting. The
-    wire format (JSON or XML) is controlled by the outbound connection's
+    Queue Storage, Azure Blob Storage (batched WAL), or Azure Service
+    Bus, depending on the connection's `provider` setting. The wire
+    format (JSON or XML) is controlled by the outbound connection's
     `message_format` setting. Inbound messages are auto-detected by
-    inspecting the first non-whitespace byte. XML element names and
-    namespace are defined in `crossguard.xsd`.
+    inspecting the first non-whitespace byte (`<` means XML, `{` means
+    JSON; a leading UTF-8 BOM on inbound XML is stripped before
+    detection). JSON field names exactly mirror the XML element and
+    attribute names defined in `crossguard.xsd`, so the two
+    serializations are field-for-field equivalent.
   version: 1.1.0
   contact:
     name: Mattermost Federal
@@ -31,8 +34,13 @@ paths:
         subject (e.g. `crossguard.high`). For Azure Queue Storage, the
         message is Base64-encoded and enqueued. For Azure Blob Storage,
         the message is appended to an in-memory WAL buffer that is
-        periodically sealed and uploaded as a batch blob. The transport
-        is determined by the connection's `provider` setting.
+        periodically sealed and uploaded as a batch blob. For Azure
+        Service Bus, the message is sent to the configured queue with
+        PeekLock/Complete/Abandon delivery semantics. The transport is
+        determined by the connection's `provider` setting. Only the
+        `sync_msg` and `test` envelope types ride this path; the
+        `attachment` and `profile_image` types are separate file-upload
+        transfers (see `FileUploadHeaders`).
       x-nats-subject: "crossguard.{domain}"
       requestBody:
         required: true
@@ -55,10 +63,15 @@ paths:
         Represents the receipt of a Cross Guard message envelope on an
         inbound connection. For NATS, messages arrive via subscription
         callback. For Azure Queue Storage, messages are dequeued via
-        polling (5-second interval). For Azure Blob Storage, batch WAL
-        blobs are listed, leased, and processed message-by-message
-        before the blob is deleted. The format (JSON or XML) is
-        auto-detected on receipt regardless of provider.
+        polling (configurable; default 5s). For Azure Blob Storage,
+        batch WAL blobs are listed, leased, and processed message-by-
+        message before the blob is deleted. For Azure Service Bus, the
+        PeekLock receiver pulls up to 32 messages per batch (5s max
+        wait) and Completes or Abandons each. The format (JSON or
+        XML) is auto-detected on receipt regardless of provider. Only
+        one node per cluster is the active receiver for a given
+        inbound connection at a time (KV TTL lease); failover is
+        automatic.
       x-nats-subject: "crossguard.{domain}"
       requestBody:
         required: true
@@ -81,239 +94,531 @@ components:
     MessageEnvelope:
       type: object
       description: >
-        Standard envelope that wraps every relayed message. Exactly one
-        payload field is present per message. The envelope is serialized
-        as JSON or XML depending on the outbound connection's
-        message_format setting. Inbound messages are auto-detected by
-        first non-whitespace byte (< for XML, otherwise JSON). The
-        envelope format is identical regardless of transport provider.
+        Envelope wrapping every `sync_msg` or `test` payload on the
+        wire. JSON field names exactly mirror the XML element /
+        attribute names defined in `crossguard.xsd`, so the two
+        serializations are field-for-field equivalent. The outbound
+        connection's `message_format` setting chooses the encoding;
+        inbound is auto-detected from the first non-whitespace byte
+        (`<` for XML, `{` for JSON; a leading UTF-8 BOM on XML is
+        stripped before detection).
+
+
+        Two of the four envelope types use this schema (`sync_msg`,
+        `test`). The other two (`attachment`, `profile_image`) are not
+        XML envelopes at all: they are raw file uploads through the
+        transport's file-upload channel, with metadata travelling as
+        `X-Crossguard-*` headers. See `FileUploadHeaders` below.
+
+
+        XML serialization: `<CrossGuardEnvelope>` is the root element.
+        `version` and `type` are XML attributes on the root; all other
+        fields are child elements emitted in the order declared below.
       required:
+        - version
         - type
-        - timestamp
+        - ConnName
+        - Timestamp
+        - TeamName
+        - ChannelName
       properties:
+        version:
+          type: integer
+          description: Wire-format version (always 1 today). XML attribute on the root element.
+          examples:
+            - 1
         type:
           $ref: "#/components/schemas/MessageType"
-        timestamp:
+        ConnName:
+          type: string
+          maxLength: 96
+          description: >
+            Outbound connection name on the sender. The receiver uses
+            this to scope per-channel sequence numbers and to dispatch
+            audit events. URL-safe slug, max 96 chars.
+          examples:
+            - "high-side"
+        Timestamp:
           type: string
           format: date-time
-          description: UTC timestamp in RFC 3339 format indicating when the message was created.
+          description: >
+            UTC timestamp in RFC 3339 format indicating when the
+            envelope was created. Defaults to `time.Now().UTC()` at
+            marshal time when the caller leaves it empty.
           examples:
             - "2026-03-27T14:30:00Z"
-        post_message:
-          $ref: "#/components/schemas/PostMessage"
+        Epoch:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
           description: >
-            Present when type is `crossguard_post` or `crossguard_update`.
-        delete_message:
-          $ref: "#/components/schemas/DeleteMessage"
+            Sender's process generation ID. A 26-character Mattermost
+            ID generated once at plugin activation, so the receiver
+            can correlate sequence numbers across restarts. Stamped on
+            every sender-originated envelope (both `sync_msg` and
+            `test`).
+        Sequence:
+          type: integer
+          format: int64
+          minimum: 1
           description: >
-            Present when type is `crossguard_delete`.
-        reaction_message:
-          $ref: "#/components/schemas/ReactionMessage"
+            Per-`(ConnName, ChannelId)` monotonic counter within an
+            epoch. Lets the receiver detect duplicates and reorder
+            short gaps. Stamped on `sync_msg` envelopes only; absent
+            on `test` envelopes (no channel scope).
+        TeamName:
+          type: string
+          maxLength: 96
           description: >
-            Present when type is `crossguard_reaction_add` or
-            `crossguard_reaction_remove`.
-        test_message:
-          $ref: "#/components/schemas/TestMessage"
+            Sender's team name (URL-safe slug, max 96 chars). On
+            `test` envelopes this carries the connection name as a
+            placeholder so the field passes XSD validation; the
+            receiver ignores team and channel scope for `type=test`.
+        ChannelName:
+          type: string
+          maxLength: 96
           description: >
-            Present when type is `crossguard_test`.
+            Sender's channel name (URL-safe slug, max 96 chars). On
+            `test` envelopes this carries the connection name as a
+            placeholder.
+        SyncMsg:
+          $ref: "#/components/schemas/SyncMsg"
+          description: >
+            Present when `type` is `sync_msg`. Carries the shared-
+            channels sync payload (at most one Post plus optional
+            Users, Reactions, Statuses, MembershipChanges,
+            Acknowledgements, MentionTransforms).
+        TestID:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: >
+            Present when `type` is `test`. A 26-character Mattermost
+            ID generated by the test-connection handler; the receiver
+            echoes it into its audit log.
 
     # ------------------------------------------------------------------
-    # Message type enum
+    # Envelope type discriminator
     # ------------------------------------------------------------------
     MessageType:
       type: string
-      description: Discriminator that identifies the payload schema inside the envelope.
+      description: >
+        Envelope type discriminator. The four constants are defined in
+        `server/transport.go`. `sync_msg` and `test` ride the
+        `<CrossGuardEnvelope>` XML envelope above; `attachment` and
+        `profile_image` are raw file uploads with `X-Crossguard-Kind`
+        headers (see `FileUploadHeaders`).
       enum:
-        - crossguard_post
-        - crossguard_update
-        - crossguard_delete
-        - crossguard_reaction_add
-        - crossguard_reaction_remove
-        - crossguard_test
+        - sync_msg
+        - test
+        - attachment
+        - profile_image
       x-enum-descriptions:
-        crossguard_post: A new post was created.
-        crossguard_update: An existing post was edited.
-        crossguard_delete: A post was deleted.
-        crossguard_reaction_add: A reaction was added to a post.
-        crossguard_reaction_remove: A reaction was removed from a post.
-        crossguard_test: A connectivity test message.
+        sync_msg: Shared-channels sync payload. Carries at most one Post plus optional non-post content from the same sync cycle.
+        test: Connectivity check. Carries a TestID and an Epoch; the receiver echoes both into audit logs.
+        attachment: Raw file upload for a Post attachment. NOT an XML envelope; metadata travels as HTTP-style headers on the file blob.
+        profile_image: Raw image upload for a synced user's avatar. NOT an XML envelope; metadata travels as headers.
 
     # ------------------------------------------------------------------
-    # Payloads
+    # SyncMsg payload (carried inside sync_msg envelopes)
     # ------------------------------------------------------------------
-    PostMessage:
+    SyncMsg:
       type: object
       description: >
-        Payload for `crossguard_post` and `crossguard_update` message types.
-        For updates, the fields reflect the post state after the edit.
+        Plugin-owned wire-pruned subset of `mmModel.SyncMsg`. The
+        sender splits each upstream sync cycle into one envelope per
+        Post plus an optional metadata envelope carrying only non-post
+        content (orphan reactions, memberships, statuses, etc.) from
+        that cycle. Containers (`Users`, `Reactions`, `Statuses`,
+        `MembershipChanges`, `Acknowledgements`, `MentionTransforms`)
+        are omitted entirely when empty; non-empty `Users` and
+        `MentionTransforms` are sorted by key for deterministic
+        output. Field order inside `<SyncMsg>` is fixed: Id, ChannelId,
+        Users, Post, Reactions, Statuses, MembershipChanges,
+        Acknowledgements, MentionTransforms.
       required:
-        - post_id
-        - channel_id
-        - channel_name
-        - team_id
-        - team_name
-        - user_id
-        - username
-        - message
-        - create_at
+        - Id
+        - ChannelId
       properties:
-        post_id:
+        Id:
           type: string
-          description: Unique identifier of the post on the originating server.
-          examples:
-            - "8swgtrrdiff89yj1z33pofo15r"
-        root_id:
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: Identifier for the sync cycle (upstream `SyncMsg.Id`).
+        ChannelId:
           type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: Source-side channel ID this sync cycle belongs to.
+        Users:
+          type: object
           description: >
-            If this post is a threaded reply, the ID of the root post.
-            Omitted for top-level posts.
-          examples:
-            - "nzwq4p3jkbysfmh3e3x4151n5o"
-        channel_id:
-          type: string
-          description: ID of the channel the post belongs to on the originating server.
-          examples:
-            - "9a1f4h6e17yfmk9w6pxs3jqd3e"
-        channel_name:
-          type: string
-          description: URL-safe name of the channel (used for cross-domain resolution).
-          examples:
-            - "town-square"
-        team_id:
-          type: string
-          description: ID of the team on the originating server.
-          examples:
-            - "5f3h8k2m41ygdj7w8pxr6nqb9c"
-        team_name:
-          type: string
-          description: URL-safe name of the team (used for cross-domain resolution).
-          examples:
-            - "test-a"
-        user_id:
-          type: string
-          description: ID of the user who authored the post on the originating server.
-          examples:
-            - "7m4k9j2p63ynfr8x1qwt5hab4e"
-        username:
-          type: string
-          description: Username of the post author.
-          examples:
-            - "alice"
-        message:
-          type: string
-          description: The Markdown-formatted message body of the post.
-          examples:
-            - "Hello from the other side"
-        create_at:
+            Users referenced by the contained Post, Reactions,
+            Statuses, MembershipChanges, or Acknowledgements. Encoded
+            in XML as `<User id="...">` children of `<Users>`; in JSON
+            as a map keyed by user ID. Max 1000 entries.
+          maxProperties: 1000
+          additionalProperties:
+            $ref: "#/components/schemas/User"
+        Post:
+          $ref: "#/components/schemas/Post"
+          description: At most one Post per envelope. Absent on metadata envelopes.
+        Reactions:
+          type: array
+          description: Reactions emitted in this sync cycle.
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/Reaction"
+        Statuses:
+          type: array
+          description: Presence status snapshots emitted in this sync cycle.
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/Status"
+        MembershipChanges:
+          type: array
+          description: Channel join and leave events emitted in this sync cycle.
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/MembershipChange"
+        Acknowledgements:
+          type: array
+          description: Post acknowledgements emitted in this sync cycle.
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/PostAcknowledgement"
+        MentionTransforms:
+          type: object
+          description: >
+            Sender-resolved mention rewrites (e.g. `@alice` →
+            `@alice.high`). Encoded in XML as `<Transform key="..."
+            value="..."/>` children of `<MentionTransforms>`; in JSON
+            as a map. Sorted by key for determinism. Max 1000 entries.
+          maxProperties: 1000
+          additionalProperties:
+            type: string
+            maxLength: 384
+
+    # ------------------------------------------------------------------
+    # Wire-type building blocks (referenced from SyncMsg)
+    # ------------------------------------------------------------------
+    Post:
+      type: object
+      description: >
+        Wire-pruned subset of `mmModel.Post`. Source-side computed
+        fields (`ReplyCount`, `LastReplyAt`, `Participants`,
+        `IsFollowing`, `MessageSource`, `PendingPostId`) and
+        receiver-overwritten fields (`Filenames`, `Metadata`) are
+        dropped at the source.
+      required:
+        - Id
+        - CreateAt
+        - UpdateAt
+        - DeleteAt
+        - UserId
+        - ChannelId
+        - Message
+      properties:
+        Id: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        CreateAt:
           type: integer
           format: int64
-          description: Unix timestamp in milliseconds when the post was originally created.
-          examples:
-            - 1711547400000
+          description: Unix milliseconds.
+        UpdateAt: { type: integer, format: int64 }
+        EditAt: { type: integer, format: int64 }
+        DeleteAt: { type: integer, format: int64 }
+        UserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        ChannelId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        RootId:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: ID of the root post if this is a threaded reply.
+        OriginalId:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: ID of the post this is an edit of (set on edits).
+        Message:
+          type: string
+          maxLength: 1048576
+          description: Markdown-formatted post body. Max 1 MiB.
+        Type:
+          type: string
+          maxLength: 96
+          description: Post type. Empty for normal posts; `system_*` for system messages.
+        Props:
+          $ref: "#/components/schemas/PostProps"
+        Hashtags:
+          type: string
+          maxLength: 1536
+        FileIds:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            pattern: "^[a-z0-9]{26}$"
+            maxLength: 26
+          description: >
+            File attachment IDs. Each ID's bytes ride a separate
+            `attachment` upload (raw bytes + headers), not the XML
+            envelope.
+        HasReactions: { type: boolean }
+        RemoteId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        IsPinned: { type: boolean }
 
-    DeleteMessage:
-      type: object
-      description: Payload for the `crossguard_delete` message type.
-      required:
-        - post_id
-        - channel_id
-        - channel_name
-        - team_id
-        - team_name
-      properties:
-        post_id:
-          type: string
-          description: Unique identifier of the deleted post on the originating server.
-          examples:
-            - "8swgtrrdiff89yj1z33pofo15r"
-        channel_id:
-          type: string
-          description: ID of the channel the post belonged to.
-          examples:
-            - "9a1f4h6e17yfmk9w6pxs3jqd3e"
-        channel_name:
-          type: string
-          description: URL-safe name of the channel.
-          examples:
-            - "town-square"
-        team_id:
-          type: string
-          description: ID of the team on the originating server.
-          examples:
-            - "5f3h8k2m41ygdj7w8pxr6nqb9c"
-        team_name:
-          type: string
-          description: URL-safe name of the team.
-          examples:
-            - "test-a"
-
-    ReactionMessage:
+    PostProps:
       type: object
       description: >
-        Payload for `crossguard_reaction_add` and `crossguard_reaction_remove`
-        message types.
-      required:
-        - post_id
-        - channel_id
-        - channel_name
-        - team_id
-        - team_name
-        - user_id
-        - username
-        - emoji_name
+        Whitelisted subset of `Post.Props`. Exactly fifteen keys are
+        carried on the wire; any other upstream key is dropped at the
+        boundary. `OverrideIconEmoji` has surrounding colons
+        (`:emoji:`) stripped at marshal and re-added at unmarshal.
       properties:
-        post_id:
-          type: string
-          description: ID of the post the reaction applies to.
-          examples:
-            - "8swgtrrdiff89yj1z33pofo15r"
-        channel_id:
-          type: string
-          description: ID of the channel containing the post.
-          examples:
-            - "9a1f4h6e17yfmk9w6pxs3jqd3e"
-        channel_name:
-          type: string
-          description: URL-safe name of the channel.
-          examples:
-            - "town-square"
-        team_id:
-          type: string
-          description: ID of the team on the originating server.
-          examples:
-            - "5f3h8k2m41ygdj7w8pxr6nqb9c"
-        team_name:
-          type: string
-          description: URL-safe name of the team.
-          examples:
-            - "test-a"
-        user_id:
-          type: string
-          description: ID of the user who added or removed the reaction.
-          examples:
-            - "7m4k9j2p63ynfr8x1qwt5hab4e"
-        username:
-          type: string
-          description: Username of the user.
-          examples:
-            - "alice"
-        emoji_name:
-          type: string
-          description: Name of the emoji (without colons).
-          examples:
-            - "thumbsup"
+        FromWebhook: { type: boolean }
+        FromBot: { type: boolean }
+        FromPlugin: { type: boolean }
+        FromOAuthApp: { type: boolean }
+        OverrideUsername: { type: string, maxLength: 192 }
+        OverrideIconURL: { type: string, maxLength: 3072 }
+        OverrideIconEmoji: { type: string, maxLength: 96 }
+        WebhookDisplayName: { type: string, maxLength: 192 }
+        AddedUserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        DeleteBy: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        AddChannelMember: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        MentionHighlightDisabled: { type: boolean }
+        DisableGroupHighlight: { type: boolean }
+        AIGeneratedByUserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        AIGeneratedByUsername: { type: string, maxLength: 96 }
 
-    TestMessage:
+    User:
       type: object
-      description: Payload for the `crossguard_test` message type, used to verify transport connectivity.
+      description: >
+        Wire-pruned subset of `mmModel.User`. Credential fields,
+        notification preferences, and other source-local data are
+        dropped at the boundary. `Username` runs a resolve-then-
+        truncate ladder so colon-tagged remote usernames never reach
+        the wire; the colon-bearing form is recovered from
+        `Props.RemoteUsername` on the receiver when needed.
       required:
-        - id
+        - Id
+        - DeleteAt
+        - Username
+        - Email
+        - Roles
       properties:
-        id:
+        Id: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        CreateAt: { type: integer, format: int64 }
+        UpdateAt: { type: integer, format: int64 }
+        DeleteAt: { type: integer, format: int64 }
+        Username:
           type: string
-          description: A Mattermost-generated unique identifier for the test request.
-          examples:
-            - "dj7f8k2m41ygsr9w6pxt3nqb4e"
+          pattern: "^[a-z0-9][a-z0-9_\\-\\.]{0,95}$"
+          maxLength: 96
+        Email:
+          type: string
+          format: email
+          maxLength: 381
+        Nickname: { type: string, maxLength: 192 }
+        FirstName: { type: string, maxLength: 192 }
+        LastName: { type: string, maxLength: 192 }
+        Position: { type: string, maxLength: 1536 }
+        Roles:
+          type: string
+          maxLength: 1536
+          description: Space-separated Mattermost role names (e.g. `system_user system_admin`).
+        Locale:
+          type: string
+          maxLength: 53
+          description: BCP 47-shaped locale code.
+        Timezone:
+          type: object
+          description: >
+            Open string map (max 100 entries). Encoded in XML as
+            `<Entry key="..." value="..."/>` children of `<Timezone>`;
+            in JSON as a flat map. Sorted by key for determinism.
+          maxProperties: 100
+          additionalProperties:
+            type: string
+            maxLength: 6144
+        Props:
+          $ref: "#/components/schemas/UserProps"
+        RemoteId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        IsBot: { type: boolean }
+        BotDescription: { type: string, maxLength: 1536 }
+        BotLastIconUpdate: { type: integer, format: int64 }
+
+    UserProps:
+      type: object
+      description: >
+        Whitelisted subset of `User.Props`. Pattern-validated values
+        (`RemoteUsername`, `RemoteEmail`) that fail validation are
+        dropped at marshal with a Warn-level audit log; the user
+        record itself is kept.
+      properties:
+        CustomStatus: { type: string, maxLength: 1536 }
+        RemoteUsername:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_\\-\\.]{0,95}$"
+          maxLength: 96
+        RemoteEmail:
+          type: string
+          format: email
+          maxLength: 381
+        OriginalRemoteId:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+
+    Reaction:
+      type: object
+      description: An emoji reaction on a post.
+      required:
+        - UserId
+        - PostId
+        - EmojiName
+        - CreateAt
+        - UpdateAt
+        - DeleteAt
+        - ChannelId
+      properties:
+        UserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        PostId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        EmojiName:
+          type: string
+          maxLength: 96
+          description: Name of the emoji, without surrounding colons.
+        CreateAt: { type: integer, format: int64 }
+        UpdateAt: { type: integer, format: int64 }
+        DeleteAt: { type: integer, format: int64 }
+        RemoteId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        ChannelId:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: >
+            Source-side channel ID. Back-filled from the parent
+            `SyncMsg.ChannelId` when upstream omits it.
+
+    Status:
+      type: object
+      description: >
+        Presence snapshot. Source-local `ActiveChannel` is dropped at
+        the boundary.
+      required:
+        - UserId
+        - Status
+        - Manual
+        - LastActivityAt
+        - DNDEndTime
+      properties:
+        UserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        Status:
+          type: string
+          enum: [online, away, dnd, offline]
+        Manual: { type: boolean }
+        LastActivityAt:
+          type: integer
+          format: int64
+          description: Unix milliseconds.
+        DNDEndTime:
+          type: integer
+          format: int64
+          description: Unix seconds (upstream quirk preserved on the wire).
+
+    MembershipChange:
+      type: object
+      description: A channel join or leave event.
+      required:
+        - ChannelId
+        - UserId
+        - IsAdd
+        - ChangeTime
+      properties:
+        ChannelId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        UserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        IsAdd:
+          type: boolean
+          description: True for a join, false for a leave.
+        RemoteId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        ChangeTime:
+          type: integer
+          format: int64
+          description: Unix milliseconds.
+
+    PostAcknowledgement:
+      type: object
+      description: A user's acknowledgement of a post.
+      required:
+        - UserId
+        - PostId
+        - AcknowledgedAt
+        - ChannelId
+      properties:
+        UserId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        PostId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        AcknowledgedAt: { type: integer, format: int64 }
+        ChannelId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+        RemoteId: { type: string, pattern: "^[a-z0-9]{26}$", maxLength: 26 }
+
+    # ------------------------------------------------------------------
+    # File-upload metadata (carried as headers on attachment and
+    # profile_image uploads; NOT part of the XML envelope schema)
+    # ------------------------------------------------------------------
+    FileUploadHeaders:
+      type: object
+      description: >
+        Metadata carried as HTTP-style headers on `attachment` and
+        `profile_image` file uploads. The transport routes the raw
+        file bytes through `QueueProvider.UploadFile` (or its
+        provider-specific equivalent: NATS JetStream Object Store
+        headers, Azure Blob metadata, Azure Service Bus blob sidecar
+        metadata). The receiver reads these headers from the
+        corresponding `WatchFiles` event and reconstructs the file
+        context. Header names are case-insensitive on the wire.
+      required:
+        - X-Crossguard-Kind
+        - X-Conn-Name
+        - X-Filename
+      properties:
+        X-Crossguard-Kind:
+          type: string
+          enum:
+            - attachment
+            - profile_image
+          description: Discriminates the two file-upload kinds.
+        X-Conn-Name:
+          type: string
+          maxLength: 96
+          description: Outbound connection name on the sender.
+        X-Filename:
+          type: string
+          description: Original filename. `profile.png` for profile images.
+        X-Team-Name:
+          type: string
+          maxLength: 96
+          description: Required on `attachment`.
+        X-Channel-Name:
+          type: string
+          maxLength: 96
+          description: Required on `attachment`.
+        X-Post-Id:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: Required on `attachment`. The post the file belongs to.
+        X-File-Info:
+          type: string
+          description: >
+            Required on `attachment`. Base64-encoded JSON
+            `mmModel.FileInfo`. Base64 wraps the JSON so it survives
+            provider metadata-encoding rules (Azure Blob metadata is
+            HTTP-header-grade, NATS object store uses `nats.Header`).
+        X-User-Id:
+          type: string
+          pattern: "^[a-z0-9]{26}$"
+          maxLength: 26
+          description: Required on `profile_image`. The synced user.
 
     # ------------------------------------------------------------------
     # Connection configuration (stored in plugin settings, not on the wire)

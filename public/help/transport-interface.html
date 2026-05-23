@@ -42,12 +42,19 @@
             Cross Guard supports four transport providers for relaying messages between Mattermost
             instances: <a href="https://nats.io">NATS</a>, Azure Queue Storage, Azure Blob Storage
             (batched WAL), and Azure Service Bus. Each provider has different delivery guarantees,
-            latency characteristics, and infrastructure requirements. Text events (posts, edits,
-            deletes, reactions) are wrapped in a message envelope (serialized as JSON or XML, per
-            connection configuration) and delivered via the configured transport. File attachments
-            use a provider-specific subsystem: NATS JetStream Object Store, Azure Blob Storage
-            (paired sidecar for Azure Queue and Azure Service Bus, or the same container for Azure
-            Blob), depending on the transport.
+            latency characteristics, and infrastructure requirements. The plugin integrates with
+            Mattermost's shared-channels framework, so outbound messages enter the plugin through
+            the framework's sync hooks (<code>OnSharedChannelsSyncMsg</code>,
+            <code>OnSharedChannelsAttachmentSyncMsg</code>,
+            <code>OnSharedChannelsProfileImageSyncMsg</code>, <code>OnSharedChannelsPing</code>),
+            and inbound messages exit back into the framework via
+            <code>ReceiveSharedChannelSyncMsg</code>. Sync content (posts, users, reactions,
+            statuses, membership changes, acknowledgements, mention transforms) is wrapped in an
+            XML envelope (or JSON, per the connection's <code>message_format</code> setting) and
+            delivered through the transport. File attachments and profile images do not ride the
+            XML envelope; they flow through a separate file-upload channel
+            (<code>UploadFile</code>/<code>WatchFiles</code> on <code>QueueProvider</code>) with
+            metadata carried as <code>X-Crossguard-*</code> headers on the blob.
         </p>
 
         <h3>Transport Providers</h3>
@@ -56,12 +63,12 @@
                 <tr><th>Aspect</th><th>NATS</th><th>Azure Queue Storage</th><th>Azure Blob Storage</th><th>Azure Service Bus</th></tr>
             </thead>
             <tbody>
-                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, 5s interval)</td><td>Batched WAL blob (60s flush, lease-based read)</td><td>PeekLock pull (32-msg batch, 5s max wait)</td></tr>
-                <tr><td>Delivery Guarantee</td><td>At-most-once</td><td>At-least-once</td><td>At-least-once</td><td>At-least-once (PeekLock with server-side DeliveryCount)</td></tr>
-                <tr><td>Message Size Limit</td><td>1 MB (NATS server default, not plugin-enforced; no automatic truncation)</td><td>48,000 bytes (plugin-enforced truncation; before Base64 to 64 KB wire limit)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
-                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (15s poll interval)</td><td>Same container as WAL (deferred file blobs)</td><td>Azure Blob Storage sidecar (15s poll, independent credentials)</td></tr>
+                <tr><td>Delivery Model</td><td>Pub/sub (push)</td><td>Queue polling (pull, default 5s interval)</td><td>Batched WAL blob (60s flush, lease-based read)</td><td>PeekLock pull (32-msg batch, 5s max wait)</td></tr>
+                <tr><td>Delivery Guarantee</td><td>At-most-once on the transport; shared-channels framework retries on hook failure</td><td>At-least-once</td><td>At-least-once</td><td>At-least-once (PeekLock with server-side DeliveryCount)</td></tr>
+                <tr><td>Message Size Limit</td><td>No plugin-enforced limit (NATS server default 1 MB applies)</td><td>48,000 bytes (plugin-enforced; before Base64 to the 64 KB Azure Queue wire limit)</td><td>Bounded by batch blob size (many messages per blob)</td><td>192,000 bytes default; 256 KiB Standard tier ceiling, 100 MiB on Premium</td></tr>
+                <tr><td>File Transfer</td><td>JetStream Object Store</td><td>Azure Blob Storage (paired container, default 15s poll interval)</td><td>Same container as WAL (deferred file blobs)</td><td>Azure Blob Storage sidecar (default 15s poll, independent credentials)</td></tr>
                 <tr><td>Encryption</td><td>TLS (optional)</td><td>TLS always (Azure endpoint)</td><td>TLS always (Azure endpoint)</td><td>TLS always (AMQP over TLS)</td></tr>
-                <tr><td>Authentication</td><td>Token, credentials, or mTLS</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>SAS connection string, or Service Principal (Azure AD client secret)</td></tr>
+                <tr><td>Authentication</td><td>Token, credentials file, or mTLS</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>Shared key, or Service Principal (Azure AD client secret)</td><td>SAS connection string, or Service Principal (Azure AD client secret)</td></tr>
                 <tr><td>Message Encoding</td><td>Raw bytes</td><td>Base64 over wire</td><td>Length-prefixed batch within the blob</td><td>AMQP message body (raw bytes)</td></tr>
                 <tr><td>Auto-Provisioning</td><td>No (server must exist)</td><td>Yes in shared-key mode (queue and container auto-created); no in Service Principal mode (pre-provision required)</td><td>Yes in shared-key mode (container auto-created); no in Service Principal mode (pre-provision required)</td><td>No (queue must be pre-created with chosen LockDuration and MaxDeliveryCount)</td></tr>
             </tbody>
@@ -70,204 +77,281 @@
         <h3>NATS Transport Summary</h3>
         <table class="field-table">
             <tbody>
-                <tr><td>Text Transport</td><td>NATS core publish/subscribe</td></tr>
+                <tr><td>Sync Transport</td><td>NATS core publish/subscribe</td></tr>
                 <tr><td>File Transport</td><td>NATS JetStream Object Store (bucket: <code>crossguard-files</code>)</td></tr>
-                <tr><td>Wire Format</td><td>JSON or XML (UTF-8 encoded bytes, per connection config) for text; binary for files</td></tr>
+                <tr><td>Wire Format</td><td>XML or JSON (UTF-8) for sync envelopes; binary for files</td></tr>
                 <tr><td>Subject Prefix</td><td><code>crossguard.</code> (required for all subjects)</td></tr>
                 <tr><td>Subject Pattern</td><td><code>crossguard.{domain}</code>, e.g. <code>crossguard.high</code>, <code>crossguard.low</code></td></tr>
-                <tr><td>Retry Policy</td><td>Up to 3 attempts with exponential backoff (500ms base, 5s max) for text relay</td></tr>
-                <tr><td>Text Concurrency</td><td>Up to 256 concurrent text relay operations per plugin instance</td></tr>
-                <tr><td>File Concurrency</td><td>Up to 32 concurrent file upload/download operations per plugin instance</td></tr>
+                <tr><td>Retry Policy</td><td>The shared-channels framework controls retries via hook-return semantics. A failed <code>OnSharedChannelsSyncMsg</code> call leaves the framework cursor unadvanced, so the framework retries on its own schedule.</td></tr>
+                <tr><td>Inbound Concurrency</td><td>Single-active receiver per inbound connection across the cluster (KV TTL lease). The handler is deliberately serial so the inbound sequencer can dedup and reorder envelopes correctly.</td></tr>
             </tbody>
         </table>
 
-        <!-- Data Flow (NATS) -->
-        <h2>Data Flow (NATS)</h2>
+        <!-- Data Flow -->
+        <h2>Data Flow</h2>
+        <p>
+            The wire-level data flow is the same regardless of transport provider; only the
+            publish and subscribe primitives change. The diagrams below describe the
+            framework-to-framework path for a single sync envelope.
+        </p>
 
         <h3>Outbound (Local to Remote)</h3>
         <div class="diagram-box">
 <pre>User action in Mattermost
     |
     v
-Plugin hook fires (MessageHasBeenPosted, etc.)
+Shared-channels framework fires OnSharedChannelsSyncMsg
     |
     v
-Check: channel relay enabled? team linked to outbound connection?
+Resolve outbound connection via connNameForRemote(rc.RemoteId)
     |
     v
-Build Envelope (type + payload), serialize per-connection format (JSON or XML)
+buildOutboundEnvelopes: split SyncMsg into one envelope per post
+(plus an optional metadata envelope for non-post content)
     |
     v
-Queue for async publish (semaphore-gated, max 256)
+publishToOutboundConn stamps Epoch and Sequence on every envelope
     |
     v
-Publish to NATS subject with retry (3x, exponential backoff)
+MarshalEnvelope serializes (XML by default; JSON per message_format)
     |
     v
-Flush to confirm delivery</pre>
+QueueProvider.Publish (NATS subject, Azure queue, Service Bus queue,
+or Azure Blob WAL append)</pre>
         </div>
+        <p>
+            Attachments and profile images are emitted from
+            <code>OnSharedChannelsAttachmentSyncMsg</code> and
+            <code>OnSharedChannelsProfileImageSyncMsg</code> via
+            <code>QueueProvider.UploadFile</code> rather than through the XML envelope path.
+            They carry their metadata as <code>X-Crossguard-*</code> headers on the file blob.
+        </p>
 
         <h3>Inbound (Remote to Local)</h3>
         <div class="diagram-box">
-<pre>NATS message arrives on subscribed subject
+<pre>Active receiver subscribes (single-active election via KV TTL lease,
+45s TTL with 15s renewal)
     |
     v
-Acquire relay semaphore (max 256, non-blocking; dropped if full)
+QueueProvider.Subscribe delivers raw bytes to processInboundMessage
     |
     v
-Auto-detect format (JSON or XML) and deserialize Envelope
+UnmarshalEnvelope auto-detects format (first non-whitespace byte:
+< means XML, { means JSON; leading UTF-8 BOM on XML is stripped)
     |
     v
-Dispatch by message type (post, update, delete, reaction, test)
+inboundSequencer.Admit:
+  * drop duplicates by (Epoch, ConnName, ChannelId, Sequence)
+  * buffer short gaps for bounded reorder window
+  * audit lost ranges when gap-deadline ticker fires
     |
     v
-Resolve team and channel by name (apply rewrite rules if configured)
+rewriteChannelIDs maps source-side IDs to local channel IDs
     |
     v
-Verify team AND channel are linked to this inbound connection
+ReceiveSharedChannelSyncMsg hands the SyncMsg back to the framework,
+which performs the actual post create/update/delete, user upsert,
+reaction apply, etc.
     |
     v
-Resolve user (lookup by username or use relay bot)
-    |
-    v
-Create/Update/Delete post or reaction in Mattermost
-    |
-    v
-Store post ID mapping (remote ID to local ID)
-    |
-    v
-Set "crossguard_relayed" property (prevents relay loops)</pre>
+Cursor checkpoint ticker persists per-channel sequence cursors to KV
+every 5 seconds so leadership handoff resumes cleanly</pre>
         </div>
+        <p>
+            File-channel events (<code>WatchFiles</code>) follow a parallel inbound path: the
+            handler reads the <code>X-Crossguard-Kind</code> header to discriminate attachments
+            from profile images, resolves the team and channel via the same rewrite logic, and
+            calls into the framework's attachment / profile-image upsert APIs.
+        </p>
+
+        <!-- QueueProvider Interface -->
+        <h2 id="queueprovider-interface">QueueProvider Interface</h2>
+        <p>
+            Every transport implements the <code>QueueProvider</code> interface defined in
+            <code>server/provider.go</code>. The interface is intentionally small: a publish /
+            subscribe pair for sync envelopes, a parallel pair for file uploads, a
+            <code>MaxMessageSize</code> hint that the splitter respects, an
+            <code>IsConnected</code> health probe for the ping hook, and a
+            <code>Close</code>. Anything provider-specific (queue creation, lease management,
+            batch flushing, dead-letter handling) lives behind these methods.
+        </p>
+
+<pre><code>type QueueProvider interface {
+    Publish(ctx context.Context, data []byte) error
+    Subscribe(ctx context.Context, handler func(data []byte) error) error
+    UploadFile(ctx context.Context, key string, data []byte, headers map[string]string) error
+    WatchFiles(ctx context.Context, handler func(key string, data []byte, headers map[string]string) error) error
+    MaxMessageSize() int
+    IsConnected() bool
+    Close() error
+}</code></pre>
+
+        <table class="field-table">
+            <tbody>
+                <tr><td><code>Publish</code></td><td>Sends a fully marshalled <code>TransportEnvelope</code> (XML or JSON bytes) over the transport. The caller has already applied <code>Epoch</code> and <code>Sequence</code>.</td></tr>
+                <tr><td><code>Subscribe</code></td><td>Delivers incoming envelope bytes to the inbound pipeline. The handler may return an error to defer acknowledgement so the transport retries (Azure Queue dequeue lease, Service Bus PeekLock abandon, etc.).</td></tr>
+                <tr><td><code>UploadFile</code></td><td>Carries raw file bytes (<code>attachment</code> or <code>profile_image</code>) with metadata headers. The <code>key</code> follows a stable pattern: <code>attachment/{postID}/{fileID}</code> or <code>profile_image/{userID}</code>.</td></tr>
+                <tr><td><code>WatchFiles</code></td><td>Delivers each new file blob to a handler with the same key and headers the sender used. The handler discriminates the file kind from the <code>X-Crossguard-Kind</code> header.</td></tr>
+                <tr><td><code>MaxMessageSize</code></td><td>Hard upper bound on the byte length of a single <code>Publish</code> argument. <code>0</code> means "no practical limit"; the plugin treats anything &gt; 0 as a budget the envelope splitter must respect.</td></tr>
+                <tr><td><code>IsConnected</code></td><td>Cheap health probe used by <code>OnSharedChannelsPing</code> to surface outbound-unhealthy / inbound-unhealthy audit events without forcing a publish.</td></tr>
+                <tr><td><code>Close</code></td><td>Releases any provider-side resources (NATS subscriptions, Azure SDK clients, background poll goroutines). Idempotent.</td></tr>
+            </tbody>
+        </table>
+
+        <table class="field-table">
+            <tbody>
+                <tr><td>NATS</td><td><code>MaxMessageSize() == 0</code> (no plugin-enforced cap; NATS server default applies)</td></tr>
+                <tr><td>Azure Queue</td><td><code>MaxMessageSize() == 48000</code> bytes (the plugin caps below 64 KB so Base64 expansion fits the 64 KB Azure Queue wire limit)</td></tr>
+                <tr><td>Azure Blob</td><td><code>MaxMessageSize() == 0</code> (the WAL buffer multiplexes many envelopes per batch blob; the cap is the blob size, not the envelope size)</td></tr>
+                <tr><td>Azure Service Bus</td><td><code>MaxMessageSize() == max_message_size_bytes</code> (default 192000; configurable up to 100 MiB on Premium tier)</td></tr>
+            </tbody>
+        </table>
 
         <!-- Message Envelope -->
         <h2>Message Envelope</h2>
         <p>
-            Every message sent via the transport layer uses this standard envelope. The <code>type</code>
-            field identifies the message kind. Exactly one payload field is present per
-            message. The envelope can be serialized as JSON or XML depending on the
-            outbound connection's <code>message_format</code> setting. Inbound messages
-            are auto-detected by inspecting the first non-whitespace byte.
+            <code>sync_msg</code> and <code>test</code> envelopes ride this schema on the wire.
+            <code>attachment</code> and <code>profile_image</code> uploads do not use this
+            envelope at all (see <a href="#file-upload-headers">File-Upload Headers</a> below).
+            The outbound connection's <code>message_format</code> setting selects the
+            serialization (XML or JSON); inbound is auto-detected by the first non-whitespace
+            byte (<code>&lt;</code> for XML, <code>{</code> for JSON; a leading UTF-8 BOM on XML
+            is stripped before detection).
+        </p>
+        <p>
+            JSON field names exactly mirror the XML element and attribute names defined in
+            <a href="../../schema/crossguard.xsd"><code>schema/crossguard.xsd</code></a>, so the
+            two serializations are field-for-field equivalent. The reference Go type is
+            <code>TransportEnvelope</code> in <code>server/transport.go</code>.
         </p>
 
         <div class="endpoint-card">
             <div class="endpoint-card-header">
-                <span class="method-badge method-post">NATS</span>
-                <span class="path">MessageEnvelope</span>
+                <span class="method-badge method-post">ENVELOPE</span>
+                <span class="path">CrossGuardEnvelope</span>
             </div>
             <div class="endpoint-card-body">
                 <h4>Schema</h4>
                 <table class="field-table">
                     <tbody>
-                        <tr><td><code>type</code></td><td><strong>string, required</strong>. One of the <a href="#message-types">message type</a> values. Determines which payload field is present.</td></tr>
-                        <tr><td><code>timestamp</code></td><td><strong>string, required</strong>. UTC timestamp in RFC 3339 format (e.g. <code>2026-03-27T14:30:00Z</code>). Set when the envelope is created.</td></tr>
-                        <tr><td><code>post_message</code></td><td><strong>object, optional</strong>. Present when type is <code>crossguard_post</code> or <code>crossguard_update</code>. See <a href="#postmessage">PostMessage</a>.</td></tr>
-                        <tr><td><code>delete_message</code></td><td><strong>object, optional</strong>. Present when type is <code>crossguard_delete</code>. See <a href="#deletemessage">DeleteMessage</a>.</td></tr>
-                        <tr><td><code>reaction_message</code></td><td><strong>object, optional</strong>. Present when type is <code>crossguard_reaction_add</code> or <code>crossguard_reaction_remove</code>. See <a href="#reactionmessage">ReactionMessage</a>.</td></tr>
-                        <tr><td><code>test_message</code></td><td><strong>object, optional</strong>. Present when type is <code>crossguard_test</code>. See <a href="#testmessage">TestMessage</a>.</td></tr>
+                        <tr><td><code>version</code></td><td><strong>int, required, attribute.</strong> Wire-format version, always <code>1</code> today. Carried as an XML attribute on the root <code>&lt;CrossGuardEnvelope&gt;</code> element; in JSON, a top-level field.</td></tr>
+                        <tr><td><code>type</code></td><td><strong>string, required, attribute.</strong> One of the four <a href="#message-types">envelope types</a>. Determines which payload field is present (or, for <code>attachment</code>/<code>profile_image</code>, that this envelope is not used at all).</td></tr>
+                        <tr><td><code>ConnName</code></td><td><strong>string, required.</strong> Outbound connection name on the sender (URL-safe slug, max 96 chars). The receiver uses this to scope per-channel sequence numbers and to dispatch audit events.</td></tr>
+                        <tr><td><code>Timestamp</code></td><td><strong>string, required.</strong> UTC timestamp in RFC 3339 format (e.g. <code>2026-03-27T14:30:00Z</code>). Defaults to <code>time.Now().UTC()</code> at marshal time when the caller leaves it empty.</td></tr>
+                        <tr><td><code>Epoch</code></td><td><strong>string, required on sender-originated envelopes.</strong> 26-character Mattermost ID (<code>[a-z0-9]{26}</code>) identifying the sender process generation, so the receiver can correlate sequence numbers across restarts. Stamped on both <code>sync_msg</code> and <code>test</code> envelopes.</td></tr>
+                        <tr><td><code>Sequence</code></td><td><strong>unsigned 64-bit int, required on <code>sync_msg</code> only.</strong> Per-<code>(ConnName, ChannelId)</code> monotonic counter within an epoch. Lets the receiver detect duplicates and reorder short gaps. Absent on <code>test</code> envelopes (no channel scope).</td></tr>
+                        <tr><td><code>TeamName</code></td><td><strong>string, required.</strong> Sender's team name (URL-safe slug, max 96 chars). On <code>test</code> envelopes this carries the connection name as a placeholder so the field passes XSD validation; the receiver ignores team and channel scope for <code>type=test</code>.</td></tr>
+                        <tr><td><code>ChannelName</code></td><td><strong>string, required.</strong> Sender's channel name (URL-safe slug, max 96 chars). On <code>test</code> envelopes this carries the connection name as a placeholder.</td></tr>
+                        <tr><td><code>SyncMsg</code></td><td><strong>object, optional.</strong> Present when <code>type</code> is <code>sync_msg</code>. Carries the shared-channels sync payload. See <a href="#syncmsg">SyncMsg Payload</a>.</td></tr>
+                        <tr><td><code>TestID</code></td><td><strong>string, optional.</strong> Present when <code>type</code> is <code>test</code>. A 26-character Mattermost ID generated by the test-connection handler; the receiver echoes it into its audit log.</td></tr>
                     </tbody>
                 </table>
 
-                <h4>JSON Example</h4>
+                <h4>XML Example (<code>sync_msg</code> with one post)</h4>
+                <p><em>Wire output is a single line (no indentation between elements); indented here for readability.</em></p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossGuardEnvelope version="1" type="sync_msg"&gt;
+  &lt;ConnName&gt;high-side&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-04-12T09:00:00Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;Sequence&gt;1&lt;/Sequence&gt;
+  &lt;TeamName&gt;team-a&lt;/TeamName&gt;
+  &lt;ChannelName&gt;general&lt;/ChannelName&gt;
+  &lt;SyncMsg&gt;...&lt;/SyncMsg&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
+
+                <h4>JSON Example (same envelope)</h4>
 <pre><code>{
-  "type": "crossguard_post",
-  "timestamp": "2026-03-27T14:30:00Z",
-  "post_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a",
-    "user_id": "7m4k9j2p63ynfr8x1qwt5hab4e",
-    "username": "alice",
-    "message": "Hello from the other side",
-    "create_at": 1711547400000
-  }
+  "version": 1,
+  "type": "sync_msg",
+  "ConnName": "high-side",
+  "Timestamp": "2026-04-12T09:00:00Z",
+  "Epoch": "epoch01aaaaaaaaaaaaaaaaaaa",
+  "Sequence": 1,
+  "TeamName": "team-a",
+  "ChannelName": "general",
+  "SyncMsg": { ... }
 }</code></pre>
 
-                <h4>XML Example</h4>
-                <p><em>Note: Actual wire output is compact (no indentation). Formatted here for readability.</em></p>
+                <h4>XML Example (<code>test</code>)</h4>
 <pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
-&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;
-  &lt;Type&gt;crossguard_post&lt;/Type&gt;
-  &lt;Timestamp&gt;2026-03-27T14:30:00Z&lt;/Timestamp&gt;
-  &lt;PostMessage&gt;
-    &lt;PostID&gt;8swgtrrdiff89yj1z33pofo15r&lt;/PostID&gt;
-    &lt;ChannelID&gt;9a1f4h6e17yfmk9w6pxs3jqd3e&lt;/ChannelID&gt;
-    &lt;ChannelName&gt;town-square&lt;/ChannelName&gt;
-    &lt;TeamID&gt;5f3h8k2m41ygdj7w8pxr6nqb9c&lt;/TeamID&gt;
-    &lt;TeamName&gt;test-a&lt;/TeamName&gt;
-    &lt;UserID&gt;7m4k9j2p63ynfr8x1qwt5hab4e&lt;/UserID&gt;
-    &lt;Username&gt;alice&lt;/Username&gt;
-    &lt;MessageText&gt;Hello from the other side&lt;/MessageText&gt;
-    &lt;CreateAt&gt;1711547400000&lt;/CreateAt&gt;
-  &lt;/PostMessage&gt;
-&lt;/CrossguardMessage&gt;</code></pre>
+&lt;CrossGuardEnvelope version="1" type="test"&gt;
+  &lt;ConnName&gt;high-side&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-04-12T09:00:00Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;TeamName&gt;high-side&lt;/TeamName&gt;
+  &lt;ChannelName&gt;high-side&lt;/ChannelName&gt;
+  &lt;TestID&gt;testid12aaaaaaaaaaaaaaaaaa&lt;/TestID&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
             </div>
         </div>
 
         <!-- Message Types -->
-        <h2 id="message-types">Message Types</h2>
+        <h2 id="message-types">Envelope Types</h2>
         <p>
-            The <code>type</code> field in the envelope acts as a discriminator. Each value maps
-            to a specific payload field in the envelope.
+            The <code>type</code> attribute is the envelope discriminator. The four constants
+            are defined in <code>server/transport.go</code>. Two ride the XML envelope above;
+            two are file uploads with headers instead.
         </p>
 
         <table>
             <thead>
-                <tr><th>Type Value</th><th>Go Constant</th><th>Payload Schema</th><th>Description</th></tr>
+                <tr><th>Type Value</th><th>Go Constant</th><th>Carrier</th><th>Description</th></tr>
             </thead>
             <tbody>
                 <tr>
-                    <td><code>crossguard_post</code></td>
-                    <td><code>MessageTypePost</code></td>
-                    <td><a href="#postmessage">PostMessage</a></td>
-                    <td>A new post was created</td>
+                    <td><code>sync_msg</code></td>
+                    <td><code>TransportTypeSyncMsg</code></td>
+                    <td>XML envelope, <code>SyncMsg</code> payload</td>
+                    <td>Shared-channels sync. Carries at most one Post plus optional non-post content (users, reactions, statuses, membership changes, acknowledgements, mention transforms) from one sync cycle.</td>
                 </tr>
                 <tr>
-                    <td><code>crossguard_update</code></td>
-                    <td><code>MessageTypeUpdate</code></td>
-                    <td><a href="#postmessage">PostMessage</a></td>
-                    <td>An existing post was edited</td>
+                    <td><code>test</code></td>
+                    <td><code>TransportTypeTest</code></td>
+                    <td>XML envelope, <code>TestID</code> field</td>
+                    <td>Connectivity check sent by the test-connection handler. Carries <code>Epoch</code> and <code>TestID</code>; the receiver echoes both into audit logs.</td>
                 </tr>
                 <tr>
-                    <td><code>crossguard_delete</code></td>
-                    <td><code>MessageTypeDelete</code></td>
-                    <td><a href="#deletemessage">DeleteMessage</a></td>
-                    <td>A post was deleted</td>
+                    <td><code>attachment</code></td>
+                    <td><code>TransportTypeAttachment</code></td>
+                    <td>File upload, <code>X-Crossguard-*</code> headers</td>
+                    <td>Raw file bytes for a Post attachment. <strong>Not an XML envelope.</strong> Metadata travels as HTTP-style headers on the file blob. Emitted from <code>OnSharedChannelsAttachmentSyncMsg</code>.</td>
                 </tr>
                 <tr>
-                    <td><code>crossguard_reaction_add</code></td>
-                    <td><code>MessageTypeReactionAdd</code></td>
-                    <td><a href="#reactionmessage">ReactionMessage</a></td>
-                    <td>A reaction was added to a post</td>
-                </tr>
-                <tr>
-                    <td><code>crossguard_reaction_remove</code></td>
-                    <td><code>MessageTypeReactionRemove</code></td>
-                    <td><a href="#reactionmessage">ReactionMessage</a></td>
-                    <td>A reaction was removed from a post</td>
-                </tr>
-                <tr>
-                    <td><code>crossguard_test</code></td>
-                    <td><code>MessageTypeTest</code></td>
-                    <td><a href="#testmessage">TestMessage</a></td>
-                    <td>Connectivity test message</td>
+                    <td><code>profile_image</code></td>
+                    <td><code>TransportTypeProfileImage</code></td>
+                    <td>File upload, <code>X-Crossguard-*</code> headers</td>
+                    <td>Raw image bytes for a synced user's avatar. <strong>Not an XML envelope.</strong> Emitted from <code>OnSharedChannelsProfileImageSyncMsg</code>.</td>
                 </tr>
             </tbody>
         </table>
 
-        <!-- PostMessage -->
-        <h2 id="postmessage">PostMessage</h2>
+        <!-- SyncMsg payload -->
+        <h2 id="syncmsg">SyncMsg Payload</h2>
         <p>
-            Used for both <code>crossguard_post</code> (new posts) and
-            <code>crossguard_update</code> (edits). For updates, the fields reflect the
-            post state after the edit.
+            The <code>SyncMsg</code> element carries the shared-channels sync content.
+            The plugin uses pruned, plugin-owned wire types (under <code>server/wire/</code>);
+            each is a subset of the corresponding upstream <code>mmModel</code> type with
+            source-only fields stripped and receiver-overwritten fields dropped. Field order
+            inside <code>&lt;SyncMsg&gt;</code> is fixed: <code>Id</code>, <code>ChannelId</code>,
+            <code>Users</code>, <code>Post</code>, <code>Reactions</code>, <code>Statuses</code>,
+            <code>MembershipChanges</code>, <code>Acknowledgements</code>,
+            <code>MentionTransforms</code>.
+        </p>
+        <p>
+            Each <code>sync_msg</code> envelope carries <strong>at most one</strong>
+            <code>Post</code>. The sender splits each upstream sync cycle into one envelope per
+            Post; non-post content from the same cycle (orphan reactions, memberships, statuses,
+            and the users they reference) rides a single optional <em>metadata envelope</em> with
+            no <code>&lt;Post&gt;</code> child. This one-post-per-envelope contract is the
+            compliance-content-inspection blast-radius control: rejecting one post does not lose
+            other content as collateral damage.
         </p>
 
         <div class="endpoint-card">
             <div class="endpoint-card-header">
                 <span class="method-badge method-post">PAYLOAD</span>
-                <span class="path">PostMessage</span>
+                <span class="path">SyncMsg</span>
             </div>
             <div class="endpoint-card-body">
                 <h4>Fields</h4>
@@ -276,379 +360,455 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
                         <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
                     </thead>
                     <tbody>
-                        <tr>
-                            <td><code>post_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Unique identifier of the post on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>root_id</code></td>
-                            <td>string</td>
-                            <td>No</td>
-                            <td>ID of the root post if this is a threaded reply. Omitted for top-level posts.</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the channel on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe channel name (used for cross-domain resolution)</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the team on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe team name (used for cross-domain resolution, subject to rewrite rules)</td>
-                        </tr>
-                        <tr>
-                            <td><code>user_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the post author on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>username</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Username of the post author</td>
-                        </tr>
-                        <tr>
-                            <td><code>message</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Markdown-formatted message body</td>
-                        </tr>
-                        <tr>
-                            <td><code>create_at</code></td>
-                            <td>integer (int64)</td>
-                            <td>Yes</td>
-                            <td>Unix timestamp in milliseconds when the post was originally created</td>
-                        </tr>
+                        <tr><td><code>Id</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Identifier for the sync cycle (upstream <code>SyncMsg.Id</code>).</td></tr>
+                        <tr><td><code>ChannelId</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Source-side channel ID this sync cycle belongs to.</td></tr>
+                        <tr><td><code>Users</code></td><td>map (string→<a href="#wire-user">User</a>)</td><td>No</td><td>Users referenced by the contained Post, Reactions, Statuses, MembershipChanges, or Acknowledgements. XML: <code>&lt;User id="..."&gt;</code> children of <code>&lt;Users&gt;</code>. JSON: a map keyed by user ID. Sorted by key. Max 1000 entries. Omitted entirely when empty.</td></tr>
+                        <tr><td><code>Post</code></td><td><a href="#wire-post">Post</a></td><td>No</td><td>At most one Post per envelope. Absent on metadata envelopes.</td></tr>
+                        <tr><td><code>Reactions</code></td><td>array of <a href="#wire-reaction">Reaction</a></td><td>No</td><td>Reactions emitted in this sync cycle. Max 1000. Container omitted when empty.</td></tr>
+                        <tr><td><code>Statuses</code></td><td>array of <a href="#wire-status">Status</a></td><td>No</td><td>Presence snapshots emitted in this sync cycle. Max 1000. Container omitted when empty.</td></tr>
+                        <tr><td><code>MembershipChanges</code></td><td>array of <a href="#wire-membership">MembershipChange</a></td><td>No</td><td>Channel join and leave events emitted in this sync cycle. Max 1000. Container omitted when empty.</td></tr>
+                        <tr><td><code>Acknowledgements</code></td><td>array of <a href="#wire-ack">PostAcknowledgement</a></td><td>No</td><td>Post acknowledgements emitted in this sync cycle. Max 1000. Container omitted when empty.</td></tr>
+                        <tr><td><code>MentionTransforms</code></td><td>map (string→string)</td><td>No</td><td>Sender-resolved mention rewrites (e.g. <code>@alice</code> → <code>@alice.high</code>). XML: <code>&lt;Transform key="..." value="..."/&gt;</code> children of <code>&lt;MentionTransforms&gt;</code>. JSON: a map. Sorted by key. Max 1000 entries.</td></tr>
                     </tbody>
                 </table>
-
-                <h4>Example: New Post</h4>
-<pre><code>{
-  "post_id": "8swgtrrdiff89yj1z33pofo15r",
-  "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-  "channel_name": "town-square",
-  "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-  "team_name": "test-a",
-  "user_id": "7m4k9j2p63ynfr8x1qwt5hab4e",
-  "username": "alice",
-  "message": "Hello from the other side",
-  "create_at": 1711547400000
-}</code></pre>
-
-                <h4>Example: Threaded Reply</h4>
-<pre><code>{
-  "post_id": "kf7g2m4x91yrnh5w3pqs8jab6e",
-  "root_id": "8swgtrrdiff89yj1z33pofo15r",
-  "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-  "channel_name": "town-square",
-  "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-  "team_name": "test-a",
-  "user_id": "3n6k8j1p42ygfr9x7qwt5hab2c",
-  "username": "bob",
-  "message": "Replying in thread",
-  "create_at": 1711547460000
-}</code></pre>
             </div>
         </div>
 
-        <!-- DeleteMessage -->
-        <h2 id="deletemessage">DeleteMessage</h2>
+        <!-- Post wire type -->
+        <h3 id="wire-post">Post</h3>
         <p>
-            Identifies a post that was deleted on the originating server. The receiving
-            instance uses the <code>post_id</code> to look up the local copy via its
-            post ID mapping and delete it.
+            Wire-pruned subset of <code>mmModel.Post</code>. Source-side computed fields
+            (<code>ReplyCount</code>, <code>LastReplyAt</code>, <code>Participants</code>,
+            <code>IsFollowing</code>, <code>MessageSource</code>, <code>PendingPostId</code>)
+            and receiver-overwritten fields (<code>Filenames</code>, <code>Metadata</code>) are
+            dropped at the source. Reference Go type: <code>wire.Post</code>.
         </p>
 
-        <div class="endpoint-card">
-            <div class="endpoint-card-header">
-                <span class="method-badge method-delete">PAYLOAD</span>
-                <span class="path">DeleteMessage</span>
-            </div>
-            <div class="endpoint-card-body">
-                <h4>Fields</h4>
-                <table>
-                    <thead>
-                        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>post_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Unique identifier of the deleted post on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the channel the post belonged to</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe channel name</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the team on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe team name</td>
-                        </tr>
-                    </tbody>
-                </table>
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>Id</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Source-side post ID.</td></tr>
+                <tr><td><code>CreateAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>UpdateAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>EditAt</code></td><td>int64</td><td>No</td><td>Unix milliseconds. Set on edits.</td></tr>
+                <tr><td><code>DeleteAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds. Non-zero on deletes.</td></tr>
+                <tr><td><code>UserId</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Source-side author ID.</td></tr>
+                <tr><td><code>ChannelId</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Source-side channel ID.</td></tr>
+                <tr><td><code>RootId</code></td><td>string (26-char Mattermost ID)</td><td>No</td><td>Parent post ID for threaded replies.</td></tr>
+                <tr><td><code>OriginalId</code></td><td>string (26-char Mattermost ID)</td><td>No</td><td>ID of the post this is an edit of. Set on edits.</td></tr>
+                <tr><td><code>Message</code></td><td>string (max 1 MiB)</td><td>Yes</td><td>Markdown-formatted post body.</td></tr>
+                <tr><td><code>Type</code></td><td>string (max 96)</td><td>No</td><td>Empty for normal posts; <code>system_*</code> for system messages (e.g. <code>system_add_to_channel</code>).</td></tr>
+                <tr><td><code>Props</code></td><td><a href="#wire-postprops">PostProps</a></td><td>No</td><td>Whitelisted typed Props. See below.</td></tr>
+                <tr><td><code>Hashtags</code></td><td>string (max 1536)</td><td>No</td><td>Space-separated hashtags extracted by the source.</td></tr>
+                <tr><td><code>FileIds</code></td><td>array of string (max 10, each 26 chars)</td><td>No</td><td>IDs of attached files. The file bytes ride a separate <code>attachment</code> upload (see <a href="#file-upload-headers">File-Upload Headers</a>), not the XML envelope. XML: <code>&lt;FileIds&gt;&lt;Id&gt;...&lt;/Id&gt;...&lt;/FileIds&gt;</code>. Container omitted when empty.</td></tr>
+                <tr><td><code>HasReactions</code></td><td>bool</td><td>No</td><td>True if the post had reactions on the source side.</td></tr>
+                <tr><td><code>RemoteId</code></td><td>string (26-char Mattermost ID)</td><td>No</td><td>Source-side remote ID (if the post originated from another shared-channels remote).</td></tr>
+                <tr><td><code>IsPinned</code></td><td>bool</td><td>No</td><td>True if the post is pinned.</td></tr>
+            </tbody>
+        </table>
 
-                <h4>Example</h4>
-<pre><code>{
-  "post_id": "8swgtrrdiff89yj1z33pofo15r",
-  "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-  "channel_name": "town-square",
-  "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-  "team_name": "test-a"
-}</code></pre>
-            </div>
-        </div>
-
-        <!-- ReactionMessage -->
-        <h2 id="reactionmessage">ReactionMessage</h2>
+        <!-- PostProps -->
+        <h3 id="wire-postprops">PostProps</h3>
         <p>
-            Represents a reaction added to or removed from a post. Used by both
-            <code>crossguard_reaction_add</code> and <code>crossguard_reaction_remove</code>.
-            The receiving instance resolves the local post via its post ID mapping and
-            applies or removes the reaction.
+            Whitelisted typed subset of <code>Post.Props</code>. Exactly fifteen keys are
+            carried on the wire; any other upstream key is dropped at the boundary.
+            <code>OverrideIconEmoji</code> has surrounding colons (<code>:emoji:</code>)
+            stripped at marshal and re-added at unmarshal. Reference Go type:
+            <code>wire.PostProps</code>.
         </p>
 
-        <div class="endpoint-card">
-            <div class="endpoint-card-header">
-                <span class="method-badge method-put">PAYLOAD</span>
-                <span class="path">ReactionMessage</span>
-            </div>
-            <div class="endpoint-card-body">
-                <h4>Fields</h4>
-                <table>
-                    <thead>
-                        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>post_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the post the reaction applies to</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the channel containing the post</td>
-                        </tr>
-                        <tr>
-                            <td><code>channel_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe channel name</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the team on the originating server</td>
-                        </tr>
-                        <tr>
-                            <td><code>team_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>URL-safe team name</td>
-                        </tr>
-                        <tr>
-                            <td><code>user_id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>ID of the user who added or removed the reaction</td>
-                        </tr>
-                        <tr>
-                            <td><code>username</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Username of the user</td>
-                        </tr>
-                        <tr>
-                            <td><code>emoji_name</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>Emoji name without colons (e.g. <code>thumbsup</code>, not <code>:thumbsup:</code>)</td>
-                        </tr>
-                    </tbody>
-                </table>
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>FromWebhook</code></td><td>bool</td><td>Post originated from an incoming webhook.</td></tr>
+                <tr><td><code>FromBot</code></td><td>bool</td><td>Post originated from a bot account.</td></tr>
+                <tr><td><code>FromPlugin</code></td><td>bool</td><td>Post originated from a plugin.</td></tr>
+                <tr><td><code>FromOAuthApp</code></td><td>bool</td><td>Post originated from an OAuth app.</td></tr>
+                <tr><td><code>OverrideUsername</code></td><td>string (max 192)</td><td>Webhook override for displayed username.</td></tr>
+                <tr><td><code>OverrideIconURL</code></td><td>string (max 3072)</td><td>Webhook override for displayed icon URL.</td></tr>
+                <tr><td><code>OverrideIconEmoji</code></td><td>string (max 96)</td><td>Webhook override for displayed icon emoji. Colons stripped on the wire.</td></tr>
+                <tr><td><code>WebhookDisplayName</code></td><td>string (max 192)</td><td>Webhook-supplied display name.</td></tr>
+                <tr><td><code>AddedUserId</code></td><td>string (26 chars)</td><td>User added (set on <code>system_add_to_channel</code> system posts).</td></tr>
+                <tr><td><code>DeleteBy</code></td><td>string (26 chars)</td><td>User who deleted the post.</td></tr>
+                <tr><td><code>AddChannelMember</code></td><td>string (26 chars)</td><td>Alternate add-member key carried by some upstream paths.</td></tr>
+                <tr><td><code>MentionHighlightDisabled</code></td><td>bool</td><td>Suppresses @mention highlight for this post.</td></tr>
+                <tr><td><code>DisableGroupHighlight</code></td><td>bool</td><td>Suppresses group-mention highlight for this post.</td></tr>
+                <tr><td><code>AIGeneratedByUserId</code></td><td>string (26 chars)</td><td>User ID of the agent that generated this post.</td></tr>
+                <tr><td><code>AIGeneratedByUsername</code></td><td>string (max 96)</td><td>Username of the agent that generated this post.</td></tr>
+            </tbody>
+        </table>
 
-                <h4>Example</h4>
-<pre><code>{
-  "post_id": "8swgtrrdiff89yj1z33pofo15r",
-  "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-  "channel_name": "town-square",
-  "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-  "team_name": "test-a",
-  "user_id": "7m4k9j2p63ynfr8x1qwt5hab4e",
-  "username": "alice",
-  "emoji_name": "thumbsup"
-}</code></pre>
-            </div>
-        </div>
-
-        <!-- TestMessage -->
-        <h2 id="testmessage">TestMessage</h2>
+        <!-- User wire type -->
+        <h3 id="wire-user">User</h3>
         <p>
-            A lightweight message used to verify transport connectivity. Sent via the
-            <code>POST /api/v1/test-connection</code> REST endpoint when testing an
-            outbound connection. The receiving instance logs receipt and confirms
-            the connection is functional.
+            Wire-pruned subset of <code>mmModel.User</code>. Credential fields, notification
+            preferences, and other source-local data are dropped at the boundary.
+            <code>Username</code> runs a resolve-then-truncate ladder so colon-tagged remote
+            usernames never reach the wire; the colon-bearing form is recovered from
+            <code>Props.RemoteUsername</code> on the receiver when needed. Reference Go type:
+            <code>wire.User</code>.
         </p>
 
-        <div class="endpoint-card">
-            <div class="endpoint-card-header">
-                <span class="method-badge method-get">PAYLOAD</span>
-                <span class="path">TestMessage</span>
-            </div>
-            <div class="endpoint-card-body">
-                <h4>Fields</h4>
-                <table>
-                    <thead>
-                        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>id</code></td>
-                            <td>string</td>
-                            <td>Yes</td>
-                            <td>A Mattermost-generated unique identifier for the test request</td>
-                        </tr>
-                    </tbody>
-                </table>
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>Id</code></td><td>string (26-char Mattermost ID)</td><td>Yes</td><td>Source-side user ID. XML carries it both as the <code>id</code> attribute on the parent <code>&lt;User&gt;</code> element and as the <code>&lt;Id&gt;</code> child for consistency.</td></tr>
+                <tr><td><code>CreateAt</code></td><td>int64</td><td>No</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>UpdateAt</code></td><td>int64</td><td>No</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>DeleteAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds. Non-zero for tombstones.</td></tr>
+                <tr><td><code>Username</code></td><td>string (max 96)</td><td>Yes</td><td>Lowercase alnum + <code>-_.</code>. Colon-tagged remote forms are stripped.</td></tr>
+                <tr><td><code>Email</code></td><td>string (max 381)</td><td>Yes</td><td>RFC-style email address.</td></tr>
+                <tr><td><code>Nickname</code></td><td>string (max 192)</td><td>No</td><td>User-chosen nickname.</td></tr>
+                <tr><td><code>FirstName</code></td><td>string (max 192)</td><td>No</td><td>First name.</td></tr>
+                <tr><td><code>LastName</code></td><td>string (max 192)</td><td>No</td><td>Last name.</td></tr>
+                <tr><td><code>Position</code></td><td>string (max 1536)</td><td>No</td><td>Free-form job-title field.</td></tr>
+                <tr><td><code>Roles</code></td><td>string (max 1536)</td><td>Yes</td><td>Space-separated role names (e.g. <code>system_user system_admin</code>).</td></tr>
+                <tr><td><code>Locale</code></td><td>string (max 53)</td><td>No</td><td>BCP 47-shaped locale code.</td></tr>
+                <tr><td><code>Timezone</code></td><td>map (string→string)</td><td>No</td><td>Open string map (max 100 entries). XML: <code>&lt;Entry key="..." value="..."/&gt;</code> children of <code>&lt;Timezone&gt;</code>. JSON: a flat map. Sorted by key. Omitted when empty.</td></tr>
+                <tr><td><code>Props</code></td><td><a href="#wire-userprops">UserProps</a></td><td>No</td><td>Whitelisted typed Props. See below.</td></tr>
+                <tr><td><code>RemoteId</code></td><td>string (26 chars)</td><td>No</td><td>Source-side remote ID (if the user originated from another shared-channels remote).</td></tr>
+                <tr><td><code>IsBot</code></td><td>bool</td><td>No</td><td>True for bot accounts.</td></tr>
+                <tr><td><code>BotDescription</code></td><td>string (max 1536)</td><td>No</td><td>Description of the bot account.</td></tr>
+                <tr><td><code>BotLastIconUpdate</code></td><td>int64</td><td>No</td><td>Unix milliseconds when the bot icon was last updated.</td></tr>
+            </tbody>
+        </table>
 
-                <h4>Example</h4>
-<pre><code>{
-  "id": "dj7f8k2m41ygsr9w6pxt3nqb4e"
-}</code></pre>
-            </div>
-        </div>
+        <!-- UserProps -->
+        <h3 id="wire-userprops">UserProps</h3>
+        <p>
+            Whitelisted subset of <code>User.Props</code>. Pattern-validated values
+            (<code>RemoteUsername</code>, <code>RemoteEmail</code>) that fail validation are
+            dropped at marshal with a Warn-level audit log; the user record itself is kept.
+            Reference Go type: <code>wire.UserProps</code>.
+        </p>
+
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>CustomStatus</code></td><td>string (max 1536)</td><td>Custom-status JSON blob (upstream wire shape preserved verbatim).</td></tr>
+                <tr><td><code>RemoteUsername</code></td><td>string (max 96)</td><td>Original colon-tagged form of the username (e.g. <code>alice.high</code>) when the wire <code>Username</code> field has been resolved to a plain slug.</td></tr>
+                <tr><td><code>RemoteEmail</code></td><td>string (max 381)</td><td>Original email address from a previous remote.</td></tr>
+                <tr><td><code>OriginalRemoteId</code></td><td>string (26 chars)</td><td>The remote ID this user originated from before passing through intermediate relays.</td></tr>
+            </tbody>
+        </table>
+
+        <!-- Reaction -->
+        <h3 id="wire-reaction">Reaction</h3>
+        <p>An emoji reaction on a post. Reference Go type: <code>wire.Reaction</code>.</p>
+
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>UserId</code></td><td>string (26 chars)</td><td>Yes</td><td>User who reacted.</td></tr>
+                <tr><td><code>PostId</code></td><td>string (26 chars)</td><td>Yes</td><td>Post the reaction is on.</td></tr>
+                <tr><td><code>EmojiName</code></td><td>string (max 96)</td><td>Yes</td><td>Emoji name without surrounding colons (e.g. <code>thumbsup</code>).</td></tr>
+                <tr><td><code>CreateAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>UpdateAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>DeleteAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds. Non-zero on reaction removals.</td></tr>
+                <tr><td><code>RemoteId</code></td><td>string (26 chars)</td><td>No</td><td>Source-side remote ID (if the reaction originated from another remote).</td></tr>
+                <tr><td><code>ChannelId</code></td><td>string (26 chars)</td><td>Yes</td><td>Channel the reacted-to post lives in. Back-filled from the parent <code>SyncMsg.ChannelId</code> when upstream omits it.</td></tr>
+            </tbody>
+        </table>
+
+        <!-- Status -->
+        <h3 id="wire-status">Status</h3>
+        <p>
+            Presence snapshot. Source-local <code>ActiveChannel</code> is dropped at the
+            boundary. Reference Go type: <code>wire.Status</code>.
+        </p>
+
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>UserId</code></td><td>string (26 chars)</td><td>Yes</td><td>User whose presence is being reported.</td></tr>
+                <tr><td><code>Status</code></td><td>enum: <code>online</code> | <code>away</code> | <code>dnd</code> | <code>offline</code></td><td>Yes</td><td>Current presence.</td></tr>
+                <tr><td><code>Manual</code></td><td>bool</td><td>Yes</td><td>True if the user manually set this status (rather than it being automatic).</td></tr>
+                <tr><td><code>LastActivityAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>DNDEndTime</code></td><td>int64</td><td>Yes</td><td>Unix <strong>seconds</strong> (upstream quirk preserved on the wire). When the user's Do-Not-Disturb status expires.</td></tr>
+            </tbody>
+        </table>
+
+        <!-- MembershipChange -->
+        <h3 id="wire-membership">MembershipChange</h3>
+        <p>A channel join or leave event. Reference Go type: <code>wire.MembershipChange</code>.</p>
+
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>ChannelId</code></td><td>string (26 chars)</td><td>Yes</td><td>Channel the user joined or left.</td></tr>
+                <tr><td><code>UserId</code></td><td>string (26 chars)</td><td>Yes</td><td>User whose membership changed.</td></tr>
+                <tr><td><code>IsAdd</code></td><td>bool</td><td>Yes</td><td>True for a join, false for a leave.</td></tr>
+                <tr><td><code>RemoteId</code></td><td>string (26 chars)</td><td>No</td><td>Source-side remote ID (if the change originated from another remote).</td></tr>
+                <tr><td><code>ChangeTime</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+            </tbody>
+        </table>
+
+        <!-- PostAcknowledgement -->
+        <h3 id="wire-ack">PostAcknowledgement</h3>
+        <p>A user's acknowledgement of a post. Reference Go type: <code>wire.PostAcknowledgement</code>.</p>
+
+        <table>
+            <thead>
+                <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>UserId</code></td><td>string (26 chars)</td><td>Yes</td><td>User who acknowledged.</td></tr>
+                <tr><td><code>PostId</code></td><td>string (26 chars)</td><td>Yes</td><td>Post that was acknowledged.</td></tr>
+                <tr><td><code>AcknowledgedAt</code></td><td>int64</td><td>Yes</td><td>Unix milliseconds.</td></tr>
+                <tr><td><code>ChannelId</code></td><td>string (26 chars)</td><td>Yes</td><td>Channel the post lives in.</td></tr>
+                <tr><td><code>RemoteId</code></td><td>string (26 chars)</td><td>No</td><td>Source-side remote ID (if the acknowledgement originated from another remote).</td></tr>
+            </tbody>
+        </table>
+
+        <!-- File-Upload Headers -->
+        <h2 id="file-upload-headers">File-Upload Headers</h2>
+        <p>
+            <code>attachment</code> and <code>profile_image</code> envelopes do not ride the XML
+            transport envelope. The plugin uploads raw file bytes through
+            <code>QueueProvider.UploadFile</code>; metadata travels as HTTP-style headers on the
+            file blob. Each provider maps these headers to its native metadata mechanism: NATS
+            JetStream Object Store uses <code>nats.Header</code>, Azure Blob uses blob metadata,
+            Azure Service Bus uses metadata on the blob sidecar container. The receiver reads
+            them on the <code>WatchFiles</code> event and reconstructs the file context. Header
+            names are case-insensitive on the wire.
+        </p>
+
+        <table>
+            <thead>
+                <tr><th>Header</th><th>Required For</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                <tr><td><code>X-Crossguard-Kind</code></td><td>both</td><td>Discriminator: <code>attachment</code> or <code>profile_image</code>.</td></tr>
+                <tr><td><code>X-Conn-Name</code></td><td>both</td><td>Outbound connection name on the sender (URL-safe slug, max 96 chars).</td></tr>
+                <tr><td><code>X-Filename</code></td><td>both</td><td>Original filename. <code>profile.png</code> for profile images.</td></tr>
+                <tr><td><code>X-Team-Name</code></td><td><code>attachment</code></td><td>Sender team name. The receiver runs the same rewrite-then-by-name resolution the message envelope uses.</td></tr>
+                <tr><td><code>X-Channel-Name</code></td><td><code>attachment</code></td><td>Sender channel name. Same rewrite path.</td></tr>
+                <tr><td><code>X-Post-Id</code></td><td><code>attachment</code></td><td>26-character Mattermost ID of the post this file belongs to.</td></tr>
+                <tr><td><code>X-File-Info</code></td><td><code>attachment</code></td><td>Base64-encoded JSON <code>mmModel.FileInfo</code>. Base64 wraps the JSON so it survives provider metadata-encoding rules (Azure Blob metadata is HTTP-header-grade; NATS uses <code>nats.Header</code>).</td></tr>
+                <tr><td><code>X-User-Id</code></td><td><code>profile_image</code></td><td>26-character Mattermost ID of the synced user whose avatar is being uploaded.</td></tr>
+            </tbody>
+        </table>
+
+        <p>
+            Object keys follow a stable pattern: <code>attachment/{postID}/{fileID}</code> for
+            attachments and <code>profile_image/{userID}</code> for profile images. The receiver
+            uses the key prefix and the <code>X-Crossguard-Kind</code> header in tandem so
+            mistyped uploads cannot escape their lane.
+        </p>
 
         <!-- Complete Wire Examples -->
         <h2>Complete Wire Format Examples</h2>
         <p>
-            Each example below shows the full JSON envelope as it appears on the wire.
-            For XML equivalents, see the <a href="#xml-format">XML Format</a> section and
-            the <code>schema/crossguard.xsd</code> schema definition.
+            The repository ships 22 schema-valid XML fixtures under
+            <a href="../../schema/examples/"><code>schema/examples/</code></a>
+            that span the full range of envelope content (simple posts, edits, deletes,
+            reactions, threaded replies, system messages, membership changes, status snapshots,
+            acknowledgements, mention transforms, typed Props, bot users, metadata envelopes,
+            and a connectivity test). Each fixture is byte-for-byte identical to the bytes the
+            plugin emits on the wire. See
+            <a href="../../schema/examples/README.md"><code>schema/examples/README.md</code></a>
+            for the index. The examples below show the XML wire form indented for readability,
+            followed by the JSON equivalent. Field names mirror exactly across the two
+            serializations.
         </p>
 
-        <h3>New Post</h3>
+        <h3>Sync Envelope (one post, one user)</h3>
+        <p>
+            This is the canonical case: Alice posts in <code>#general</code> on team A. The
+            envelope carries the post plus the author's user record inline. Source fixture:
+            <a href="../../schema/examples/01_post_simple.xml"><code>01_post_simple.xml</code></a>.
+        </p>
+
+        <h4>XML</h4>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossGuardEnvelope version="1" type="sync_msg"&gt;
+  &lt;ConnName&gt;nats-low-to-high&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-05-11T10:00:00Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;Sequence&gt;1&lt;/Sequence&gt;
+  &lt;TeamName&gt;team-a&lt;/TeamName&gt;
+  &lt;ChannelName&gt;general&lt;/ChannelName&gt;
+  &lt;SyncMsg&gt;
+    &lt;Id&gt;sm01aaaaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+    &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+    &lt;Users&gt;
+      &lt;User id="u01aliceaaaaaaaaaaaaaaaaaa"&gt;
+        &lt;Id&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+        &lt;CreateAt&gt;1700000000000&lt;/CreateAt&gt;
+        &lt;UpdateAt&gt;1712956800000&lt;/UpdateAt&gt;
+        &lt;DeleteAt&gt;0&lt;/DeleteAt&gt;
+        &lt;Username&gt;alice&lt;/Username&gt;
+        &lt;Email&gt;alice@server-a.example.com&lt;/Email&gt;
+        &lt;Nickname&gt;Alice&lt;/Nickname&gt;
+        &lt;FirstName&gt;Alice&lt;/FirstName&gt;
+        &lt;LastName&gt;Smith&lt;/LastName&gt;
+        &lt;Roles&gt;system_user&lt;/Roles&gt;
+        &lt;Locale&gt;en&lt;/Locale&gt;
+        &lt;RemoteId&gt;remoteloaaaaaaaaaaaaaaaaaa&lt;/RemoteId&gt;
+      &lt;/User&gt;
+    &lt;/Users&gt;
+    &lt;Post&gt;
+      &lt;Id&gt;p01postaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+      &lt;CreateAt&gt;1712956800000&lt;/CreateAt&gt;
+      &lt;UpdateAt&gt;1712956800000&lt;/UpdateAt&gt;
+      &lt;DeleteAt&gt;0&lt;/DeleteAt&gt;
+      &lt;UserId&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/UserId&gt;
+      &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+      &lt;Message&gt;Morning team. Standup at 9:30 in the usual room, see you there.&lt;/Message&gt;
+    &lt;/Post&gt;
+  &lt;/SyncMsg&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
+
+        <h4>JSON</h4>
 <pre><code>{
-  "type": "crossguard_post",
-  "timestamp": "2026-03-27T14:30:00Z",
-  "post_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a",
-    "user_id": "7m4k9j2p63ynfr8x1qwt5hab4e",
-    "username": "alice",
-    "message": "Hello from the other side",
-    "create_at": 1711547400000
+  "version": 1,
+  "type": "sync_msg",
+  "ConnName": "nats-low-to-high",
+  "Timestamp": "2026-05-11T10:00:00Z",
+  "Epoch": "epoch01aaaaaaaaaaaaaaaaaaa",
+  "Sequence": 1,
+  "TeamName": "team-a",
+  "ChannelName": "general",
+  "SyncMsg": {
+    "Id": "sm01aaaaaaaaaaaaaaaaaaaaaa",
+    "ChannelId": "ch0aaaaaaaaaaaaaaaaaaaaaaa",
+    "Users": {
+      "u01aliceaaaaaaaaaaaaaaaaaa": {
+        "Id": "u01aliceaaaaaaaaaaaaaaaaaa",
+        "CreateAt": 1700000000000,
+        "UpdateAt": 1712956800000,
+        "DeleteAt": 0,
+        "Username": "alice",
+        "Email": "alice@server-a.example.com",
+        "Nickname": "Alice",
+        "FirstName": "Alice",
+        "LastName": "Smith",
+        "Roles": "system_user",
+        "Locale": "en",
+        "RemoteId": "remoteloaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "Post": {
+      "Id": "p01postaaaaaaaaaaaaaaaaaaa",
+      "CreateAt": 1712956800000,
+      "UpdateAt": 1712956800000,
+      "DeleteAt": 0,
+      "UserId": "u01aliceaaaaaaaaaaaaaaaaaa",
+      "ChannelId": "ch0aaaaaaaaaaaaaaaaaaaaaaa",
+      "Message": "Morning team. Standup at 9:30 in the usual room, see you there."
+    }
   }
 }</code></pre>
 
-        <h3>Post Edit</h3>
-<pre><code>{
-  "type": "crossguard_update",
-  "timestamp": "2026-03-27T14:31:00Z",
-  "post_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a",
-    "user_id": "7m4k9j2p63ynfr8x1qwt5hab4e",
-    "username": "alice",
-    "message": "Hello from the other side (edited)",
-    "create_at": 1711547400000
-  }
-}</code></pre>
+        <h3>Sync Envelope (post delete)</h3>
+        <p>
+            Deletes are signalled by a non-zero <code>DeleteAt</code> with an empty
+            <code>Message</code> and a <code>Props.DeleteBy</code> carrying the deleting user.
+            Source fixture:
+            <a href="../../schema/examples/08_delete.xml"><code>08_delete.xml</code></a>.
+        </p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossGuardEnvelope version="1" type="sync_msg"&gt;
+  &lt;ConnName&gt;nats-low-to-high&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-05-11T10:00:08Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;Sequence&gt;8&lt;/Sequence&gt;
+  &lt;TeamName&gt;team-a&lt;/TeamName&gt;
+  &lt;ChannelName&gt;general&lt;/ChannelName&gt;
+  &lt;SyncMsg&gt;
+    &lt;Id&gt;sm08aaaaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+    &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+    &lt;Post&gt;
+      &lt;Id&gt;p01postaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+      &lt;CreateAt&gt;1712956800000&lt;/CreateAt&gt;
+      &lt;UpdateAt&gt;1712956880000&lt;/UpdateAt&gt;
+      &lt;DeleteAt&gt;1712956880000&lt;/DeleteAt&gt;
+      &lt;UserId&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/UserId&gt;
+      &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+      &lt;Message&gt;&lt;/Message&gt;
+      &lt;Props&gt;&lt;DeleteBy&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/DeleteBy&gt;&lt;/Props&gt;
+    &lt;/Post&gt;
+  &lt;/SyncMsg&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
 
-        <h3>Post Delete</h3>
-<pre><code>{
-  "type": "crossguard_delete",
-  "timestamp": "2026-03-27T14:32:00Z",
-  "delete_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a"
-  }
-}</code></pre>
-
-        <h3>Reaction Added</h3>
-<pre><code>{
-  "type": "crossguard_reaction_add",
-  "timestamp": "2026-03-27T14:33:00Z",
-  "reaction_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a",
-    "user_id": "3n6k8j1p42ygfr9x7qwt5hab2c",
-    "username": "bob",
-    "emoji_name": "thumbsup"
-  }
-}</code></pre>
-
-        <h3>Reaction Removed</h3>
-<pre><code>{
-  "type": "crossguard_reaction_remove",
-  "timestamp": "2026-03-27T14:34:00Z",
-  "reaction_message": {
-    "post_id": "8swgtrrdiff89yj1z33pofo15r",
-    "channel_id": "9a1f4h6e17yfmk9w6pxs3jqd3e",
-    "channel_name": "town-square",
-    "team_id": "5f3h8k2m41ygdj7w8pxr6nqb9c",
-    "team_name": "test-a",
-    "user_id": "3n6k8j1p42ygfr9x7qwt5hab2c",
-    "username": "bob",
-    "emoji_name": "thumbsup"
-  }
-}</code></pre>
+        <h3>Metadata Envelope (no <code>&lt;Post&gt;</code>, one orphan reaction)</h3>
+        <p>
+            Metadata envelopes carry only non-post content from a sync cycle: orphan reactions
+            and acks on posts from previous cycles, plus the users referenced by them. The
+            <code>&lt;Post&gt;</code> element is absent. Source fixture:
+            <a href="../../schema/examples/21_metadata_orphan_reaction.xml"><code>21_metadata_orphan_reaction.xml</code></a>.
+        </p>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossGuardEnvelope version="1" type="sync_msg"&gt;
+  &lt;ConnName&gt;nats-low-to-high&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-05-11T10:00:00Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch21aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;Sequence&gt;1&lt;/Sequence&gt;
+  &lt;TeamName&gt;team-a&lt;/TeamName&gt;
+  &lt;ChannelName&gt;general&lt;/ChannelName&gt;
+  &lt;SyncMsg&gt;
+    &lt;Id&gt;sm21aaaaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;
+    &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+    &lt;Users&gt;...&lt;/Users&gt;
+    &lt;Reactions&gt;
+      &lt;Reaction&gt;
+        &lt;UserId&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/UserId&gt;
+        &lt;PostId&gt;p99orphanaaaaaaaaaaaaaaaaa&lt;/PostId&gt;
+        &lt;EmojiName&gt;thumbsup&lt;/EmojiName&gt;
+        &lt;CreateAt&gt;1712957000000&lt;/CreateAt&gt;
+        &lt;UpdateAt&gt;1712957000000&lt;/UpdateAt&gt;
+        &lt;DeleteAt&gt;0&lt;/DeleteAt&gt;
+        &lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;
+      &lt;/Reaction&gt;
+    &lt;/Reactions&gt;
+  &lt;/SyncMsg&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
 
         <h3>Connectivity Test</h3>
+        <p>
+            Test envelopes carry <code>Epoch</code> and <code>TestID</code> but no
+            <code>Sequence</code> (no channel scope). <code>TeamName</code> and
+            <code>ChannelName</code> are stamped with the connection name as a placeholder so the
+            envelope passes XSD validation; the receiver ignores both fields for
+            <code>type=test</code>. Source fixture:
+            <a href="../../schema/examples/12_test.xml"><code>12_test.xml</code></a>.
+        </p>
+
+        <h4>XML</h4>
+<pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;CrossGuardEnvelope version="1" type="test"&gt;
+  &lt;ConnName&gt;nats-low-to-high&lt;/ConnName&gt;
+  &lt;Timestamp&gt;2026-05-11T10:00:00Z&lt;/Timestamp&gt;
+  &lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;
+  &lt;TeamName&gt;nats-low-to-high&lt;/TeamName&gt;
+  &lt;ChannelName&gt;nats-low-to-high&lt;/ChannelName&gt;
+  &lt;TestID&gt;testid12aaaaaaaaaaaaaaaaaa&lt;/TestID&gt;
+&lt;/CrossGuardEnvelope&gt;</code></pre>
+
+        <h4>JSON</h4>
 <pre><code>{
-  "type": "crossguard_test",
-  "timestamp": "2026-03-27T14:35:00Z",
-  "test_message": {
-    "id": "dj7f8k2m41ygsr9w6pxt3nqb4e"
-  }
+  "version": 1,
+  "type": "test",
+  "ConnName": "nats-low-to-high",
+  "Timestamp": "2026-05-11T10:00:00Z",
+  "Epoch": "epoch01aaaaaaaaaaaaaaaaaaa",
+  "TeamName": "nats-low-to-high",
+  "ChannelName": "nats-low-to-high",
+  "TestID": "testid12aaaaaaaaaaaaaaaaaa"
 }</code></pre>
 
         <!-- Connection Configuration (NATS) -->
@@ -838,6 +998,15 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
 
         <!-- Connection Behavior (NATS) -->
         <h2>Connection Behavior (NATS)</h2>
+        <p>
+            The plugin uses the standard NATS client (<code>nats.go</code>) with its default
+            reconnect machinery. The shared-channels framework owns the retry semantics for
+            sync envelopes: a failed <code>OnSharedChannelsSyncMsg</code> call returns an error
+            and leaves the framework cursor unadvanced, so the framework retries on its own
+            schedule. The plugin does not add a publish-side retry loop. Inbound work is
+            deliberately serial under the single-active-receiver lease, so there is no relay
+            semaphore.
+        </p>
 
         <table>
             <thead>
@@ -847,57 +1016,32 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
                 <tr>
                     <td>Connect Timeout (test)</td>
                     <td>30 seconds</td>
-                    <td>One-time connections used by the test-connection API endpoint</td>
+                    <td>One-time connections used by the test-connection API endpoint.</td>
                 </tr>
                 <tr>
                     <td>Connect Timeout (relay)</td>
                     <td>5 seconds</td>
-                    <td>Persistent relay connections established at plugin activation</td>
+                    <td>Persistent relay connections established at plugin activation.</td>
                 </tr>
                 <tr>
                     <td>Max Reconnects</td>
                     <td>Unlimited</td>
-                    <td>Relay connections attempt reconnection indefinitely</td>
+                    <td>Relay connections attempt reconnection indefinitely.</td>
                 </tr>
                 <tr>
                     <td>Reconnect Wait</td>
                     <td>2 seconds</td>
-                    <td>Delay between reconnection attempts</td>
-                </tr>
-                <tr>
-                    <td>Publish Retries</td>
-                    <td>3</td>
-                    <td>Maximum attempts per message publish</td>
-                </tr>
-                <tr>
-                    <td>Publish Base Delay</td>
-                    <td>500ms</td>
-                    <td>Initial backoff delay between retries</td>
-                </tr>
-                <tr>
-                    <td>Publish Max Delay</td>
-                    <td>5 seconds</td>
-                    <td>Maximum backoff delay between retries</td>
-                </tr>
-                <tr>
-                    <td>Text Relay Semaphore</td>
-                    <td>256</td>
-                    <td>Maximum concurrent text relay operations (semaphore-gated)</td>
-                </tr>
-                <tr>
-                    <td>File Semaphore</td>
-                    <td>32</td>
-                    <td>Maximum concurrent file upload/download operations (separate from text relay)</td>
+                    <td>Delay between reconnection attempts.</td>
                 </tr>
                 <tr>
                     <td>Object Store TTL</td>
                     <td>1 hour</td>
-                    <td>JetStream Object Store bucket TTL for file objects</td>
+                    <td>JetStream Object Store bucket TTL for file objects.</td>
                 </tr>
                 <tr>
-                    <td>File Post Mapping Retry</td>
-                    <td>3 attempts</td>
-                    <td>Inbound file watcher retries post mapping lookup with linear backoff (1s, 2s)</td>
+                    <td>Inbound Active Lease</td>
+                    <td>45 s TTL, 15 s renewal</td>
+                    <td>KV TTL lease held by the active inbound receiver. Only one node in the cluster subscribes per inbound connection at a time; failover is automatic.</td>
                 </tr>
             </tbody>
         </table>
@@ -905,10 +1049,12 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
         <!-- File Transfer Protocol (NATS JetStream) -->
         <h2 id="file-transfer">File Transfer Protocol (NATS JetStream)</h2>
         <p>
-            File attachment relay uses NATS JetStream Object Store as an out-of-band binary
-            transfer mechanism. Text and file relay are completely independent systems that share
-            the same NATS connection but use different protocols. File operations cannot starve
-            text relay because they use a separate semaphore.
+            File attachment relay uses NATS JetStream Object Store as the
+            <code>QueueProvider.UploadFile</code> / <code>WatchFiles</code> backend. Sync
+            envelopes (NATS core pub/sub) and file uploads (JetStream) share the same NATS
+            connection but ride independent NATS subjects, so a backlog on one does not block
+            the other. Profile-image uploads use the same Object Store with a different key
+            prefix.
         </p>
 
         <h3>Object Store Configuration</h3>
@@ -920,7 +1066,7 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
                 <tr>
                     <td>Bucket Name</td>
                     <td><code>crossguard-files</code></td>
-                    <td>Auto-created on first use via <code>CreateOrUpdateObjectStore</code></td>
+                    <td>Auto-created on first use via <code>CreateOrUpdateObjectStore</code>.</td>
                 </tr>
                 <tr>
                     <td>TTL</td>
@@ -928,108 +1074,93 @@ Set "crossguard_relayed" property (prevents relay loops)</pre>
                     <td>Objects are automatically purged after TTL. No receiver-side deletion (supports fan-out to multiple receivers).</td>
                 </tr>
                 <tr>
-                    <td>Object Key</td>
-                    <td><code>{postID}/{randomID}</code></td>
-                    <td>Post ID from the originating server combined with a generated unique identifier. Avoids filename encoding issues.</td>
+                    <td>Object Key (attachment)</td>
+                    <td><code>attachment/{postID}/{fileID}</code></td>
+                    <td>Source-side post ID plus the source-side file ID.</td>
+                </tr>
+                <tr>
+                    <td>Object Key (profile image)</td>
+                    <td><code>profile_image/{userID}</code></td>
+                    <td>Source-side user ID. Avatars are overwritten on update.</td>
                 </tr>
                 <tr>
                     <td>Max File Size</td>
                     <td>Server's <code>MaxFileSize</code></td>
-                    <td>Governed by <code>FileSettings.MaxFileSize</code> in the Mattermost server config. Default: 100 MB.</td>
+                    <td>Governed by <code>FileSettings.MaxFileSize</code> in the Mattermost server config. Default 100 MB.</td>
                 </tr>
             </tbody>
         </table>
 
         <h3>Object Metadata Headers</h3>
         <p>
-            Each uploaded object carries three custom NATS headers that the receiving instance
-            uses to route and attach the file to the correct local post.
+            Each uploaded object carries a set of custom NATS headers that the receiving instance
+            uses to route the file to the correct context. The header set is the same across all
+            four transports (the headers are
+            <a href="#file-upload-headers">documented in detail above</a>): the discriminator
+            <code>X-Crossguard-Kind</code> (<code>attachment</code> or <code>profile_image</code>)
+            plus the kind-specific routing headers (<code>X-Post-Id</code>,
+            <code>X-Team-Name</code>, <code>X-Channel-Name</code>, <code>X-File-Info</code> for
+            attachments; <code>X-User-Id</code> for profile images). On the inbound side, the
+            handler reads these headers from the <code>WatchFiles</code> event and runs the same
+            rewrite-then-by-name resolution the sync envelope uses.
         </p>
-        <table>
-            <thead>
-                <tr><th>Header</th><th>Type</th><th>Description</th></tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td><code>X-Post-Id</code></td>
-                    <td>string</td>
-                    <td>The originating server's post ID. Used to look up the local post via the post ID mapping (<code>pm-{connName}-{remotePostID}</code>).</td>
-                </tr>
-                <tr>
-                    <td><code>X-Conn-Name</code></td>
-                    <td>string</td>
-                    <td>The connection name that uploaded the file. Receivers filter objects by this header to process only files from the matching inbound connection.</td>
-                </tr>
-                <tr>
-                    <td><code>X-Filename</code></td>
-                    <td>string</td>
-                    <td>Original filename of the attachment as it appeared on the sending server.</td>
-                </tr>
-            </tbody>
-        </table>
 
         <h3>Outbound File Flow</h3>
         <div class="diagram-box">
-<pre>User posts message with file attachment
+<pre>User posts a message with a file attachment (or updates an avatar)
     |
     v
-Plugin hook fires (MessageHasBeenPosted)
+Shared-channels framework fires OnSharedChannelsAttachmentSyncMsg
+(or OnSharedChannelsProfileImageSyncMsg for avatars)
     |
-    +--> Text relay (core NATS pub/sub, unchanged)
+    v
+Resolve outbound connection via connNameForRemote(rc.RemoteId)
     |
-    +--> File relay (for each enabled outbound connection):
-         |
-         v
-         Check: file_transfer_enabled? File passes filter? Under size limit?
-             |
-             v
-         Download file bytes from Mattermost (once, shared across connections)
-             |
-             v
-         Acquire file semaphore (max 32, non-blocking; skipped if full)
-             |
-             v
-         Get or create Object Store bucket ("crossguard-files")
-             |
-             v
-         Upload file bytes to Object Store
-         Key: {postID}/{randomID}
-         Headers: X-Post-Id, X-Conn-Name, X-Filename
-             |
-             v
-         Release semaphore</pre>
+    v
+Check: file_transfer_enabled? File passes filter? Under size limit?
+    |
+    v
+Read file bytes from Mattermost (API.GetFile / GetProfileImage)
+    |
+    v
+Get or create JetStream Object Store bucket ("crossguard-files")
+    |
+    v
+QueueProvider.UploadFile:
+  key:     attachment/{postID}/{fileID}    (or profile_image/{userID})
+  headers: X-Crossguard-Kind, X-Conn-Name, X-Filename,
+           X-Team-Name, X-Channel-Name, X-Post-Id, X-File-Info
+           (or X-Crossguard-Kind, X-Conn-Name, X-Filename, X-User-Id
+            for profile images)</pre>
         </div>
 
         <h3>Inbound File Flow</h3>
         <div class="diagram-box">
-<pre>Object Store watcher detects new object (UpdatesOnly mode)
+<pre>Active receiver subscribes to the Object Store via QueueProvider.WatchFiles
+(single-active election, same KV TTL lease that gates sync subscribe)
     |
     v
-Read metadata headers (X-Post-Id, X-Conn-Name, X-Filename)
+JetStream delivers a new object (UpdatesOnly mode)
+    |
+    v
+Read X-Crossguard-Kind header to discriminate attachment / profile_image
     |
     v
 Filter: does X-Conn-Name match this inbound connection?
+        does the file pass the inbound filter policy?
     |
     v
-Check: file passes inbound filter policy?
+Resolve target team and channel via rewrite-then-by-name
+(same path the sync envelope uses)
     |
     v
-Look up local post ID via KV mapping: pm-{connName}-{remotePostID}
-    |  (retries up to 3 times with linear backoff: 1s, 2s)
-    v
-Acquire file semaphore (max 32, blocks until slot available)
+Hand to the shared-channels framework:
+  * attachment: ReceiveSharedChannelAttachment with X-File-Info metadata
+  * profile_image: ReceiveSharedChannelProfileImage with X-User-Id
     |
     v
-Download file bytes from Object Store
-    |
-    v
-Upload file to local Mattermost (API.UploadFile)
-    |
-    v
-Attach file to local post (append FileId via UpdatePost)
-    |
-    v
-Release semaphore</pre>
+Framework performs the local upload, attachment-to-post wiring, or
+avatar update; the plugin does not maintain a separate post-ID mapping.</pre>
         </div>
 
         <h3>File Filtering</h3>
@@ -1074,46 +1205,57 @@ Release semaphore</pre>
         </div>
 
         <!-- XML Format -->
-        <h2 id="xml-format">XML Format</h2>
+        <h2 id="xml-format">Format Selection: XML and JSON</h2>
         <p>
-            When <code>message_format</code> is set to <code>"xml"</code> on an outbound
-            connection, messages are serialized using the XML schema defined in
-            <code>schema/crossguard.xsd</code> (namespace: <code>urn:mattermost-crossguard</code>).
-            The root element is <code>CrossguardMessage</code> with child elements matching
-            the envelope fields. An XSAT report is available at
-            <code>schema/crossguard-xsat-report.md</code> for CDS approval processes.
+            Cross Guard supports two wire serializations. The outbound connection's
+            <code>message_format</code> setting (<code>xml</code> or <code>json</code>) selects
+            which one outbound envelopes use. Inbound connections are auto-detected; a single
+            inbound connection can accept envelopes in either format. JSON field names exactly
+            mirror the XML element / attribute names defined in
+            <a href="../../schema/crossguard.xsd"><code>schema/crossguard.xsd</code></a>, so the
+            two serializations are field-for-field equivalent.
         </p>
 
-        <h3>Key Differences from JSON</h3>
+        <h3>Key Differences Between Formats</h3>
         <table>
             <thead>
-                <tr><th>Aspect</th><th>JSON</th><th>XML</th></tr>
+                <tr><th>Aspect</th><th>XML</th><th>JSON</th></tr>
             </thead>
             <tbody>
                 <tr>
-                    <td>Root element</td>
-                    <td>N/A (top-level object)</td>
-                    <td><code>&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;</code></td>
+                    <td>Root</td>
+                    <td><code>&lt;CrossGuardEnvelope version="1" type="..."&gt;</code> (no namespace; <code>version</code> and <code>type</code> are attributes)</td>
+                    <td>Top-level object with <code>version</code> and <code>type</code> fields</td>
                 </tr>
                 <tr>
                     <td>Field names</td>
-                    <td>snake_case (<code>post_message</code>, <code>channel_name</code>)</td>
-                    <td>PascalCase (<code>PostMessage</code>, <code>ChannelName</code>)</td>
-                </tr>
-                <tr>
-                    <td>Message body field</td>
-                    <td><code>message</code></td>
-                    <td><code>MessageText</code></td>
+                    <td>CamelCase elements (<code>&lt;ConnName&gt;</code>, <code>&lt;Timestamp&gt;</code>, <code>&lt;SyncMsg&gt;</code>); lowercase root attributes (<code>version</code>, <code>type</code>)</td>
+                    <td>Same names, same casing (mirror)</td>
                 </tr>
                 <tr>
                     <td>Character escaping</td>
+                    <td>XML entity escaping (<code>&amp;lt;</code>, <code>&amp;gt;</code>, <code>&amp;amp;</code>, <code>&amp;#xA;</code> for newlines)</td>
                     <td>JSON string escaping</td>
-                    <td>XML entity escaping (<code>&amp;lt;</code>, <code>&amp;gt;</code>, <code>&amp;amp;</code>)</td>
+                </tr>
+                <tr>
+                    <td>Schema</td>
+                    <td><a href="../../schema/crossguard.xsd"><code>schema/crossguard.xsd</code></a> is the normative XML Schema; every outbound payload is schema-valid by construction</td>
+                    <td>OpenAPI 3.1 schema in <a href="../../schema/crossguard-api.yaml"><code>schema/crossguard-api.yaml</code></a></td>
+                </tr>
+                <tr>
+                    <td>Empty containers</td>
+                    <td>Omitted entirely (no empty <code>&lt;Users&gt;&lt;/Users&gt;</code>)</td>
+                    <td>Omitted entirely (no <code>"Users": {}</code>)</td>
+                </tr>
+                <tr>
+                    <td>Map ordering</td>
+                    <td>Sorted by key (XML <code>&lt;Entry&gt;</code> / <code>&lt;Transform&gt;</code> children)</td>
+                    <td>Sorted by key (deterministic JSON object property order)</td>
                 </tr>
                 <tr>
                     <td>Size overhead</td>
-                    <td>Baseline</td>
-                    <td>~30-50% larger (closing tags, namespace)</td>
+                    <td>Baseline (closing tags)</td>
+                    <td>10-20% smaller in typical envelopes</td>
                 </tr>
             </tbody>
         </table>
@@ -1121,66 +1263,72 @@ Release semaphore</pre>
         <h3>Inbound Auto-Detection</h3>
         <p>
             Inbound connections do not require format configuration. The plugin inspects the
-            first non-whitespace byte of each incoming message: if it is <code>&lt;</code>,
-            the message is parsed as XML; otherwise, it is parsed as JSON. This allows a
-            single inbound connection to accept messages from sources using either format.
+            first non-whitespace byte of each incoming envelope: <code>&lt;</code> selects the
+            XML parser, <code>{</code> selects the JSON parser. A single inbound connection can
+            therefore accept envelopes from sources that use either format.
         </p>
 
         <div class="alert alert-info">
             <p class="alert-title">BOM Handling</p>
             <p>
-                XML output does not include a Byte Order Mark (BOM). If a CDS device prepends
-                a UTF-8 BOM (0xEF 0xBB 0xBF) to the message, the inbound parser will strip it
-                automatically before format detection. BOM-prefixed XML is handled correctly.
+                XML output does not include a Byte Order Mark. If an upstream device (e.g. a
+                CDS shuttle) prepends a UTF-8 BOM (<code>0xEF 0xBB 0xBF</code>) to the message,
+                the inbound parser strips it before format detection so BOM-prefixed XML still
+                parses correctly. JSON envelopes do not carry a BOM.
             </p>
         </div>
 
         <h3 id="xml-examples">Schema-Valid Example Payloads</h3>
         <p>
-            The repository ships 12 schema-valid sample payloads under
-            <code>schema/examples/</code>, one per message-type variant the plugin emits. They
-            collectively exercise: simple posts, markdown-rich posts, fenced code blocks with
+            The repository ships 22 schema-valid XML fixtures under
+            <a href="../../schema/examples/"><code>schema/examples/</code></a>. They
+            collectively exercise simple posts, markdown-rich posts, fenced code blocks with
             literal <code>&lt;</code>, <code>&gt;</code>, and <code>&amp;</code> in the body, GFM
-            tables and reference links, threaded replies, long-form incident reports, post edits,
-            deletes, standard-emoji reactions, custom-emoji reactions, reaction removal, and the
-            connectivity test message. A full index lives in
-            <code>schema/examples/README.md</code>.
+            tables and reference links, threaded replies, long-form incident reports, post
+            edits, deletes, standard-emoji and custom-emoji reactions, reaction removal, the
+            connectivity test envelope, channel join and leave events, presence statuses with
+            DND, post acknowledgements, sorted mention transforms, typed Props (webhook and AI
+            provenance), users with Timezone maps, bot users, metadata envelopes (orphan
+            content), and system messages with typed system Props. The
+            <a href="../../schema/examples/README.md"><code>README</code></a> walks through them.
         </p>
         <p>
-            Each example file is <strong>byte-for-byte identical</strong> to the bytes the plugin
-            puts on the wire: the output of <code>model.Marshal(env, FormatXML)</code> plus a
-            trailing newline, nothing else. That means a single line per message after the
-            <code>&lt;?xml?&gt;</code> header (no inter-element indentation), entity-escaped
-            <code>MessageText</code> content (<code>&lt;</code> becomes <code>&amp;lt;</code>,
-            <code>&gt;</code> becomes <code>&amp;gt;</code>, <code>&amp;</code> becomes
-            <code>&amp;amp;</code>, embedded newlines become <code>&amp;#xA;</code>), and no CDATA
+            Each fixture is <strong>byte-for-byte identical</strong> to the bytes the plugin
+            puts on the wire: the output of <code>MarshalEnvelope</code> plus a trailing
+            newline. That means a single line per envelope after the <code>&lt;?xml?&gt;</code>
+            header (no inter-element indentation), entity-escaped string content, and no CDATA
             sections. The byte-equality contract is enforced by
-            <code>TestExampleFiles_Symmetric</code> in
-            <code>server/model/examples_roundtrip_test.go</code>, which also verifies that
-            <code>Unmarshal</code> followed by <code>Marshal</code> is a fixed point and that
-            marshalling is deterministic.
+            <code>TestExampleFiles</code> in <code>server/examples_roundtrip_test.go</code>,
+            which also verifies that <code>UnmarshalEnvelope</code> followed by
+            <code>MarshalEnvelope</code> is a fixed point and that marshalling is deterministic.
         </p>
         <p>
             All sample IDs are 26 characters of <code>[a-z0-9]</code> (per the
-            <code>MattermostIDType</code> constraint in <code>schema/crossguard.xsd</code>).
-            Envelope <code>Timestamp</code> is ISO 8601 (RFC 3339), while
-            <code>PostMessage/CreateAt</code> is Unix epoch <strong>milliseconds</strong> and is
-            earlier than the envelope timestamp to reflect "post was created, then relayed".
+            <code>MattermostIdType</code> constraint in <code>schema/crossguard.xsd</code>).
+            Envelope <code>Timestamp</code> is ISO 8601 (RFC 3339); content timestamps inside
+            <code>SyncMsg</code> are Unix epoch milliseconds (<code>Status.DNDEndTime</code> is
+            the upstream-quirk exception, in seconds).
         </p>
-        <p>
-            To validate the examples locally:
-        </p>
+        <p>To validate the fixtures locally:</p>
 <pre><code>for f in schema/examples/*.xml; do
   xmllint --noout --schema schema/crossguard.xsd "$f"
 done</code></pre>
         <p>
-            The simplest example, a minimal top-level post, is reproduced below. Open the file in
-            an editor that soft-wraps, or pipe through <code>xmllint --format</code>, for a
-            human-readable view.
+            The integration suite has an opt-in mode
+            (<code>make docker-integration-test-validate-wire</code>) that archives every
+            envelope the running plugin emits and validates each one against
+            <code>crossguard.xsd</code> the same way. See
+            <a href="../../README.md#wire-format-validation-in-integration-tests">the README</a>
+            for the wiring.
         </p>
-        <h4>Example: <code>01_post_simple.xml</code></h4>
+        <p>
+            The simplest fixture (a minimal top-level post) is reproduced below in raw wire
+            form. Open the file in an editor with soft-wrap, or pipe through
+            <code>xmllint --format</code>, for a human-readable view.
+        </p>
+        <h4>Example: <code>01_post_simple.xml</code> (raw wire form)</h4>
 <pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
-&lt;CrossguardMessage xmlns="urn:mattermost-crossguard"&gt;&lt;Type&gt;crossguard_post&lt;/Type&gt;&lt;Timestamp&gt;2026-04-15T09:00:00Z&lt;/Timestamp&gt;&lt;PostMessage&gt;&lt;PostID&gt;4uuucd8ra1buzieqbg46xpeuyi&lt;/PostID&gt;&lt;ChannelID&gt;85ykawbwgw8ciijy10hg5c8uwq&lt;/ChannelID&gt;&lt;ChannelName&gt;general&lt;/ChannelName&gt;&lt;TeamID&gt;lttp1g6g5hohz5lc2y0jgvb37n&lt;/TeamID&gt;&lt;TeamName&gt;federal-comms&lt;/TeamName&gt;&lt;UserID&gt;gmnrkopt52jod8eip8t227e9ov&lt;/UserID&gt;&lt;Username&gt;alice&lt;/Username&gt;&lt;MessageText&gt;Morning team. Standup at 9:30 in the usual room, see you there.&lt;/MessageText&gt;&lt;CreateAt&gt;1776243550000&lt;/CreateAt&gt;&lt;/PostMessage&gt;&lt;/CrossguardMessage&gt;
+&lt;CrossGuardEnvelope version="1" type="sync_msg"&gt;&lt;ConnName&gt;nats-low-to-high&lt;/ConnName&gt;&lt;Timestamp&gt;2026-05-11T10:00:00Z&lt;/Timestamp&gt;&lt;Epoch&gt;epoch01aaaaaaaaaaaaaaaaaaa&lt;/Epoch&gt;&lt;Sequence&gt;1&lt;/Sequence&gt;&lt;TeamName&gt;team-a&lt;/TeamName&gt;&lt;ChannelName&gt;general&lt;/ChannelName&gt;&lt;SyncMsg&gt;&lt;Id&gt;sm01aaaaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;&lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;&lt;Users&gt;&lt;User id="u01aliceaaaaaaaaaaaaaaaaaa"&gt;&lt;Id&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/Id&gt;&lt;CreateAt&gt;1700000000000&lt;/CreateAt&gt;&lt;UpdateAt&gt;1712956800000&lt;/UpdateAt&gt;&lt;DeleteAt&gt;0&lt;/DeleteAt&gt;&lt;Username&gt;alice&lt;/Username&gt;&lt;Email&gt;alice@server-a.example.com&lt;/Email&gt;&lt;Nickname&gt;Alice&lt;/Nickname&gt;&lt;FirstName&gt;Alice&lt;/FirstName&gt;&lt;LastName&gt;Smith&lt;/LastName&gt;&lt;Roles&gt;system_user&lt;/Roles&gt;&lt;Locale&gt;en&lt;/Locale&gt;&lt;RemoteId&gt;remoteloaaaaaaaaaaaaaaaaaa&lt;/RemoteId&gt;&lt;/User&gt;&lt;/Users&gt;&lt;Post&gt;&lt;Id&gt;p01postaaaaaaaaaaaaaaaaaaa&lt;/Id&gt;&lt;CreateAt&gt;1712956800000&lt;/CreateAt&gt;&lt;UpdateAt&gt;1712956800000&lt;/UpdateAt&gt;&lt;DeleteAt&gt;0&lt;/DeleteAt&gt;&lt;UserId&gt;u01aliceaaaaaaaaaaaaaaaaaa&lt;/UserId&gt;&lt;ChannelId&gt;ch0aaaaaaaaaaaaaaaaaaaaaaa&lt;/ChannelId&gt;&lt;Message&gt;Morning team. Standup at 9:30 in the usual room, see you there.&lt;/Message&gt;&lt;/Post&gt;&lt;/SyncMsg&gt;&lt;/CrossGuardEnvelope&gt;
 </code></pre>
 
         <!-- Azure Queue Storage Transport -->
@@ -1272,7 +1420,7 @@ done</code></pre>
                     <td>Queue Service URL</td>
                     <td><code>queue_service_url</code></td>
                     <td>Yes</td>
-                    <td>Azure Queue Storage service URL (e.g. <code>https://&lt;account&gt;.queue.core.windows.net</code>)</td>
+                    <td>Azure Queue Storage service URL (e.g. <code>https://&lt;account&gt;.queue.core.windows.net</code>). For US Government, use <code>*.queue.core.usgovcloudapi.net</code>.</td>
                 </tr>
                 <tr>
                     <td>Blob Service URL</td>
@@ -1281,33 +1429,75 @@ done</code></pre>
                     <td>Azure Blob Storage service URL (e.g. <code>https://&lt;account&gt;.blob.core.windows.net</code>)</td>
                 </tr>
                 <tr>
+                    <td>Auth Mode</td>
+                    <td><code>auth_mode</code></td>
+                    <td>No</td>
+                    <td>Either <code>shared-key</code> (the legacy default; empty string is treated as the same) or <code>service-principal</code>. Selects which credential fields below apply.</td>
+                </tr>
+                <tr>
+                    <td>Azure Cloud</td>
+                    <td><code>azure_cloud</code></td>
+                    <td>No</td>
+                    <td>Either <code>public</code> (default), <code>usgov</code>, or <code>china</code>. Selects the Azure AD authority and (for Service Principal) the data-plane SDK options. Ignored in shared-key mode (the storage URL alone disambiguates).</td>
+                </tr>
+                <tr>
                     <td>Account Name</td>
                     <td><code>account_name</code></td>
-                    <td>Yes</td>
-                    <td>Azure Storage account name</td>
+                    <td>Shared-key only</td>
+                    <td>Azure Storage account name. Required when <code>auth_mode</code> is <code>shared-key</code>.</td>
                 </tr>
                 <tr>
                     <td>Account Key</td>
                     <td><code>account_key</code></td>
-                    <td>Yes</td>
-                    <td>Azure Storage shared access key (base64, treat as secret)</td>
+                    <td>Shared-key only</td>
+                    <td>Azure Storage shared access key (base64, treat as secret). Required when <code>auth_mode</code> is <code>shared-key</code>. MUST be empty when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Tenant ID</td>
+                    <td><code>tenant_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD tenant ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client ID</td>
+                    <td><code>client_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD application (client) ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client Secret</td>
+                    <td><code>client_secret</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD client secret value (treat as secret). Required when <code>auth_mode</code> is <code>service-principal</code>. Best stored via the <code>MM_PLUGINSETTINGS_PLUGINS_CROSSGUARD_OUTBOUNDCONNECTIONS</code> environment variable rather than the plugin config file.</td>
                 </tr>
                 <tr>
                     <td>Queue Name</td>
                     <td><code>queue_name</code></td>
                     <td>Yes</td>
-                    <td>Azure Queue name (auto-created if missing)</td>
+                    <td>Azure Queue name. Auto-created in shared-key mode; must be pre-provisioned in Service Principal mode.</td>
                 </tr>
                 <tr>
                     <td>Blob Container Name</td>
                     <td><code>blob_container_name</code></td>
                     <td>When file transfer enabled</td>
-                    <td>Azure Blob container (auto-created if missing)</td>
+                    <td>Azure Blob container. Auto-created in shared-key mode; must be pre-provisioned in Service Principal mode.</td>
+                </tr>
+                <tr>
+                    <td>Poll Interval</td>
+                    <td><code>poll_interval_seconds</code></td>
+                    <td>No</td>
+                    <td>Inbound queue poll cadence. Default 5, minimum 1.</td>
+                </tr>
+                <tr>
+                    <td>Blob Poll Interval</td>
+                    <td><code>blob_poll_interval_seconds</code></td>
+                    <td>No</td>
+                    <td>Inbound blob-container poll cadence (for file attachments). Default 15, minimum 1.</td>
                 </tr>
             </tbody>
         </table>
 
-                <h4>Example: Azure Queue Connection</h4>
+                <h4>Example: Azure Queue (shared-key)</h4>
 <pre><code>{
   "name": "azure-relay",
   "provider": "azure-queue",
@@ -1322,12 +1512,33 @@ done</code></pre>
   }
 }</code></pre>
 
+                <h4>Example: Azure Queue (Service Principal)</h4>
+<pre><code>{
+  "name": "azure-relay",
+  "provider": "azure-queue",
+  "file_transfer_enabled": true,
+  "azure_queue": {
+    "queue_service_url": "https://mystorageaccount.queue.core.windows.net",
+    "blob_service_url": "https://mystorageaccount.blob.core.windows.net",
+    "auth_mode": "service-principal",
+    "azure_cloud": "public",
+    "tenant_id": "00000000-0000-0000-0000-000000000000",
+    "client_id": "11111111-1111-1111-1111-111111111111",
+    "client_secret": "...",
+    "queue_name": "crossguard-relay",
+    "blob_container_name": "crossguard-files"
+  }
+}</code></pre>
+
         <h3>Auto-Provisioning</h3>
         <p>
-            Unlike NATS, the Azure Queue provider automatically creates both the queue and the blob container
-            on startup if they do not already exist. The "already exists" response (HTTP 409) is
-            treated as success. No manual Azure infrastructure setup is required beyond creating the
-            storage account and providing credentials.
+            In <code>shared-key</code> mode the Azure Queue provider automatically creates both
+            the queue and the blob container on startup if they do not already exist (the
+            "already exists" response is treated as success). In
+            <code>service-principal</code> mode, auto-provisioning is <strong>skipped</strong>:
+            operators must pre-create the queue and (when file transfer is enabled) the blob
+            container so the SP can run with data-plane-only RBAC (typically <em>Storage Queue
+            Data Contributor</em> and <em>Storage Blob Data Contributor</em>).
         </p>
 
         <!-- Azure Blob Storage Transport -->
@@ -1378,42 +1589,78 @@ done</code></pre>
                     <td>Service URL</td>
                     <td><code>service_url</code></td>
                     <td>Yes</td>
-                    <td>Azure Blob Storage service URL</td>
+                    <td>Azure Blob Storage service URL. For US Government, use <code>*.blob.core.usgovcloudapi.net</code>.</td>
+                </tr>
+                <tr>
+                    <td>Auth Mode</td>
+                    <td><code>auth_mode</code></td>
+                    <td>No</td>
+                    <td>Either <code>shared-key</code> (the legacy default) or <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Azure Cloud</td>
+                    <td><code>azure_cloud</code></td>
+                    <td>No</td>
+                    <td>Either <code>public</code> (default), <code>usgov</code>, or <code>china</code>. Selects the Azure AD authority and the data-plane SDK options when in Service Principal mode.</td>
                 </tr>
                 <tr>
                     <td>Account Name</td>
                     <td><code>account_name</code></td>
-                    <td>Yes</td>
-                    <td>Azure Storage account name</td>
+                    <td>Shared-key only</td>
+                    <td>Azure Storage account name.</td>
                 </tr>
                 <tr>
                     <td>Account Key</td>
                     <td><code>account_key</code></td>
-                    <td>Yes</td>
-                    <td>Azure Storage shared access key (base64, treat as secret)</td>
+                    <td>Shared-key only</td>
+                    <td>Azure Storage shared access key (base64, treat as secret). MUST be empty when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Tenant ID</td>
+                    <td><code>tenant_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD tenant ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client ID</td>
+                    <td><code>client_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD application (client) ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client Secret</td>
+                    <td><code>client_secret</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD client secret value (treat as secret). Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
                 </tr>
                 <tr>
                     <td>Blob Container Name</td>
                     <td><code>blob_container_name</code></td>
                     <td>Yes</td>
-                    <td>Container holding both batch WAL blobs and deferred file blobs (auto-created if missing)</td>
+                    <td>Container holding both batch WAL blobs and deferred file blobs. Auto-created in shared-key mode; pre-provisioned in Service Principal mode.</td>
                 </tr>
                 <tr>
                     <td>Flush Interval</td>
                     <td><code>flush_interval_seconds</code></td>
                     <td>No</td>
-                    <td>Seconds between WAL flushes. Default 60, minimum 5.</td>
+                    <td>Seconds between WAL flushes on the outbound side. Default 60, minimum 5.</td>
                 </tr>
                 <tr>
                     <td>Blob Lock Max Age</td>
                     <td><code>blob_lock_max_age_seconds</code></td>
                     <td>No</td>
-                    <td>Seconds before a stale lease may be broken. Default 300, minimum 30.</td>
+                    <td>Seconds before a stale lease may be broken on the inbound side. Default 300, minimum 30.</td>
+                </tr>
+                <tr>
+                    <td>Batch Poll Interval</td>
+                    <td><code>batch_poll_interval_seconds</code></td>
+                    <td>No</td>
+                    <td>Inbound poll cadence for new batch WAL blobs. Default 30, minimum 1. Lower values reduce end-to-end latency at the cost of more list operations.</td>
                 </tr>
             </tbody>
         </table>
 
-                <h4>Example: Azure Blob Connection</h4>
+                <h4>Example: Azure Blob (shared-key)</h4>
 <pre><code>{
   "name": "azure-blob-relay",
   "provider": "azure-blob",
@@ -1425,6 +1672,22 @@ done</code></pre>
     "blob_container_name": "crossguard-wal",
     "flush_interval_seconds": 60,
     "blob_lock_max_age_seconds": 300
+  }
+}</code></pre>
+
+                <h4>Example: Azure Blob (Service Principal)</h4>
+<pre><code>{
+  "name": "azure-blob-relay",
+  "provider": "azure-blob",
+  "file_transfer_enabled": true,
+  "azure_blob": {
+    "service_url": "https://mystorageaccount.blob.core.windows.net",
+    "auth_mode": "service-principal",
+    "azure_cloud": "public",
+    "tenant_id": "00000000-0000-0000-0000-000000000000",
+    "client_id": "11111111-1111-1111-1111-111111111111",
+    "client_secret": "...",
+    "blob_container_name": "crossguard-wal"
   }
 }</code></pre>
 
@@ -1513,40 +1776,76 @@ done</code></pre>
             </thead>
             <tbody>
                 <tr>
+                    <td>Auth Mode</td>
+                    <td><code>auth_mode</code></td>
+                    <td>No</td>
+                    <td>Either <code>connection-string</code> (the legacy default) or <code>service-principal</code>. Selects between the SAS-based connection string and Azure AD Service Principal authentication for the Service Bus namespace.</td>
+                </tr>
+                <tr>
                     <td>Connection String</td>
                     <td><code>connection_string</code></td>
-                    <td>Yes</td>
-                    <td>SAS connection string for the Service Bus namespace. Treat as a secret.</td>
+                    <td>Connection-string mode only</td>
+                    <td>SAS connection string for the Service Bus namespace. Required when <code>auth_mode</code> is <code>connection-string</code>; MUST be empty when <code>auth_mode</code> is <code>service-principal</code>. Treat as a secret.</td>
+                </tr>
+                <tr>
+                    <td>Azure Cloud</td>
+                    <td><code>azure_cloud</code></td>
+                    <td>No</td>
+                    <td>Either <code>public</code> (default), <code>usgov</code>, or <code>china</code>. Selects the Azure AD authority. Data-plane routing uses <code>service_bus_namespace</code> directly, not <code>azure_cloud</code>.</td>
+                </tr>
+                <tr>
+                    <td>Service Bus Namespace</td>
+                    <td><code>service_bus_namespace</code></td>
+                    <td>SP only</td>
+                    <td>Fully-qualified Service Bus namespace, e.g. <code>myns.servicebus.windows.net</code> or <code>myns.servicebus.usgovcloudapi.net</code>. Required when <code>auth_mode</code> is <code>service-principal</code> because no SAS connection string encodes it.</td>
+                </tr>
+                <tr>
+                    <td>Tenant ID</td>
+                    <td><code>tenant_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD tenant ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client ID</td>
+                    <td><code>client_id</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD application (client) ID. Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
+                </tr>
+                <tr>
+                    <td>Client Secret</td>
+                    <td><code>client_secret</code></td>
+                    <td>SP only</td>
+                    <td>Azure AD client secret value (treat as secret). Required when <code>auth_mode</code> is <code>service-principal</code>.</td>
                 </tr>
                 <tr>
                     <td>Queue Name</td>
                     <td><code>queue_name</code></td>
                     <td>Yes</td>
-                    <td>Pre-created queue name or hierarchical path. Up to 260 characters; letters, digits, periods, hyphens, underscores, and forward slashes.</td>
+                    <td>Pre-created queue name or hierarchical path. Up to 260 characters; letters, digits, periods, hyphens, underscores, and forward slashes. The plugin does NOT auto-create queues; operators must pre-create the queue with the desired <code>LockDuration</code> and <code>MaxDeliveryCount</code>.</td>
                 </tr>
                 <tr>
                     <td>Blob Service URL</td>
                     <td><code>blob_service_url</code></td>
-                    <td>Only when <code>file_transfer_enabled</code> is true</td>
+                    <td>When file transfer enabled</td>
                     <td>Azure Blob Storage endpoint for the file sidecar.</td>
                 </tr>
                 <tr>
                     <td>Blob Account Name</td>
                     <td><code>blob_account_name</code></td>
-                    <td>Only when <code>file_transfer_enabled</code> is true</td>
-                    <td>Storage account name for the blob sidecar (independent of the Service Bus namespace).</td>
+                    <td>When file transfer enabled and sidecar uses shared-key</td>
+                    <td>Storage account name for the blob sidecar (independent of the Service Bus namespace). MUST be empty when the parent <code>auth_mode</code> is <code>service-principal</code> (the SP credential is inherited by the sidecar; mixed-mode sidecars are not supported).</td>
                 </tr>
                 <tr>
                     <td>Blob Account Key</td>
                     <td><code>blob_account_key</code></td>
-                    <td>Only when <code>file_transfer_enabled</code> is true</td>
-                    <td>Shared access key for the blob sidecar storage account. Treat as a secret.</td>
+                    <td>When file transfer enabled and sidecar uses shared-key</td>
+                    <td>Shared access key for the blob sidecar storage account. Treat as a secret. MUST be empty when the parent <code>auth_mode</code> is <code>service-principal</code>.</td>
                 </tr>
                 <tr>
                     <td>Blob Container Name</td>
                     <td><code>blob_container_name</code></td>
-                    <td>Only when <code>file_transfer_enabled</code> is true</td>
-                    <td>Blob container used for file attachments. Auto-created on startup if it does not exist.</td>
+                    <td>When file transfer enabled</td>
+                    <td>Blob container used for file attachments. Auto-created on startup in shared-key mode; pre-provisioned in Service Principal mode.</td>
                 </tr>
                 <tr>
                     <td>Max Message Size</td>
@@ -1563,7 +1862,7 @@ done</code></pre>
             </tbody>
         </table>
 
-                <h4>Example: Azure Service Bus Connection</h4>
+                <h4>Example: Service Bus (SAS connection string)</h4>
 <pre><code>{
   "name": "azure-servicebus-relay",
   "provider": "azure-servicebus",
@@ -1578,32 +1877,60 @@ done</code></pre>
   }
 }</code></pre>
 
+                <h4>Example: Service Bus (Service Principal)</h4>
+<pre><code>{
+  "name": "azure-servicebus-relay",
+  "provider": "azure-servicebus",
+  "file_transfer_enabled": true,
+  "azure_servicebus": {
+    "auth_mode": "service-principal",
+    "azure_cloud": "public",
+    "service_bus_namespace": "myns.servicebus.windows.net",
+    "tenant_id": "00000000-0000-0000-0000-000000000000",
+    "client_id": "11111111-1111-1111-1111-111111111111",
+    "client_secret": "...",
+    "queue_name": "crossguard-relay",
+    "blob_service_url": "https://mystorageaccount.blob.core.windows.net",
+    "blob_container_name": "crossguard-files"
+  }
+}</code></pre>
+
         <!-- Loop Prevention -->
-        <h2>Loop Prevention</h2>
+        <h2>Loop Prevention and Delivery Guarantees</h2>
         <p>
-            Cross Guard prevents infinite relay loops through multiple mechanisms:
+            Cross Guard rides on the shared-channels framework's intrinsic loop prevention
+            (every received user carries a non-empty <code>RemoteId</code>; the framework refuses
+            to re-sync content marked as remote) and adds three plugin-level guards:
         </p>
         <ul>
             <li>
-                <strong>Relayed property:</strong> Every post created by inbound message processing
-                is tagged with a <code>crossguard_relayed</code> post property. Outbound hooks
-                skip posts with this property.
+                <strong>Per-remote outbound suppression.</strong> The outbound hook resolves the
+                target connection via <code>connNameForRemote(rc.RemoteId)</code> and refuses to
+                send back to the remote a message originated from. A sync envelope that arrived
+                from connection A never re-leaves on connection A.
             </li>
             <li>
-                <strong>System message filtering:</strong> System-generated messages (join/leave,
-                header changes, etc.) are never relayed.
+                <strong>Connection linkage validation.</strong> Envelopes are only published to
+                outbound connections that are explicitly linked to the originating team. Inbound
+                envelopes are only processed if the target team and channel are linked to the
+                receiving inbound connection; otherwise the inbound handler posts an Accept /
+                Block prompt rather than applying the content.
             </li>
             <li>
-                <strong>Bot post filtering:</strong> Posts from the relay bot itself are excluded
-                from outbound processing.
-            </li>
-            <li>
-                <strong>Connection linkage validation:</strong> Messages are only published to
-                outbound connections that are explicitly linked to the originating team.
-                Inbound messages are only processed if the target team and channel are linked
-                to the receiving inbound connection.
+                <strong>Inbound deduplication.</strong> The inbound sequencer keys on
+                <code>(Epoch, ConnName, ChannelId, Sequence)</code> and drops any envelope it has
+                already admitted. Combined with the single-active-receiver lease (only one node
+                per cluster subscribes at a time), this catches duplicates from at-least-once
+                providers and replays from a sender restart.
             </li>
         </ul>
+        <p>
+            System messages (channel join / leave, header changes, etc.) ride the
+            <code>SyncMsg.MembershipChanges</code> container or as system-typed Posts; both are
+            relayed normally and routed by the framework on the receiving side. The plugin does
+            not filter them out, since the framework needs the events to keep its synced channel
+            membership view current.
+        </p>
 
         <div class="alert alert-info">
             <p class="alert-title">OpenAPI Specification</p>
