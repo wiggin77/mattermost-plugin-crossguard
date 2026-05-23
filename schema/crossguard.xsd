@@ -8,15 +8,16 @@
   Every string element carries a pattern and/or maxLength; every
   container has a concrete maxOccurs upper bound.
 
-  Constraint conventions:
+  Constraint conventions (50% headroom applied on top of upstream
+  Mattermost limits; see git history for the cap adjustment commit):
     * 26-character Mattermost IDs use MattermostIdType ([a-z0-9]{26}).
-    * Channel/team/conn names use SlugType (lowercase alnum + - _, max 64).
-    * Usernames use UsernameType (lowercase alnum + - _ ., max 64).
+    * Channel/team/conn names use SlugType (lowercase alnum + - _, max 96).
+    * Usernames use UsernameType (lowercase alnum + - _ ., max 96).
       Colon-bearing remote-tagged usernames are not on the wire; the
       producer resolves them via Props.RemoteUsername or truncates at
       the colon before serializing (see server/wire/user.go).
-    * Emails use EmailType (RFC-style pattern, max 254).
-    * Locale codes use LocaleType (BCP 47-shaped, max 35).
+    * Emails use EmailType (RFC-style pattern, max 381).
+    * Locale codes use LocaleType (BCP 47-shaped, max 53).
     * Free-form short text (Nickname, FirstName, Position, etc.) uses
       bounded maxLength only, no pattern, since Mattermost permits Unicode.
     * Post bodies use MessageTextType (max 1048576, 1 MiB).

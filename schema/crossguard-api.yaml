@@ -338,6 +338,18 @@ components:
           pattern: "^[a-z0-9-]+$"
           examples:
             - "high-side"
+        site_url:
+          type: string
+          description: >
+            Stable identity used to register the connection as a shared
+            channels remote on the Mattermost server. Defaults to
+            `crossguard:` + `name` on first save and is immutable
+            thereafter so renames preserve the remote's identity and its
+            sync cursor. Inbound and outbound connections that share a
+            `site_url` are paired and share a single remote ID for loop
+            prevention and synthetic-user tagging.
+          examples:
+            - "crossguard:high-side"
         provider:
           type: string
           enum:
@@ -609,6 +621,21 @@ components:
             mode.
           examples:
             - "crossguard-files"
+        poll_interval_seconds:
+          type: integer
+          description: >
+            How often the inbound side polls the Azure Queue for new
+            messages.
+          minimum: 1
+          default: 5
+        blob_poll_interval_seconds:
+          type: integer
+          description: >
+            How often the inbound side polls the blob container for new
+            file attachments. Only applies when `file_transfer_enabled`
+            is true.
+          minimum: 1
+          default: 15
 
     # ------------------------------------------------------------------
     # Azure Blob provider configuration
@@ -682,6 +709,14 @@ components:
             least 30 when set.
           minimum: 30
           default: 300
+        batch_poll_interval_seconds:
+          type: integer
+          description: >
+            How often the inbound side polls the container for new
+            batch WAL blobs to process. Lower values reduce end-to-end
+            latency at the cost of more list operations.
+          minimum: 1
+          default: 30
 
     # ------------------------------------------------------------------
     # Azure Service Bus provider configuration

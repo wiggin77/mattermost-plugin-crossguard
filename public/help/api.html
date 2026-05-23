@@ -41,7 +41,7 @@
         <table class="field-table">
             <tbody>
                 <tr><td>Base Path</td><td><code>/plugins/crossguard/api/v1/</code></td></tr>
-                <tr><td>Authentication</td><td>All endpoints require the <code>Mattermost-User-Id</code> header (set automatically by Mattermost for authenticated requests).</td></tr>
+                <tr><td>Authentication</td><td>Most endpoints require the <code>Mattermost-User-Id</code> header (set automatically by Mattermost for authenticated requests). The interactive-dialog handler <code>POST /api/v1/dialog/select-connection</code> instead reads the user ID from the <code>user_id</code> field of the <code>SubmitDialogRequest</code> body that Mattermost POSTs when a dialog is submitted, so the header is not required there.</td></tr>
                 <tr><td>Request Limit</td><td>5 MB max request body</td></tr>
                 <tr><td>Response Format</td><td>JSON</td></tr>
                 <tr><td>Error Format</td><td><code>{"error": "message"}</code> with appropriate HTTP status code</td></tr>
@@ -924,6 +924,58 @@
                 <p>
                     Validates permissions, performs the action, and sends an ephemeral message with the result.
                     Returns <code>200</code> on success.
+                </p>
+            </div>
+        </div>
+
+        <!-- Slash Command Autocomplete -->
+        <h2>Slash Command Autocomplete</h2>
+
+        <p>
+            This endpoint backs the dynamic-list autocomplete arguments registered by
+            <code>/crossguard</code> subcommands. Mattermost invokes it as the user
+            types, passing <code>team_id</code>, <code>channel_id</code>, <code>user_id</code>,
+            and <code>user_input</code> as query parameters. Callers without the permission
+            to run the corresponding subcommand receive an empty list rather than a 403,
+            so the autocomplete UI does not surface a permission error mid-typing.
+        </p>
+
+        <div class="endpoint-card">
+            <div class="endpoint-card-header">
+                <span class="method-badge method-get">GET</span>
+                <span class="path">/api/v1/autocomplete/connections/{action}</span>
+                <span class="permission-tag permission-authenticated">Authenticated</span>
+            </div>
+            <div class="endpoint-card-body">
+                <p>
+                    Returns the list of connection names suitable for tab-completion of the named
+                    slash-command action.
+                </p>
+
+                <h4>Path Parameters</h4>
+                <table>
+                    <thead><tr><th>Action</th><th>List Returned</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>init-team</code></td><td>All configured connections.</td></tr>
+                        <tr><td><code>init-channel</code></td><td>Connections currently linked to the team.</td></tr>
+                        <tr><td><code>teardown-team</code></td><td>Connections currently linked to the team.</td></tr>
+                        <tr><td><code>teardown-channel</code></td><td>Connections currently linked to the channel.</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Query Parameters</h4>
+                <ul>
+                    <li><code>team_id</code>: Required for all actions. The team context where the slash command was typed.</li>
+                    <li><code>channel_id</code>: Required for channel actions.</li>
+                    <li><code>user_id</code>, <code>user_input</code>: Passed by Mattermost; the handler uses the <code>Mattermost-User-Id</code> header for the permission check.</li>
+                </ul>
+
+                <h4>Response</h4>
+                <p>
+                    JSON array of <code>AutocompleteListItem</code> objects, each carrying an
+                    <code>Item</code> (the connection key in <code>direction:name</code> form) and a
+                    <code>HelpText</code> describing the direction. Empty list returned when the caller
+                    lacks permission, the action is unknown, or no connections match.
                 </p>
             </div>
         </div>

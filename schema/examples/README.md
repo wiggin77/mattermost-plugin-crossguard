@@ -13,7 +13,9 @@ removes it, and adds a custom-emoji reaction. Examples 12-20 cover the
 remaining wire-type variants (test envelope, membership, status, ack, mention
 transforms, typed Props, typed Users, bot users). Example 21 demonstrates a
 metadata envelope: a sync cycle that emitted no post, only an orphan
-reaction (a reaction on a post from a previous sync cycle).
+reaction (a reaction on a post from a previous sync cycle). Example 22
+demonstrates a system message (a `system_add_to_channel` post with whitelisted
+system Props).
 
 ## Post envelopes vs. metadata envelopes
 
@@ -61,6 +63,7 @@ and arriving at the receiver in seq order.
 | 19 | `19_user_with_timezone_and_props.xml`      | User `<Timezone>` (open map) and typed `<Props>`           |
 | 20 | `20_bot_user.xml`                          | Bot user (`IsBot`, `BotDescription`, `BotLastIconUpdate`)  |
 | 21 | `21_metadata_orphan_reaction.xml`          | Metadata envelope: no `<Post>`, one orphan reaction        |
+| 22 | `22_system_add_to_channel.xml`             | System message (`Type=system_add_to_channel`) with Props   |
 
 ## What the examples prove
 
@@ -74,12 +77,15 @@ what the plugin actually emits. In particular:
   on the wire because `PostProps` is a typed whitelist. Example 19 includes a
   `some_local_setting` key in `User.Props` that is similarly dropped.
 - **Map ordering is deterministic.** Example 17 (`MentionTransforms`) and
-  example 19 (`Timezone` and the bot user's `Users` map) emit map entries
-  sorted by key, so successive runs produce byte-identical output.
-- **Required-but-empty fields are explicit.** Example 12 has empty
-  `<TeamName></TeamName><ChannelName></ChannelName>` for a test envelope where
-  those fields are not semantically meaningful. Example 08 has an empty
-  `<Message></Message>` for a deletion. Both validate against the XSD.
+  example 19 (`Timezone`) emit map entries sorted by key, so successive runs
+  produce byte-identical output.
+- **Required-but-empty fields are explicit.** Example 08 has an empty
+  `<Message></Message>` for a deletion and validates cleanly against the XSD.
+- **Test envelopes reuse the connection name as a placeholder.** Example 12
+  carries `<TeamName>nats-low-to-high</TeamName><ChannelName>nats-low-to-high</ChannelName>`
+  for fields that have no semantic meaning on a connectivity check, since the
+  XSD requires both elements unconditionally. The receiver ignores both fields
+  for `type="test"`.
 
 ## Envelope ordering: `Epoch` and `Sequence`
 
@@ -136,15 +142,13 @@ If a wire-type struct changes, regenerate the fixtures and re-validate:
 
 ```sh
 UPDATE_EXAMPLES=1 go test -run TestExampleFiles ./server/
-python3 -c "
-import xmlschema, os
-s = xmlschema.XMLSchema('schema/crossguard.xsd')
-for f in sorted(os.listdir('schema/examples')):
-    if f.endswith('.xml'):
-        s.validate('schema/examples/' + f)
-        print('OK', f)
-"
+for f in schema/examples/*.xml; do
+  xmllint --noout --schema schema/crossguard.xsd "$f"
+done
 ```
+
+`xmllint` is the same validator used by `make docker-integration-test-validate-wire`,
+so a clean run here matches the integration-time contract.
 
 Both must succeed before a wire-type change is merged. After regeneration the
 new XSD also needs compliance re-review.
