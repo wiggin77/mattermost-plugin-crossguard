@@ -128,6 +128,8 @@ Typical workflow: `init-team <connection-name>` first, then `init-channel <conne
 | `make test` | Run all tests |
 | `make coverage` | Run Go tests and print code coverage summary |
 | `make check-style` | Lint code |
+| `make generate-error-codes` | Regenerate `public/help/error-codes.html` from `server/errcode/codes.go` and `scripts/generate-error-codes/annotations.yaml` |
+| `make generate-pdfs` | Regenerate the four PDFs under `public/help/` from their HTML sources via Playwright |
 | `make clean` | Remove build artifacts |
 | `make nuke` | Remove everything: containers, data, build artifacts |
 

@@ -74,9 +74,12 @@
 
         <h3>Provider Selection</h3>
         <p>
-            Each connection uses either <strong>NATS</strong> or <strong>Azure Queue Storage</strong> as its
-            transport provider. The provider is selected when creating a connection, and the admin console
-            shows only the fields relevant to the chosen provider.
+            Each connection uses one of four transport providers: <strong>NATS</strong>,
+            <strong>Azure Queue Storage</strong>, <strong>Azure Blob Storage</strong>, or
+            <strong>Azure Service Bus</strong>. The provider is selected when creating a
+            connection (<code>provider</code> field set to <code>nats</code>,
+            <code>azure-queue</code>, <code>azure-blob</code>, or <code>azure-servicebus</code>),
+            and the admin console shows only the fields relevant to the chosen provider.
         </p>
         <table>
             <thead>
@@ -87,19 +90,25 @@
                     <td><strong>NATS</strong></td>
                     <td>Pub/sub messaging via NATS Core</td>
                     <td>JetStream Object Store</td>
-                    <td>At-most-once</td>
+                    <td>At-most-once (framework retries on hook-return error)</td>
                 </tr>
                 <tr>
                     <td><strong>Azure Queue Storage</strong></td>
-                    <td>Polling-based queue (5s interval)</td>
-                    <td>Azure Blob Storage</td>
+                    <td>Polling-based queue (configurable; default 5 s)</td>
+                    <td>Azure Blob Storage (paired container; configurable poll, default 15 s)</td>
                     <td>At-least-once</td>
                 </tr>
                 <tr>
                     <td><strong>Azure Blob Storage</strong></td>
-                    <td>Write-ahead log batched to blobs (periodic flush)</td>
-                    <td>Deferred file blobs alongside batch WAL blobs</td>
+                    <td>Write-ahead log batched to blobs (configurable flush, default 60 s; configurable inbound poll, default 30 s)</td>
+                    <td>Deferred file blobs alongside batch WAL blobs in the same container</td>
                     <td>At-least-once</td>
+                </tr>
+                <tr>
+                    <td><strong>Azure Service Bus</strong></td>
+                    <td>AMQP queue with PeekLock pull (32-message batch, 5 s max wait)</td>
+                    <td>Azure Blob Storage sidecar (independent credentials; configurable poll, default 15 s)</td>
+                    <td>At-least-once with native DLQ on <code>MaxDeliveryCount</code> exceedance</td>
                 </tr>
             </tbody>
         </table>
@@ -538,26 +547,6 @@
         <!-- Relay Settings -->
         <h2>Relay Settings</h2>
 
-        <h3>Username Lookup</h3>
-
-        <table class="field-table">
-            <tbody>
-                <tr><td>Setting</td><td><code>UsernameLookup</code></td></tr>
-                <tr><td>Type</td><td>Boolean</td></tr>
-                <tr><td>Default</td><td><code>true</code></td></tr>
-            </tbody>
-        </table>
-
-        <p>
-            <strong>When enabled:</strong> Inbound messages look for a local user with the same
-            username as the remote sender. If found, the message is posted as that local user. This
-            creates a seamless experience where messages appear to come from the correct person.
-        </p>
-        <p>
-            <strong>When disabled:</strong> All inbound messages are posted by the Cross Guard relay
-            bot, with the remote username shown in the message formatting. Use this if usernames
-            don't match across servers.
-        </p>
 
         <h3>Restrict to System Admins</h3>
 
@@ -725,15 +714,18 @@
         <!-- Testing Connections -->
         <h2>Testing Connections</h2>
         <p>
-            The admin console UI includes a "Test Connection" button for each configured connection.
+            The admin console UI includes a "Test Connection" button for each configured
+            connection. The handler dispatches by <code>provider</code> to a per-provider test
+            implementation; each issues a temporary client and does not affect the running
+            plugin's connections.
         </p>
         <ul>
-            <li><strong>API endpoint:</strong> <code>POST /plugins/crossguard/api/v1/test-connection</code> (System Admin only)</li>
-            <li><strong>NATS outbound test:</strong> Publishes a message with a unique ID and confirms flush</li>
-            <li><strong>NATS inbound test:</strong> Subscribes to the subject and confirms the subscription is active</li>
-            <li><strong>Azure test:</strong> Validates the connection string by enqueuing and deleting a test message</li>
-            <li>Tests use a temporary connection (does not affect the running plugin's connections)</li>
-            <li>The <code>direction</code> query parameter is NATS-specific; Azure tests validate connectivity regardless of direction</li>
+            <li><strong>API endpoint:</strong> <code>POST /plugins/crossguard/api/v1/test-connection</code> (System Admin only). Accepts a full <code>ConnectionConfig</code> as the request body and an optional <code>direction</code> query parameter.</li>
+            <li><strong>NATS</strong>: outbound test publishes a test envelope (with the current Epoch and a generated TestID) on the configured subject and confirms flush; inbound test subscribes to the subject and confirms the subscription is active. The <code>direction</code> query parameter selects which.</li>
+            <li><strong>Azure Queue Storage</strong>: validates the configured credential (shared key or Service Principal) by listing the target queue and, on outbound, enqueueing and deleting a test message.</li>
+            <li><strong>Azure Blob Storage</strong>: validates the credential against the target container and verifies the plugin can read and write a probe blob.</li>
+            <li><strong>Azure Service Bus</strong>: opens an AMQP connection to the namespace, validates the credential, and on outbound sends a test envelope to the configured queue. SAS material and SP errors are sanitized before being surfaced to the admin UI.</li>
+            <li>Service Principal credentials trigger a save-time AAD probe in addition to the data-plane test. AAD errors are sanitized before being returned to the admin UI.</li>
         </ul>
 
         <!-- Example Configurations -->
@@ -851,12 +843,52 @@ Inbound:  [{"name": "from-a", "provider": "nats", "nats": {"address": "nats://na
   "file_transfer_enabled": true
 }]</code></pre>
 
+        <h4>Azure Service Bus variant (AMQP with PeekLock and DLQ)</h4>
+<pre><code>Outbound Connections:
+[{
+  "name": "azure-servicebus-to-b",
+  "provider": "azure-servicebus",
+  "azure_servicebus": {
+    "connection_string": "Endpoint=sb://myns.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=...",
+    "queue_name": "crossguard-relay",
+    "blob_service_url": "https://mystorageaccount.blob.core.windows.net",
+    "blob_account_name": "mystorageaccount",
+    "blob_account_key": "base64-account-key",
+    "blob_container_name": "crossguard-files"
+  },
+  "file_transfer_enabled": true
+}]</code></pre>
+
+        <h4>Service Bus with Service Principal authentication</h4>
+<pre><code>Outbound Connections:
+[{
+  "name": "azure-servicebus-to-b",
+  "provider": "azure-servicebus",
+  "azure_servicebus": {
+    "auth_mode": "service-principal",
+    "azure_cloud": "public",
+    "service_bus_namespace": "myns.servicebus.windows.net",
+    "tenant_id": "00000000-0000-0000-0000-000000000000",
+    "client_id": "11111111-1111-1111-1111-111111111111",
+    "client_secret": "...",
+    "queue_name": "crossguard-relay",
+    "blob_service_url": "https://mystorageaccount.blob.core.windows.net",
+    "blob_container_name": "crossguard-files"
+  },
+  "file_transfer_enabled": true
+}]</code></pre>
+
         <div class="alert alert-info">
             <p class="alert-title">Note</p>
             <p>
-                Both sides share the same Azure Storage account, queue name, and blob container.
-                The outbound side enqueues messages and uploads blobs; the inbound side polls and
-                processes them.
+                For NATS, Azure Queue, and Azure Blob, both sides typically share the same
+                provider configuration. The outbound side publishes / enqueues / appends; the
+                inbound side subscribes / polls / leases. For Azure Service Bus, the queue is
+                pre-created (the plugin does not auto-create it) with the desired
+                <code>LockDuration</code> and <code>MaxDeliveryCount</code>; the blob sidecar
+                is a separate storage account (in connection-string mode) or inherits the
+                parent Service Principal (in SP mode). Service Principal mode is the
+                recommended posture for production Federal deployments.
             </p>
         </div>
 
@@ -901,40 +933,64 @@ Inbound:  [{"name": "from-a", "provider": "nats", "nats": {"address": "nats://na
                     <td>Verify <code>file_transfer_enabled</code> is <code>true</code> on both outbound and inbound connections. For NATS, ensure the server has JetStream enabled (not just core NATS). For Azure, verify <code>blob_container_name</code> is set on both outbound and inbound connections.</td>
                 </tr>
                 <tr>
-                    <td>"File semaphore full" log warnings</td>
-                    <td>Too many concurrent file transfers. The limit is 32 simultaneous file operations. Large files or slow connections can cause congestion. Consider reducing file sizes or upgrading network bandwidth.</td>
-                </tr>
-                <tr>
                     <td>File blocked by filter</td>
-                    <td>Check <code>file_filter_mode</code> and <code>file_filter_types</code> on the connection. An <code>allow</code> filter rejects extensions not in the list; a <code>deny</code> filter rejects extensions in the list.</td>
+                    <td>Check <code>file_filter_mode</code> and <code>file_filter_types</code> on the connection. An <code>allow</code> filter rejects extensions not in the list; a <code>deny</code> filter rejects extensions in the list. Filtering is applied on both outbound and inbound sides.</td>
                 </tr>
                 <tr>
                     <td>File appears after text message</td>
-                    <td>Normal behavior. Files arrive asynchronously via the file watcher (NATS Object Store watcher or Azure Blob poller). The inbound watcher retries post mapping lookup up to 3 times with backoff to wait for the text message to be processed first.</td>
+                    <td>Normal behavior. Files ride a parallel file-upload channel (NATS Object Store, Azure Blob container, or Azure Service Bus blob sidecar) and arrive asynchronously. The shared-channels framework re-resolves the post to attach to once both arrive.</td>
                 </tr>
                 <tr>
                     <td>Large files silently dropped</td>
                     <td>Files larger than the server's <code>MaxFileSize</code> setting (default 100 MB) are skipped with a log warning. Check <code>FileSettings.MaxFileSize</code> in the Mattermost server configuration.</td>
                 </tr>
                 <tr>
-                    <td>Azure connection test fails</td>
-                    <td>Verify the connection string is correct. Check that the storage account is accessible from the server. Ensure the account key has not been rotated.</td>
+                    <td>Azure connection test fails (shared-key / SAS)</td>
+                    <td>Verify the connection string is correct. Check that the storage account or Service Bus namespace is accessible from the server. Ensure the account key or SAS has not been rotated.</td>
                 </tr>
                 <tr>
-                    <td>Azure messages delayed</td>
-                    <td>Azure Queue Storage uses polling (5-second intervals for messages, 15-second intervals for files). This is normal. For lower latency, use the NATS provider.</td>
+                    <td>Azure connection test fails (Service Principal)</td>
+                    <td>The save-time AAD probe verifies that <code>tenant_id</code>, <code>client_id</code>, and <code>client_secret</code> can authenticate against the configured <code>azure_cloud</code>. Errors are sanitized but typically point at a wrong tenant ID, an expired secret, or missing data-plane RBAC at the configured scope (Storage Queue Data Contributor / Storage Blob Data Contributor / Azure Service Bus Data Sender + Receiver).</td>
                 </tr>
                 <tr>
-                    <td>Azure message too large</td>
-                    <td>Azure Queue Storage has a 48,000-byte message size limit (before Base64 encoding to the 64 KB wire limit). Messages exceeding this limit have their text truncated to fit. Long posts may lose content.</td>
+                    <td>Azure Queue messages delayed</td>
+                    <td>Azure Queue Storage uses polling. Default cadence is 5 s for messages, 15 s for files; both are configurable via <code>poll_interval_seconds</code> and <code>blob_poll_interval_seconds</code>. For lower latency, use NATS or Azure Service Bus.</td>
                 </tr>
                 <tr>
-                    <td>Duplicate messages with Azure</td>
-                    <td>Azure Queue provides at-least-once delivery. The plugin uses idempotency checks (post ID mapping) to prevent duplicates, but brief visibility timeout races can cause rare duplicates during error recovery.</td>
+                    <td>Azure Queue message too large</td>
+                    <td>Azure Queue Storage has a 48,000-byte message size limit (before Base64 expansion fits the 64 KB Azure Queue wire limit). Messages exceeding this limit are rejected at the client boundary. Switch to Azure Blob Storage (batched WAL, no per-message cap) or Azure Service Bus (configurable up to 100 MiB on Premium) for larger payloads.</td>
+                </tr>
+                <tr>
+                    <td>Duplicate messages with Azure Queue or Blob</td>
+                    <td>Both provide at-least-once delivery. The inbound sequencer keys on <code>(Epoch, ConnName, ChannelId, Sequence)</code> and drops duplicates structurally; combined with the single-active-receiver lease (only one cluster node subscribes at a time), duplicates do not reach the framework. If you see suspected duplicates, check the <code>InboundSeq*</code> audit codes (15300-range) for the actual delivery pattern.</td>
                 </tr>
                 <tr>
                     <td>Azure blob files not appearing</td>
-                    <td>Verify <code>blob_container_name</code> is set on both sides. Check that <code>file_transfer_enabled</code> is <code>true</code> on both outbound and inbound connections. The blob watcher polls every 15 seconds.</td>
+                    <td>Verify <code>blob_container_name</code> is set on both sides. Check that <code>file_transfer_enabled</code> is <code>true</code> on both outbound and inbound connections. The blob watcher polls at <code>blob_poll_interval_seconds</code> cadence (default 15 s for Azure Queue and Service Bus; <code>batch_poll_interval_seconds</code> default 30 s for Azure Blob).</td>
+                </tr>
+                <tr>
+                    <td>Azure Service Bus: DeliveryCount warnings</td>
+                    <td>Service Bus PeekLock increments <code>DeliveryCount</code> on every Abandon. Error code <code>26004</code> logs a WARN when a message arrives with <code>DeliveryCount &gt; 1</code>, surfacing poison-message buildup before the broker auto-moves to DLQ. Inspect the DLQ via <code>az servicebus queue message</code> or the Azure portal; the plugin does not consume the DLQ.</td>
+                </tr>
+                <tr>
+                    <td>Azure Service Bus: empty-body messages</td>
+                    <td>The plugin Completes empty-body messages to avoid infinite redelivery loops (error code <code>26005</code>). This is normal during pre-existing-queue cleanup; if it persists, investigate the source side.</td>
+                </tr>
+                <tr>
+                    <td>Azure Service Bus: queue not found</td>
+                    <td>The plugin does NOT auto-create Service Bus queues. Pre-create the queue in the Azure portal (or via ARM / Terraform) with the desired <code>LockDuration</code> and <code>MaxDeliveryCount</code> before configuring the connection.</td>
+                </tr>
+                <tr>
+                    <td>Azure Service Bus SP: blob sidecar credentials</td>
+                    <td>In <code>auth_mode: "service-principal"</code> mode, the blob sidecar inherits the parent SP credential; <code>blob_account_name</code> and <code>blob_account_key</code> must be empty. Mixed-mode sidecars (SP for messages, shared-key for files) are not supported. Grant the SP <em>Storage Blob Data Contributor</em> on the sidecar container.</td>
+                </tr>
+                <tr>
+                    <td>Inbound stalls in a clustered deployment</td>
+                    <td>Only one cluster node holds the active inbound subscription at a time (KV TTL lease, 45 s TTL with 15 s renewal). If that node loses KV access, failover takes up to one TTL. Watch the <code>InboundActive*</code> audit codes (15200-range) for the election story.</td>
+                </tr>
+                <tr>
+                    <td>Inbound sequence gaps in operator logs</td>
+                    <td>The inbound sequencer audits ranges whose missing predecessors never arrived after the 1 s gap deadline, via the <code>InboundSeq*</code> codes (15300-range). Investigate alongside the source-side <code>OutboundSyncMsg*</code> codes (10100-range) to see whether the gap was created by the sender, the transport, or the receiver.</td>
                 </tr>
             </tbody>
         </table>

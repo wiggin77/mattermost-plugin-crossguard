@@ -1,0 +1,138 @@
+# Hand-written annotations for the error-codes page.
+#
+# This file is merged into the auto-generated public/help/error-codes.html
+# by scripts/generate-error-codes. Constant names, integer values, and the
+# log-level prefix on the inline comment in server/errcode/codes.go are
+# always derived from source; this file only contributes the human-readable
+# description and troubleshooting guidance.
+#
+# To add or refine entries:
+#   1. Add a block-level paragraph under `blocks:` keyed by the source-file
+#      path exactly as it appears in the `// foo.go (NNNNN-NNNNN)` header
+#      comment in codes.go (e.g. `hooks.go`, `store/caching.go`).
+#   2. Add per-code overrides under `codes:` keyed by the Go constant name.
+#      `description:` overrides whatever the codes.go inline comment says;
+#      `troubleshooting:` is operator-facing remediation guidance.
+#   3. Run `make generate-error-codes` to regenerate the page.
+#
+# The generator refuses to run if this file references a constant name or
+# block path that does not exist, so a typo here is caught at generate time.
+
+blocks:
+  hooks.go: >
+    Emitted from the shared-channels framework hooks
+    (`OnSharedChannelsSyncMsg`, `OnSharedChannelsAttachmentSyncMsg`,
+    `OnSharedChannelsProfileImageSyncMsg`, `OnSharedChannelsPing`) in
+    `server/hooks.go`. These run for every sync event the framework hands
+    the plugin, so transient failures here can prevent the relay of
+    individual sync cycles.
+
+  api.go: >
+    Emitted from REST API handlers in `server/api.go`. Most codes
+    correspond to a System Console action (test connection, set rewrite)
+    or to a slash-command action dispatched via the API.
+
+  configuration.go: >
+    Emitted at plugin configuration load and validation
+    (`server/configuration.go`). Includes the Azure Service Principal
+    credential-construction audit (`AzureSPAuditConstructed`) that records
+    tenant ID, client ID, Azure cloud, and a short hash of the SP secret
+    on every successful credential construction.
+
+  command.go: >
+    Emitted from slash-command execution (`server/command.go`).
+
+  service.go: >
+    Emitted from the team and channel initialization service
+    (`server/service.go`). Most failures here mean a KV write or read
+    error during a link or teardown action.
+
+  inbound.go: >
+    Emitted from the inbound message pipeline (`server/inbound.go`),
+    including the single-active-receiver election
+    (`InboundActive*`, 15200-range), the inbound sequencer
+    (`InboundSeq*`, 15300-range), and the cursor checkpoint ticker
+    (15400-range). These are the operator-facing audit codes for envelope
+    ordering and clustered failover.
+
+  connections.go: >
+    Emitted from the outbound publisher and the file-upload path
+    (`server/connections.go`). Covers transport publish failures and
+    file-upload errors.
+
+  azure_blob_provider.go: >
+    Emitted from the Azure Blob Storage provider, including the batch WAL
+    sealer, the lease-based reader, and the deferred file blob handler
+    (`server/azure_blob_provider.go`).
+
+  azure_provider.go: >
+    Emitted from the Azure Queue Storage provider
+    (`server/azure_provider.go`). Covers queue dequeue, blob container
+    operations for file transfer, and credential construction (shared key
+    and Service Principal).
+
+  nats_provider.go: >
+    Emitted from the NATS transport provider (`server/nats_provider.go`).
+    Covers connection lifecycle and JetStream Object Store operations for
+    file transfer.
+
+  prompt.go: >
+    Emitted from the inbound-connection acceptance prompt flow
+    (`server/prompt.go`). Covers the Accept/Block interactive prompts and
+    their lifecycle.
+
+  store/caching.go: >
+    Emitted from the KV cache layer (`server/store/caching.go`). The
+    cache is cluster-aware via `PluginClusterEvent` invalidation; failures
+    here are usually transient.
+
+  request.go: >
+    Emitted from the team-admin connection request workflow
+    (`server/request.go`). Active when `RestrictToSystemAdmins` and
+    `AllowTeamAdminRequests` are both enabled.
+
+  channel_request.go: >
+    Emitted from the channel-admin connection request workflow
+    (`server/channel_request.go`). Active when `RestrictToSystemAdmins`
+    and `AllowChannelAdminRequests` are both enabled.
+
+  azure_servicebus_provider.go: >
+    Emitted from the Azure Service Bus provider
+    (`server/azure_servicebus_provider.go`). Covers the PeekLock
+    receiver, AMQP send path, blob sidecar handling, and credential
+    construction (SAS connection string and Service Principal).
+
+  plugin.go: >
+    Emitted from plugin lifecycle hooks (`server/plugin.go`): activation,
+    deactivation, framework registration, and the envelope-archive
+    configuration on `OnActivate`.
+
+  inbound_files.go: >
+    Emitted from the inbound file-channel handler
+    (`server/inbound_files.go`), which dispatches
+    `WatchFiles` events to the framework's attachment and profile-image
+    upsert APIs.
+
+  wire/*: >
+    Emitted by validators in `server/wire/` (via the `WireLogger`
+    interface in `server/wire/validate.go`). These run during outbound
+    marshalling to enforce the typed Props whitelists and the username
+    resolution ladder; they are the source of truth for which content was
+    dropped at the boundary.
+
+# Per-code descriptions and troubleshooting guidance. Add entries as needed;
+# the generator does not require an entry for every code.
+codes:
+  AzureSPAuditConstructed:
+    description: >
+      Emitted once per successful Azure Service Principal credential
+      construction across the three Azure providers. The corresponding
+      INFO log records `tenant_id`, `client_id`, `azure_cloud`, and the
+      first 12 hex chars of SHA-256 of the secret so operators can
+      correlate "which SP / secret was active" without exposing the
+      secret value itself.
+    troubleshooting: >
+      Informational. Each appearance corresponds to a credential
+      construction (plugin start, configuration change, or SP rotation
+      picked up at the next load). Use it as the audit trail for SP
+      rotations. The secret value itself is never logged.

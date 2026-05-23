@@ -39,69 +39,102 @@
         <!-- What is Cross Guard? -->
         <h2>What is Cross Guard?</h2>
         <p>
-            Cross Guard enables message relay between separate Mattermost servers using NATS or Azure Queue Storage as the
-            transport layer. It is designed for environments where multiple isolated Mattermost instances
-            need to exchange messages across domain boundaries without direct database or API access
-            between servers.
+            Cross Guard enables message relay between separate Mattermost servers using one of
+            four pluggable transport providers: NATS, Azure Queue Storage, Azure Blob Storage,
+            or Azure Service Bus. It is designed for environments where multiple isolated
+            Mattermost instances need to exchange messages across domain boundaries without
+            direct database or API access between servers.
         </p>
         <p>
-            Posts, edits, deletes, reactions, and file attachments flow bidirectionally across server
-            boundaries. Each server maintains its own users, teams, and channels. Cross Guard bridges
-            them at the message level, preserving each server's independence while enabling real-time
-            communication. File attachments are transferred using NATS JetStream Object Store or
-            Azure Blob Storage, depending on the configured provider. File transfer is opt-in per connection.
+            Posts, edits, deletes, reactions, channel join and leave events, post
+            acknowledgements, user identity records, and file attachments flow
+            bidirectionally across server boundaries. Each server maintains its own users,
+            teams, and channels. Cross Guard bridges them at the message level, preserving
+            each server's independence while enabling real-time communication. File
+            attachments and profile images are transferred through the configured transport's
+            file-upload channel (NATS JetStream Object Store, Azure Blob Storage, or the
+            Service Bus blob sidecar, depending on provider). File transfer is opt-in per
+            connection.
         </p>
         <p>
-            The plugin integrates with Mattermost's post lifecycle hooks, so relay behavior is
-            transparent to end users. Messages appear in channels as if they were posted locally.
+            The plugin integrates with Mattermost's shared-channels framework: outbound
+            content is collected by the framework's sync hooks
+            (<code>OnSharedChannelsSyncMsg</code> and its companions), and inbound content is
+            handed back to the framework via <code>ReceiveSharedChannelSyncMsg</code>.
+            Relay behaviour is therefore transparent to end users; messages appear in channels
+            as if they were posted locally, attributed to a synced remote user that the
+            webapp's user popover marks as "Relayed from".
         </p>
 
         <!-- How Federation Works -->
         <h2>How Federation Works</h2>
 
         <div class="diagram-box">
-<pre>Server A (Low Side)          Transport Layer           Server B (High Side)
-+-----------------------+    +----------------+    +-----------------------+
-|                       |    |                |    |                       |
-|  User posts in        |    |  NATS Subject  |    |  Bot posts in         |
-|  #town-square         |---&gt;|  or Azure Queue|---&gt;|  #town-square         |
-|                       |    |                |    |                       |
-|  Outbound hook        |    |  (provider     |    |  Inbound handler      |
-|                       |    |   dependent)   |    |                       |
-|  File attached?       |    | JetStream Obj  |    |  File downloaded &amp;    |
-|  Upload to storage    |---&gt;| or Blob Store  |---&gt;|  attached to post     |
-+-----------------------+    +----------------+    +-----------------------+</pre>
+<pre>Server A (Low Side)               Transport Layer              Server B (High Side)
++--------------------------+    +----------------------+    +--------------------------+
+| Shared-channels          |    | NATS pub/sub         |    | Single-active receiver   |
+| framework fires hooks    |---&gt;|         or           |---&gt;| (KV TTL lease) consumes  |
+|                          |    | Azure Queue + Blob   |    | envelopes; sequencer     |
+| buildOutboundEnvelopes   |    |         or           |    | dedups and reorders;     |
+| splits SyncMsg into one  |    | Azure Blob WAL       |    | ReceiveSharedChannelSyncMsg |
+| envelope per post + an   |    |         or           |    | applies to local state   |
+| optional metadata one    |    | Azure Service Bus    |    |                          |
+|                          |    |                      |    |                          |
+| Epoch/Sequence stamped   |    +----------------------+    |                          |
+| File payloads ride a     |    | File channel:        |    | WatchFiles delivers      |
+| parallel UploadFile path |---&gt;| Object Store / Blob  |---&gt;| files w/ X-Crossguard-*  |
+|                          |    | (X-Crossguard-* hdrs)|    | headers for routing      |
++--------------------------+    +----------------------+    +--------------------------+</pre>
         </div>
 
         <h3>Two Connection Directions</h3>
         <ul>
             <li>
-                <strong>Outbound:</strong> Hooks into Mattermost post lifecycle events
-                (<code>MessageHasBeenPosted</code>, <code>MessageHasBeenUpdated</code>,
-                <code>MessageHasBeenDeleted</code>, reaction events), serializes to a message
-                envelope (JSON or XML, per connection config), and sends via the configured transport.
+                <strong>Outbound:</strong> The plugin implements the shared-channels framework
+                hooks (<code>OnSharedChannelsSyncMsg</code>,
+                <code>OnSharedChannelsAttachmentSyncMsg</code>,
+                <code>OnSharedChannelsProfileImageSyncMsg</code>,
+                <code>OnSharedChannelsPing</code>) and fans each upstream sync cycle into one
+                envelope per Post, plus an optional metadata envelope for non-post content.
+                Envelopes are serialized as XML by default (JSON support is in the immediate
+                follow-up), Epoch / Sequence-stamped, and published via the configured
+                transport. File attachments and profile images ride a parallel file-upload
+                channel.
             </li>
             <li>
-                <strong>Inbound:</strong> Receives messages from the transport (NATS subscription
-                or Azure queue polling), auto-detects the message format (JSON or XML),
-                deserializes the envelope, and creates, updates, or deletes posts locally.
+                <strong>Inbound:</strong> Exactly one cluster node holds the active subscription
+                for a given inbound connection at a time (KV TTL lease, 45 s TTL with 15 s
+                renewal). Incoming bytes are deserialized (format auto-detected from the first
+                non-whitespace byte), admitted by the inbound sequencer
+                (<code>(Epoch, ConnName, ChannelId, Sequence)</code> dedup, bounded reorder,
+                audited gap-deadline), translated through the channel-ID rewrite, and handed
+                to the framework's <code>ReceiveSharedChannelSyncMsg</code> for application.
             </li>
         </ul>
 
         <h3>What Gets Relayed</h3>
+        <p>
+            Each <code>sync_msg</code> envelope carries a payload whose components are pulled
+            from upstream <code>mmModel</code> types into plugin-owned wire types (under
+            <code>server/wire/</code>) with source-only and receiver-overwritten fields
+            dropped at the boundary.
+        </p>
         <table>
             <thead>
-                <tr><th>Event</th><th>Relayed?</th><th>Notes</th></tr>
+                <tr><th>Payload component</th><th>Carried?</th><th>Notes</th></tr>
             </thead>
             <tbody>
-                <tr><td>New posts</td><td>Yes</td><td>Including thread replies (root_id preserved)</td></tr>
-                <tr><td>Post edits</td><td>Yes</td><td>Updated content replaces original on the remote side</td></tr>
-                <tr><td>Post deletes</td><td>Yes</td><td>Matched by original post ID</td></tr>
-                <tr><td>Reaction adds</td><td>Yes</td><td>Emoji name and user are relayed. Sync-user reactions are filtered.</td></tr>
-                <tr><td>Reaction removes</td><td>Yes</td><td>Matched by emoji name and post ID. Sync-user reactions are filtered.</td></tr>
-                <tr><td>File attachments</td><td>Configurable</td><td>Enabled per connection via <code>file_transfer_enabled</code>. Supports allow/deny extension filters.</td></tr>
-                <tr><td>System messages</td><td>No</td><td>Filtered out to avoid noise</td></tr>
-                <tr><td>Relay bot posts</td><td>No</td><td>Loop prevention via <code>crossguard_relayed</code> property (posts/edits), sync-user filtering (reactions), and delete flag mechanism (deletes)</td></tr>
+                <tr><td>Posts (new, edited, deleted)</td><td>Yes</td><td>One Post per envelope. Edits signalled by <code>EditAt</code>/<code>OriginalId</code>; deletes by a non-zero <code>DeleteAt</code> and an optional <code>Props.DeleteBy</code>. Threading preserved via <code>RootId</code>.</td></tr>
+                <tr><td>Users</td><td>Yes</td><td>Whitelisted subset of <code>mmModel.User</code> (identity, names, position, roles, locale, optional Timezone, four-key <code>UserProps</code>). Credentials, MFA, NotifyProps dropped at the boundary.</td></tr>
+                <tr><td>Reactions</td><td>Yes</td><td>Emoji name plus author. Reaction removals carry a non-zero <code>DeleteAt</code>.</td></tr>
+                <tr><td>Presence / Status</td><td>Yes</td><td>Online / away / dnd / offline with manual flag and DND end time. Source-local <code>ActiveChannel</code> is dropped.</td></tr>
+                <tr><td>Membership changes</td><td>Yes</td><td>Channel join / leave events relayed so the framework keeps its synced-channel membership view current.</td></tr>
+                <tr><td>Post acknowledgements</td><td>Yes</td><td>The "ack" feature's user-by-user ack timestamps.</td></tr>
+                <tr><td>Mention transforms</td><td>Yes</td><td>Sender-resolved mention rewrites (e.g. <code>@alice</code> &rarr; <code>@alice.high</code>) so receivers reproduce the source author's intent.</td></tr>
+                <tr><td>File attachments</td><td>Configurable</td><td>Opt-in per connection via <code>file_transfer_enabled</code>. Carried on the file-upload channel (not the XML envelope); supports allow / deny extension filters.</td></tr>
+                <tr><td>Profile images</td><td>Configurable</td><td>Carried on the same file-upload channel when file transfer is enabled.</td></tr>
+                <tr><td>Whitelisted Props keys</td><td>Yes</td><td>Fifteen keys on <code>PostProps</code>, four on <code>UserProps</code>. Unknown upstream keys (from any plugin) are dropped at the boundary.</td></tr>
+                <tr><td>Loop prevention</td><td>(handled)</td><td>Intrinsic to the framework: every received User carries a non-empty <code>RemoteId</code>, so the framework's cursors do not re-emit synced content. The plugin additionally calls <code>connNameForRemote(rc.RemoteId)</code> to suppress per-remote re-emission.</td></tr>
             </tbody>
         </table>
 
@@ -110,44 +143,83 @@
 
         <h3>Connections</h3>
         <p>
-            Named connection configurations (NATS or Azure Queue Storage), inbound or outbound, defined in the System Console.
-            Referenced by name in all commands using the format <code>direction:name</code>
-            (e.g., <code>outbound:relay-to-b</code>).
+            Named connection configurations (NATS, Azure Queue Storage, Azure Blob Storage, or
+            Azure Service Bus), inbound or outbound, defined in the System Console. Referenced
+            by name in all commands using the format <code>direction:name</code> (e.g.
+            <code>outbound:relay-to-b</code>).
         </p>
 
         <h3>Team Initialization</h3>
         <p>
-            A team must be linked to a connection before any channels in that team can relay messages.
-            This is always the first step. Use <code>/crossguard init-team</code> to link a connection.
+            A team must be linked to a connection before any channels in that team can relay
+            messages. This is always the first step. Use <code>/crossguard init-team</code> to
+            link a connection.
         </p>
 
         <h3>Channel Initialization</h3>
         <p>
-            Individual channels within an initialized team are linked to connections. Only linked
-            channels relay messages. Use <code>/crossguard init-channel</code> to link a channel.
+            Individual channels within an initialized team are linked to connections. Only
+            linked channels relay messages. Use <code>/crossguard init-channel</code> to link
+            a channel.
         </p>
 
         <h3>Inbound Prompts</h3>
         <p>
-            When an inbound message arrives for a team or channel that hasn't been explicitly accepted,
-            an interactive prompt (Accept/Block buttons) is posted. Team-level prompts appear in
-            town-square; channel-level prompts appear in the target channel. Admins must accept
-            before messages flow. Use <code>/crossguard reset-prompt</code> to clear a blocked prompt.
+            When an inbound envelope arrives for a team or channel that has not been
+            explicitly accepted, an interactive prompt (Accept / Block buttons) is posted.
+            Team-level prompts appear in town-square; channel-level prompts appear in the
+            target channel. Admins must accept before messages flow. Use
+            <code>/crossguard reset-prompt</code> or
+            <code>/crossguard reset-channel-prompt</code> to clear a blocked prompt.
         </p>
 
         <h3>Team Name Rewriting</h3>
         <p>
-            Maps remote team names to local teams, allowing servers with different team names to relay
-            correctly. Configured per inbound connection using
+            Maps remote team names to local teams, allowing servers with different team names
+            to relay correctly. Configured per inbound connection using
             <code>/crossguard rewrite-team</code>.
         </p>
 
-        <h3>Username Lookup</h3>
+        <h3>Synced Remote Users</h3>
         <p>
-            When enabled (the <code>UsernameLookup</code> setting), inbound messages are posted as the
-            matching local user if one exists with the same username. Otherwise, a synthetic relay bot
-            posts them.
+            Inbound users from a remote server are upserted by the shared-channels framework
+            as <em>remote users</em>: local accounts that carry a non-empty
+            <code>RemoteId</code> identifying the source remote. They are distinct from
+            native local users and cannot silently merge into existing local accounts. The
+            webapp's user popover shows a "Relayed from: alice (via high-side)" indicator on
+            synced users so operators always know which conversation came from which domain.
         </p>
+
+        <h3>Single-Active Inbound Receiver</h3>
+        <p>
+            For each inbound connection, exactly one node in a Mattermost cluster holds the
+            active subscription at a time, gated by a KV TTL lease (45 s TTL with 15 s
+            renewal). Other nodes idle and race for the lease when it ages out. The inbound
+            sequencer keys on <code>(Epoch, ConnName, ChannelId, Sequence)</code> to absorb
+            at-least-once redeliveries from the transport and replays caused by a sender
+            restart; lost ranges are audited via numeric error codes (see
+            <a href="error-codes.html">Error Codes</a>).
+        </p>
+
+        <h3>Request-Mode Workflows</h3>
+        <p>
+            In deployments where <code>RestrictToSystemAdmins</code> is enabled, two opt-in
+            settings restore a request-and-approve flow so non-sysadmin admins can still drive
+            cross-domain setup without unsupervised linking authority:
+        </p>
+        <ul>
+            <li>
+                <strong><code>AllowTeamAdminRequests</code></strong>: a Team Admin running
+                <code>init-team</code> submits a link request to System Admins, who approve
+                or deny via interactive DM. <code>teardown-team</code> remains direct.
+            </li>
+            <li>
+                <strong><code>AllowChannelAdminRequests</code></strong>: a Channel Admin
+                running <code>init-channel</code> submits a link request to Team Admins, who
+                approve or deny via interactive DM. <code>teardown-channel</code> remains
+                direct.
+            </li>
+        </ul>
 
         <!-- Getting Started -->
         <h2>Getting Started</h2>
@@ -155,9 +227,10 @@
         <ol class="steps">
             <li>
                 <strong>Configure connections</strong> in
-                <strong>System Console &gt; Plugins &gt; Cross Guard</strong>.
-                Add connection details for your chosen provider (NATS or Azure Queue Storage).
-                See the <a href="admin.html">Admin Configuration Guide</a> for details.
+                <strong>System Console &gt; Plugins &gt; Cross Guard</strong>. Add connection
+                details for your chosen provider (NATS, Azure Queue Storage, Azure Blob
+                Storage, or Azure Service Bus). See the
+                <a href="admin.html">Admin Configuration Guide</a> for details.
             </li>
             <li>
                 <strong>Initialize a team:</strong> Run
@@ -252,7 +325,7 @@
             </a>
             <a href="api.html" class="nav-card">
                 <h3>REST API Reference</h3>
-                <p>All 16 REST endpoints with request/response examples and authentication details.</p>
+                <p>All REST endpoints with request and response examples and authentication details.</p>
             </a>
             <a href="error-codes.html" class="nav-card">
                 <h3>Error Codes</h3>

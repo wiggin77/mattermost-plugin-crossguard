@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error Codes - Cross Guard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- AUTO-GENERATED. Do not edit by hand. See scripts/generate-error-codes. -->
+<div class="layout">
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <h2>Cross Guard</h2>
+            <span class="version">Plugin Documentation</span>
+        </div>
+        <nav>
+            <span class="nav-section">Documentation</span>
+            <a href="help.html">Overview</a>
+            <a href="commands.html">Slash Commands</a>
+            <a href="admin.html">Admin Configuration</a>
+            <a href="api.html">REST API</a>
+            <a href="error-codes.html" class="active">Error Codes</a>
+            <a href="transport-interface.html">Transport Interface</a>
+            <a href="threatmodel.html">Threat Model</a>
+            <a href="whitepaper.html">Whitepaper</a>
+        </nav>
+    </aside>
+
+    <main class="content">
+        <div class="breadcrumb">
+            <a href="help.html">Docs</a>
+            <span class="separator">/</span>
+            Error Codes
+        </div>
+
+        <h1>Error Codes</h1>
+        <p class="tagline">Reference for every numeric <code>error_code</code> emitted by Cross Guard logs</p>
+
+        <h2>How to Read This Page</h2>
+        <p>
+            Every operator-facing log call (LogInfo, LogWarn, LogError) in non-test code
+            carries a unique numeric <code>error_code</code> as its first key-value pair,
+            sourced from <code>server/errcode/codes.go</code>. The integer value is the
+            stable contract for log grep across plugin versions: the Go constant name may be
+            renamed, but the number never changes once assigned.
+        </p>
+        <p>Example log line:</p>
+<pre><code>{"level":"warn","msg":"...","error_code":15301,"epoch":"epoch01...","sequence":42}</code></pre>
+        <p>
+            Codes are allocated per source file in non-overlapping 1000-wide ranges. The
+            first two digits identify the subsystem. Each table row below lists the constant
+            name, the integer value, the inferred log level (where the inline comment in
+            <code>codes.go</code> declares one), a description, and operator-facing
+            troubleshooting guidance.
+        </p>
+
+        <div class="alert alert-info">
+            <p class="alert-title">Generated file</p>
+            <p>
+                This page is regenerated from <code>server/errcode/codes.go</code> and
+                <code>scripts/generate-error-codes/annotations.yaml</code> by running
+                <code>make generate-error-codes</code>. Hand edits will be overwritten;
+                add descriptions and troubleshooting tips to the annotations YAML instead.
+            </p>
+        </div>
+
+        <h2>Range Quick Reference</h2>
+        <table>
+            <thead>
+                <tr><th>Range</th><th>Source file</th><th>Count</th></tr>
+            </thead>
+            <tbody>
+{{- range .Blocks }}
+                <tr><td><code>{{ .StartRange }}-{{ .EndRange }}</code></td><td><a href="#{{ .Anchor }}">{{ .Title }}</a></td><td>{{ len .Codes }}</td></tr>
+{{- end }}
+            </tbody>
+        </table>
+        <p><strong>Total:</strong> {{ .TotalCodes }} codes across {{ len .Blocks }} source-file blocks.</p>
+
+{{ range .Blocks }}
+        <h2 id="{{ .Anchor }}">{{ .Title }} <span style="font-weight:400;font-size:16px;color:var(--text-secondary);">({{ .StartRange }}-{{ .EndRange }})</span></h2>
+{{- if .Description }}
+        <p>{{ .Description }}</p>
+{{- end }}
+        <table>
+            <thead>
+                <tr><th>Code</th><th>Name / Level</th><th>Description</th><th>Troubleshooting</th></tr>
+            </thead>
+            <tbody>
+{{- range .Codes }}
+                <tr>
+                    <td><code>{{ .Value }}</code></td>
+                    <td><code>{{ .Name }}</code>{{ if .Level }}<br><span class="{{ levelClass .Level }}">{{ .Level }}</span>{{ end }}</td>
+                    <td>{{ if .Description }}{{ .Description }}{{ else }}<em>(no description)</em>{{ end }}</td>
+                    <td>{{ if .Troubleshooting }}{{ .Troubleshooting }}{{ else }}<em>(see source)</em>{{ end }}</td>
+                </tr>
+{{- end }}
+            </tbody>
+        </table>
+{{ end }}
+    </main>
+</div>
+</body>
+</html>

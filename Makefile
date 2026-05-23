@@ -788,13 +788,21 @@ virus-scan: install-clamav
 	@echo "Virus scan passed."
 
 # ====================================================================================
-# PDF Generation
+# Documentation Generation
 # ====================================================================================
 
 ## Generate PDF documentation from help HTML pages
 .PHONY: generate-pdfs
 generate-pdfs: webapp/node_modules
 	cd webapp && NODE_PATH=node_modules node ../scripts/generate-pdfs.js
+
+## Regenerate public/help/error-codes.html from server/errcode/codes.go
+## and scripts/generate-error-codes/annotations.yaml. Add new codes to
+## codes.go first; descriptions and troubleshooting can be added to the
+## annotations YAML and a re-run will pick them up.
+.PHONY: generate-error-codes
+generate-error-codes:
+	go run ./scripts/generate-error-codes
 
 # ====================================================================================
 # Help

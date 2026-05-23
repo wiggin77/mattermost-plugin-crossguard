@@ -336,7 +336,7 @@ const (
 	ChanRequestGetTeamAdminsFailed   = 25018
 )
 
-// Azure Service Bus provider: 26000-26999.
+// azure_servicebus_provider.go (26000-26999)
 const (
 	ServiceBusSendFailed         = 26000
 	ServiceBusReceiveFailed      = 26001
