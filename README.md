@@ -70,7 +70,7 @@ Each connection's `message_format` setting chooses how Cross Guard serializes th
 | When to use | Default. Fast, compact, the natural choice when both sides are Cross Guard plugins. | Integrations with cross-domain solutions (CDS), content filters, or data-diode shuttles that speak XML natively. |
 | Schema | `schema/crossguard-api.yaml` (OpenAPI 3.1) models the JSON envelope and payloads. | [`schema/crossguard.xsd`](schema/crossguard.xsd) is the normative XML Schema; every outbound payload is schema-valid by construction. |
 | Examples | [REST API reference](public/help/api.html) shows full request/response shapes. | [`schema/examples/`](schema/examples/) contains schema-valid `.xml` fixtures covering each message type (post variants, update, delete, reaction add/remove, test, membership change, status, post acknowledgement, mention transforms, user/bot, metadata orphan reaction, system messages) plus a [README](schema/examples/README.md) walking through them. |
-| Inbound detection | Auto-detected by [`model.DetectFormat`](server/model/message.go): the first non-whitespace byte decides (`<` means XML, anything else means JSON). | Same. Inbound connections do not need to be told which format to expect; outbound connections do. |
+| Inbound detection | Auto-detected by inspecting the first non-whitespace byte (`<` means XML, `{` means JSON). | Same. Inbound connections do not need to be told which format to expect; outbound connections do. |
 | BOM | N/A. | A leading UTF-8 BOM on inbound XML is stripped automatically before format detection. |
 
 To validate the example XML payloads against the schema locally:

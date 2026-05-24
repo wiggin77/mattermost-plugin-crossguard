@@ -11,6 +11,28 @@ const HIDE_SIDEBAR_CSS = `
     .sidebar { display: none !important; }
     .content { margin-left: 0 !important; max-width: 100% !important; }
     .breadcrumb { display: none !important; }
+
+    /* In PDF mode, soft-wrap long lines inside inline code samples so
+     * realistic JSON, XML, and Go signatures do not get clipped at the
+     * page margin. The ASCII diagrams under .diagram-box use bare
+     * <pre> with no nested <code>, so they keep their hard newlines
+     * and spacing untouched. */
+    pre code {
+        white-space: pre-wrap !important;
+        word-break: break-all !important;
+    }
+
+    /* Allow long unbreakable strings (e.g. servicebus URLs, base64
+     * payloads, GUIDs) inside inline <code> in table cells to break so
+     * the table fits the page. overflow-wrap only breaks when needed,
+     * so short identifiers still render in one piece. */
+    td code, th code {
+        overflow-wrap: anywhere !important;
+    }
+    table {
+        table-layout: auto;
+        width: 100% !important;
+    }
 `;
 
 const PDF_OPTIONS = {

@@ -57,18 +57,22 @@
         <h2>System Architecture and Trust Zones</h2>
 
         <div class="diagram-box">
-<pre>Zone 1: Mattermost Server A         Zone 3: Transport          Zone 5: Mattermost Server B
-+----------------------------+     +------------------+     +----------------------------+
-|  Shared-channels framework |     |  NATS pub/sub    |     |  Shared-channels framework |
-|  Users, Teams, Channels    |     |        or        |     |  Users, Teams, Channels    |
-|  +----------------------+  |     |  Azure Queue +   |     |  +----------------------+  |
-|  | Zone 2: Cross Guard  |  |     |  Blob (paired)   |     |  | Zone 4: Cross Guard  |  |
-|  | Plugin (Outbound):   |--|----&gt;|        or        |----&gt;|--| Plugin (Inbound):    |  |
-|  | hooks.go,            |  |     |  Azure Blob WAL  |     |  | single-active lease, |  |
-|  | buildOutboundEnvelopes  |     |        or        |     |  | inbound_sequencer,   |  |
-|  | + Epoch/Sequence stamping     |  Azure Service   |     |  | ReceiveSharedChannel |  |
-|  +----------------------+  |     |  Bus (PeekLock)  |     |  +----------------------+  |
-+----------------------------+     +------------------+     +----------------------------+</pre>
+<pre>Zone 1: Server A          Zone 3: Transport     Zone 5: Server B
++--------------------+   +-----------------+   +--------------------+
+| Shared-channels    |   | NATS pub/sub    |   | Shared-channels    |
+| framework          |   |       or        |   | framework          |
+| +----------------+ |   | Azure Queue +   |   | +----------------+ |
+| | Zone 2:        | |   | Blob (paired)   |   | | Zone 4:        | |
+| | Cross Guard    | |   |       or        |   | | Cross Guard    | |
+| | Plugin         |-|--&gt;| Azure Blob WAL  |--&gt;|-| Plugin         | |
+| | (Outbound):    | |   |       or        |   | | (Inbound):     | |
+| | hooks.go,      | |   | Azure Service   |   | | single-active  | |
+| | buildOutbound- | |   | Bus (PeekLock)  |   | | lease,         | |
+| | Envelopes +    | |   +-----------------+   | | sequencer,     | |
+| | Epoch/Sequence | |                         | | ReceiveShared- | |
+| +----------------+ |                         | | ChannelSyncMsg | |
+|                    |                         | +----------------+ |
++--------------------+                         +--------------------+</pre>
         </div>
 
         <table>

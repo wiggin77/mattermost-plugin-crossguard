@@ -534,23 +534,37 @@ Topology 3: Guard Network (Classified)
         <h3>Component Overview</h3>
 
         <div class="diagram-box">
-<pre>Mattermost Server A                                    Mattermost Server B
-+----------------------------------------------+     +----------------------------------------------+
-|                                              |     |                                              |
-|  [Users] --&gt; [Posts] --&gt; [Plugin Hooks]       |     |  [Plugin Inbound Handler] --&gt; [Posts] --&gt; UI  |
-|                              |               |     |           |                                  |
-|                    [Outbound Engine]          |     |  [Team/Channel Resolution]                   |
-|                         |                    |     |           |                                  |
-|            [Transport Publisher]              |     |  [User Sync Engine]                          |
-|                    |                         |     |           |                                  |
-|           [TLS + Auth]                       |     |      [TLS + Auth]                            |
-+-----------|----------------------------------+     +-----------|----------------------------------+
-            |                                                   |
-            v                                                   ^
-      +-----|---------------------------------------------------|-----+
-      |                    Transport Layer                             |
-      |  Transport Channel  --&gt;  Transport Channel                    |
-      +---------------------------------------------------------------+</pre>
+<pre>Mattermost Server A                  Mattermost Server B
++------------------------------+     +------------------------------+
+|                              |     |                              |
+| [Users] -&gt; [Posts]           |     | Framework upserts via        |
+|       |                      |     | ReceiveSharedChannelSyncMsg  |
+|       v                      |     |       ^                      |
+| Shared-channels hooks        |     |       |                      |
+| (OnSharedChannelsSyncMsg     |     | rewriteChannelIDs            |
+|  + attachment/profile/ping)  |     |       ^                      |
+|       |                      |     |       |                      |
+|       v                      |     | inboundSequencer.Admit       |
+| buildOutboundEnvelopes       |     | (Epoch/Sequence dedup,       |
+| (one Post per envelope)      |     |  reorder, gap-deadline)      |
+|       |                      |     |       ^                      |
+|       v                      |     |       |                      |
+| publishToOutboundConn        |     | Single-active subscription   |
+| (Epoch + Sequence stamping)  |     | (KV TTL lease)               |
+|       |                      |     |       ^                      |
+|       v                      |     |       |                      |
+| QueueProvider.Publish    [TLS]     [TLS]  QueueProvider.Subscribe |
++------------|-----------------+     +-----------|------------------+
+             |                                   |
+             v                                   ^
+      +------|-----------------------------------|------+
+      |                Transport Layer                  |
+      |    NATS / Azure Queue / Azure Blob WAL /        |
+      |    Azure Service Bus  (per connection)          |
+      +-------------------------------------------------+
+
+File payloads ride a parallel channel via QueueProvider.UploadFile /
+WatchFiles with X-Crossguard-* headers; not the XML envelope path.</pre>
         </div>
         <p>
             <em>Note:</em> The specific transport mechanism depends on the configured provider.
@@ -572,28 +586,28 @@ Topology 3: Guard Network (Classified)
         <ul>
             <li>
                 <strong><code>Plugin</code> struct:</strong> The central struct that holds the bot
-                user ID, KV store reference, transport provider connections (NATS, Azure Queue,
-                Azure Blob, or Azure Service Bus), relay semaphore, wait group for goroutine
-                lifecycle tracking, and a context for graceful shutdown.
+                user ID, the KV store reference, the transport provider connections (NATS,
+                Azure Queue, Azure Blob, or Azure Service Bus), the in-process
+                <code>Epoch</code> ID, the per-(connName, channelID) outbound sequence
+                counters, the wait group for goroutine lifecycle tracking, and a context for
+                graceful shutdown.
             </li>
             <li>
-                <strong>Outbound pool:</strong> A slice of <code>outboundConn</code> structs, each
-                holding a <code>QueueProvider</code> (NATS connection, Azure Queue client, Azure
-                Blob client with in-memory WAL buffer, or Azure Service Bus sender) and its
-                configuration. Protected by a <code>sync.RWMutex</code> to allow concurrent reads
-                (publishing) with exclusive writes (reconnection on config change).
+                <strong>Outbound pool:</strong> A slice of <code>outboundConn</code> structs,
+                each holding a <code>QueueProvider</code> (NATS connection, Azure Queue
+                client, Azure Blob client with in-memory WAL buffer, or Azure Service Bus
+                sender) and its configuration. Protected by a <code>sync.RWMutex</code> to
+                allow concurrent reads (publishing) with exclusive writes (reconnection on
+                config change).
             </li>
             <li>
-                <strong>Inbound pool:</strong> A slice of <code>inboundConn</code> structs, each
-                holding a <code>QueueProvider</code> (NATS subscription, Azure queue poller, Azure
-                Blob lease-based reader, or Azure Service Bus PeekLock receiver). Protected by a
-                <code>sync.RWMutex</code> with the same read/write concurrency model.
-            </li>
-            <li>
-                <strong>Relay semaphore:</strong> A buffered channel of capacity 256, shared by
-                both inbound and outbound relay operations. Controls the maximum number of
-                concurrent relay goroutines to prevent unbounded resource consumption under high
-                message volume.
+                <strong>Inbound pool:</strong> A slice of <code>inboundConn</code> structs,
+                each holding a <code>QueueProvider</code> (NATS subscription, Azure queue
+                poller, Azure Blob lease-based reader, or Azure Service Bus PeekLock receiver)
+                plus an elector goroutine that holds the single-active-receiver KV TTL lease
+                and an <code>inboundSequencer</code> that dedups envelopes by
+                <code>(Epoch, ConnName, ChannelId, Sequence)</code>. The map is protected by a
+                <code>sync.RWMutex</code> with the same read / write concurrency model.
             </li>
             <li>
                 <strong>KV store:</strong> Mattermost's built-in plugin key-value store, used
@@ -615,7 +629,7 @@ Topology 3: Guard Network (Classified)
             <tbody>
                 <tr>
                     <td><strong>OnActivate</strong></td>
-                    <td>Creates bot user, initializes KV store and caching layer, registers the <code>/crossguard</code> slash command, initializes HTTP router for REST API and interactive prompts, creates context for shutdown signaling, spawns relay semaphore, connects all configured outbound and inbound connections (NATS, Azure Queue Storage, Azure Blob Storage, or Azure Service Bus depending on each connection's provider setting).</td>
+                    <td>Creates the bot user, initializes the KV store and caching layer, registers the <code>/crossguard</code> slash command, initializes the HTTP router for the REST API and interactive prompts, creates the shutdown context, generates the per-process <code>Epoch</code> ID, registers the shared-channels remote for every configured connection, connects all configured outbound and inbound providers (NATS, Azure Queue, Azure Blob, or Azure Service Bus, per each connection's <code>provider</code> setting), and starts an elector goroutine per inbound connection so the single-active-receiver lease is acquired immediately. If <code>CROSSGUARD_ENVELOPE_ARCHIVE_DIR</code> is set, the envelope archive is also initialized at this point.</td>
                 </tr>
                 <tr>
                     <td><strong>OnConfigurationChange</strong></td>
@@ -623,7 +637,7 @@ Topology 3: Guard Network (Classified)
                 </tr>
                 <tr>
                     <td><strong>OnDeactivate</strong></td>
-                    <td>Cancels context (signals all goroutines to stop), closes inbound subscriptions (stops new message delivery), waits for all in-flight relay goroutines via WaitGroup, closes outbound connections.</td>
+                    <td>Cancels the shutdown context (signals all background goroutines to stop), releases the inbound active-receiver leases, closes inbound subscriptions and file watchers, waits for in-flight goroutines via the WaitGroup, and closes outbound providers.</td>
                 </tr>
             </tbody>
         </table>

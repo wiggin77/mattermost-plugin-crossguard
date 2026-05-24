@@ -70,21 +70,26 @@
         <h2>How Federation Works</h2>
 
         <div class="diagram-box">
-<pre>Server A (Low Side)               Transport Layer              Server B (High Side)
-+--------------------------+    +----------------------+    +--------------------------+
-| Shared-channels          |    | NATS pub/sub         |    | Single-active receiver   |
-| framework fires hooks    |---&gt;|         or           |---&gt;| (KV TTL lease) consumes  |
-|                          |    | Azure Queue + Blob   |    | envelopes; sequencer     |
-| buildOutboundEnvelopes   |    |         or           |    | dedups and reorders;     |
-| splits SyncMsg into one  |    | Azure Blob WAL       |    | ReceiveSharedChannelSyncMsg |
-| envelope per post + an   |    |         or           |    | applies to local state   |
-| optional metadata one    |    | Azure Service Bus    |    |                          |
-|                          |    |                      |    |                          |
-| Epoch/Sequence stamped   |    +----------------------+    |                          |
-| File payloads ride a     |    | File channel:        |    | WatchFiles delivers      |
-| parallel UploadFile path |---&gt;| Object Store / Blob  |---&gt;| files w/ X-Crossguard-*  |
-|                          |    | (X-Crossguard-* hdrs)|    | headers for routing      |
-+--------------------------+    +----------------------+    +--------------------------+</pre>
+<pre>Server A                  Transport Layer        Server B
++-------------------+   +-------------------+   +-------------------+
+| Shared-channels   |   | NATS pub/sub      |   | Single-active     |
+| framework hooks   |--&gt;|        or         |--&gt;| receiver consumes |
+| fire              |   | Azure Queue +     |   | envelopes;        |
+|                   |   | Blob (paired)     |   | sequencer dedups  |
+| buildOutbound-    |   |        or         |   | and reorders;     |
+| Envelopes splits  |   | Azure Blob WAL    |   | rewriteChannelIDs |
+| SyncMsg into one  |   |        or         |   | then              |
+| envelope per post |   | Azure Service Bus |   | ReceiveShared-    |
+| (+ optional meta) |   |                   |   | ChannelSyncMsg    |
+|                   |   +-------------------+   |                   |
+| Epoch + Sequence  |                           |                   |
+| stamped on every  |   +-------------------+   |                   |
+| envelope          |   | File channel:     |   | WatchFiles +      |
+|                   |--&gt;| Object Store /    |--&gt;| X-Crossguard-*    |
+| File payloads via |   | Blob with         |   | headers for       |
+| UploadFile        |   | X-Crossguard-*    |   | routing           |
+|                   |   | headers           |   |                   |
++-------------------+   +-------------------+   +-------------------+</pre>
         </div>
 
         <h3>Two Connection Directions</h3>
