@@ -245,8 +245,12 @@ func (p *Plugin) executeHelp() *model.CommandResponse {
 	sb.WriteString("- **Example (clear):** `/crossguard rewrite-team myconn`\n\n")
 
 	sb.WriteString("##### `/crossguard status`\n")
-	sb.WriteString("Show the Cross Guard status for the current team and channel. System Admins see a global overview of all initialized teams and connections.\n")
+	sb.WriteString("Show the Cross Guard status for the current team and channel. System Admins see a global overview of all initialized teams and connections, including each outbound connection's wire format (`xml` or `json`).\n")
 	sb.WriteString("- **Permission:** Any team member (System Admins see global status)\n\n")
+
+	sb.WriteString("---\n\n")
+	sb.WriteString("**Wire format:**\n")
+	sb.WriteString("Outbound connections carry a `message_format` setting: `xml` (default, used by Cross Domain Solutions) or `json`. Set it in **System Console > Plugins > Cross Guard** per outbound connection. Inbound connections auto-detect the format from the first non-whitespace byte of each envelope and accept both encodings on the same subscription.\n\n")
 
 	sb.WriteString("---\n\n")
 
@@ -498,7 +502,7 @@ func (p *Plugin) executeStatusSystemAdmin(channelID string) *model.CommandRespon
 		sb.WriteString("| Name | Direction | Provider | Details | Format | Files |\n")
 		sb.WriteString("|:-----|:----------|:---------|:--------|:-------|:------|\n")
 		for _, conn := range resp.Connections {
-			fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s | %s |\n", conn.Name, conn.Direction, providerLabel(conn.Provider), providerDetails(conn), "xml", fileTransferLabelEmoji(conn.FileTransferEnabled, conn.FileFilterMode, conn.FileFilterTypes))
+			fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s | %s |\n", conn.Name, conn.Direction, providerLabel(conn.Provider), providerDetails(conn), conn.MessageFormat, fileTransferLabelEmoji(conn.FileTransferEnabled, conn.FileFilterMode, conn.FileFilterTypes))
 		}
 	}
 

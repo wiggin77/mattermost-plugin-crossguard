@@ -30,7 +30,7 @@ func TestArchiveEnvelopeNoOpWhenDirEmpty(t *testing.T) {
 		// to assert beyond "did not fail." Using a temp dir's
 		// emptiness to confirm no spurious write would be circular;
 		// simply call and require no panic.
-		archiveEnvelope(&TransportEnvelope{ConnName: "c", Type: TransportTypeSyncMsg}, []byte("<x/>"))
+		archiveEnvelope(&TransportEnvelope{ConnName: "c", Type: TransportTypeSyncMsg}, []byte("<x/>"), FormatXML)
 	})
 }
 
@@ -38,7 +38,7 @@ func TestArchiveEnvelopeWritesFileWhenDirSet(t *testing.T) {
 	dir := t.TempDir()
 	withArchiveDir(t, dir, func() {
 		env := &TransportEnvelope{ConnName: "nats-low-to-high", Type: TransportTypeSyncMsg}
-		archiveEnvelope(env, []byte("<CrossGuardEnvelope/>"))
+		archiveEnvelope(env, []byte("<CrossGuardEnvelope/>"), FormatXML)
 	})
 
 	entries, err := os.ReadDir(dir)
@@ -61,7 +61,7 @@ func TestArchiveEnvelopeUniqueFilenames(t *testing.T) {
 		// the timestamp portion; the seq counter prevents overwrite.
 		env := &TransportEnvelope{ConnName: "c", Type: TransportTypeSyncMsg}
 		for range 100 {
-			archiveEnvelope(env, []byte("<x/>"))
+			archiveEnvelope(env, []byte("<x/>"), FormatXML)
 		}
 	})
 	entries, err := os.ReadDir(dir)
@@ -76,7 +76,7 @@ func TestArchiveEnvelopeSanitizesConnName(t *testing.T) {
 		// archiver should map any unexpected characters to '_' so a
 		// pathological value can't escape the archive directory or
 		// crash filename construction.
-		archiveEnvelope(&TransportEnvelope{ConnName: "weird/../name", Type: "t"}, []byte("<x/>"))
+		archiveEnvelope(&TransportEnvelope{ConnName: "weird/../name", Type: "t"}, []byte("<x/>"), FormatXML)
 	})
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestArchiveEnvelopeSanitizesConnName(t *testing.T) {
 func TestArchiveEnvelopeNilEnvelopeNoOp(t *testing.T) {
 	dir := t.TempDir()
 	withArchiveDir(t, dir, func() {
-		archiveEnvelope(nil, []byte("<x/>"))
+		archiveEnvelope(nil, []byte("<x/>"), FormatXML)
 	})
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestMarshalEnvelopeArchivesWhenEnabled(t *testing.T) {
 			ChannelName: "nats-low-to-high",
 			TestID:      "testid12aaaaaaaaaaaaaaaaaa",
 		}
-		data, err := MarshalEnvelope(env)
+		data, err := MarshalEnvelope(env, FormatXML)
 		require.NoError(t, err)
 		require.NotEmpty(t, data)
 	})

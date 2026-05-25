@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	mmModel "github.com/mattermost/mattermost/server/public/model"
@@ -17,6 +20,47 @@ const (
 	TransportTypeProfileImage = "profile_image"
 	TransportTypeTest         = "test"
 )
+
+// WireFormat selects between the supported encodings for outbound
+// envelopes. Inbound decoding is auto-detected by the first
+// non-whitespace byte, so this type is not consulted on the receive
+// side. FormatXML is the default and the historical wire encoding.
+type WireFormat int
+
+const (
+	FormatXML WireFormat = iota
+	FormatJSON
+)
+
+// String returns the lowercase wire-format identifier used by config
+// validation, the slash-command status table, and the archive filename
+// extension.
+func (f WireFormat) String() string {
+	switch f {
+	case FormatJSON:
+		return "json"
+	default:
+		return "xml"
+	}
+}
+
+// ParseWireFormat resolves a config-file string to a WireFormat value.
+// Empty input defaults to FormatXML; any non-empty value other than
+// "xml" or "json" (case-insensitively, after trimming whitespace) is
+// rejected with an explanatory error. The defaulter here is the
+// single source of truth for the "empty means XML" rule; callers
+// should not pre-rewrite empty to "xml" before storage so the audit
+// trail of the saved config remains the operator's literal input.
+func ParseWireFormat(s string) (WireFormat, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "xml":
+		return FormatXML, nil
+	case "json":
+		return FormatJSON, nil
+	default:
+		return FormatXML, fmt.Errorf("invalid message_format %q (want \"xml\" or \"json\")", s)
+	}
+}
 
 // TransportEnvelope wraps content for XML wire transport between servers.
 // Exactly one of SyncMsg or TestID is populated, depending on Type.
@@ -33,27 +77,31 @@ const (
 // stamped only on sync_msg envelopes since test envelopes have no channel
 // scope.
 type TransportEnvelope struct {
-	XMLName     xml.Name      `xml:"CrossGuardEnvelope"`
-	Version     int           `xml:"version,attr"`
-	Type        string        `xml:"type,attr"`
-	ConnName    string        `xml:"ConnName"`
-	Timestamp   string        `xml:"Timestamp"`
-	Epoch       string        `xml:"Epoch,omitempty"`
-	Sequence    uint64        `xml:"Sequence,omitempty"`
-	TeamName    string        `xml:"TeamName"`
-	ChannelName string        `xml:"ChannelName"`
-	SyncMsg     *wire.SyncMsg `xml:"SyncMsg,omitempty"`
-	TestID      string        `xml:"TestID,omitempty"`
+	XMLName     xml.Name      `xml:"CrossGuardEnvelope" json:"-"`
+	Version     int           `xml:"version,attr"       json:"version"`
+	Type        string        `xml:"type,attr"          json:"type"`
+	ConnName    string        `xml:"ConnName"           json:"ConnName"`
+	Timestamp   string        `xml:"Timestamp"          json:"Timestamp"`
+	Epoch       string        `xml:"Epoch,omitempty"    json:"Epoch,omitempty"`
+	Sequence    uint64        `xml:"Sequence,omitempty" json:"Sequence,omitempty"`
+	TeamName    string        `xml:"TeamName"           json:"TeamName"`
+	ChannelName string        `xml:"ChannelName"        json:"ChannelName"`
+	SyncMsg     *wire.SyncMsg `xml:"SyncMsg,omitempty"  json:"SyncMsg,omitempty"`
+	TestID      string        `xml:"TestID,omitempty"   json:"TestID,omitempty"`
 }
 
-// MarshalEnvelope serializes a TransportEnvelope to XML with the standard header.
-// When the CROSSGUARD_ENVELOPE_ARCHIVE_DIR env var is set, the marshalled
-// bytes are also written to that directory via archiveEnvelope; this is
-// the chokepoint that all outbound wire envelopes pass through so the
-// integration test suite can verify schema conformance across every
-// publish path (sync_msg via publishToOutboundConn, test envelopes via
-// the per-provider test-connection handlers, etc.).
-func MarshalEnvelope(env *TransportEnvelope) ([]byte, error) {
+// MarshalEnvelope serializes a TransportEnvelope to the requested wire
+// format. XML output is prefixed with the standard XML header; JSON
+// output is compact, no leading whitespace. When the
+// CROSSGUARD_ENVELOPE_ARCHIVE_DIR env var is set, the marshalled
+// bytes are also written to that directory via archiveEnvelope, with
+// the format passed through so the archive filename can use the right
+// extension (.xml or .json). The archive is the chokepoint that all
+// outbound wire envelopes pass through so the integration test suite
+// can verify schema conformance across every publish path (sync_msg
+// via publishToOutboundConn, test envelopes via the per-provider
+// test-connection handlers, etc.).
+func MarshalEnvelope(env *TransportEnvelope, format WireFormat) ([]byte, error) {
 	if env == nil {
 		return nil, fmt.Errorf("envelope is nil")
 	}
@@ -63,22 +111,81 @@ func MarshalEnvelope(env *TransportEnvelope) ([]byte, error) {
 	if env.Timestamp == "" {
 		env.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
-	data, err := xml.Marshal(env)
-	if err != nil {
-		return nil, err
+	var out []byte
+	switch format {
+	case FormatJSON:
+		data, err := json.Marshal(env)
+		if err != nil {
+			return nil, err
+		}
+		out = data
+	default:
+		data, err := xml.Marshal(env)
+		if err != nil {
+			return nil, err
+		}
+		out = append([]byte(xml.Header), data...)
 	}
-	out := append([]byte(xml.Header), data...)
-	archiveEnvelope(env, out)
+	archiveEnvelope(env, out, format)
 	return out, nil
 }
 
-// UnmarshalEnvelope deserializes XML bytes into a TransportEnvelope.
-func UnmarshalEnvelope(data []byte) (*TransportEnvelope, error) {
-	var env TransportEnvelope
-	if err := xml.Unmarshal(data, &env); err != nil {
-		return nil, err
+// UnmarshalEnvelope deserializes the wire bytes into a TransportEnvelope.
+// The format is auto-detected from the first non-whitespace byte after
+// stripping an optional UTF-8 BOM:
+//
+//	'<' selects XML, '{' selects JSON.
+//
+// Any other leading byte (including an empty payload) returns
+// ErrUnrecognizedFormat so the caller can audit and drop the envelope
+// without redelivery. The detected format is returned alongside the
+// envelope so the inbound path can record a per-format counter.
+func UnmarshalEnvelope(data []byte) (*TransportEnvelope, WireFormat, error) {
+	body := stripBOMAndLeadingWhitespace(data)
+	if len(body) == 0 {
+		return nil, FormatXML, ErrUnrecognizedFormat
 	}
-	return &env, nil
+	var env TransportEnvelope
+	switch body[0] {
+	case '<':
+		if err := xml.Unmarshal(body, &env); err != nil {
+			return nil, FormatXML, err
+		}
+		return &env, FormatXML, nil
+	case '{':
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, FormatJSON, err
+		}
+		return &env, FormatJSON, nil
+	}
+	return nil, FormatXML, ErrUnrecognizedFormat
+}
+
+// ErrUnrecognizedFormat is returned by UnmarshalEnvelope when the
+// first non-whitespace byte (after BOM stripping) is neither '<' nor
+// '{'. The inbound dispatcher audits this as
+// errcode.InboundFormatUnrecognized and drops the envelope so the
+// provider does not redeliver.
+var ErrUnrecognizedFormat = errors.New("unrecognized envelope format")
+
+// stripBOMAndLeadingWhitespace returns the input with any UTF-8 BOM
+// (EF BB BF) and any leading ASCII whitespace (tab, LF, CR, space)
+// removed. The BOM-stripping rule mirrors what the XML decoder used
+// to tolerate upstream; CDS systems can introduce BOMs in either
+// direction, so the rule is applied uniformly to both encodings.
+func stripBOMAndLeadingWhitespace(data []byte) []byte {
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		data = data[3:]
+	}
+	for len(data) > 0 {
+		switch data[0] {
+		case '\t', '\n', '\r', ' ':
+			data = data[1:]
+			continue
+		}
+		break
+	}
+	return data
 }
 
 // buildSyncResponse constructs the SyncResponse acknowledging which timestamps

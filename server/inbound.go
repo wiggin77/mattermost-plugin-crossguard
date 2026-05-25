@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -105,13 +106,35 @@ func (p *Plugin) processInboundMessage(connName string, data []byte) error {
 	p.API.LogDebug("Inbound message received from provider",
 		"conn_name", connName, "bytes", len(data))
 
-	env, err := UnmarshalEnvelope(data)
+	env, format, err := UnmarshalEnvelope(data)
 	if err != nil {
+		if errors.Is(err, ErrUnrecognizedFormat) {
+			// Leading byte was neither '<' nor '{' after BOM and
+			// whitespace stripping. The envelope is permanently
+			// undeliverable; return nil so the provider does not
+			// redeliver. Surface via a dedicated audit code so
+			// operators can grep for format-detection failures.
+			p.API.LogWarn("Inbound envelope had unrecognized wire format",
+				"error_code", errcode.InboundFormatUnrecognized,
+				"conn_name", connName, "bytes", len(data))
+			return nil
+		}
 		p.API.LogError("Failed to unmarshal transport envelope",
 			"error_code", errcode.InboundUnmarshalFailed,
 			"conn_name", connName, "error", err.Error())
 		// Permanent failure: a malformed message will never succeed on retry.
 		return nil
+	}
+	// Per-envelope format counter; LogDebug to avoid log spam.
+	switch format {
+	case FormatJSON:
+		p.API.LogDebug("Inbound envelope accepted as JSON",
+			"error_code", errcode.InboundFormatJSON,
+			"conn_name", connName, "type", env.Type)
+	default:
+		p.API.LogDebug("Inbound envelope accepted as XML",
+			"error_code", errcode.InboundFormatXML,
+			"conn_name", connName, "type", env.Type)
 	}
 
 	// Route through the sequencer. For sync_msg envelopes this either

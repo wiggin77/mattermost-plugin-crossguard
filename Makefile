@@ -250,7 +250,12 @@ endif
 .PHONY: test
 test: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum -- -v $$(go list ./... | grep -v /docker/)
+	# Enumerate the Go-bearing top-level dirs explicitly instead of
+	# `./...`. The bare recursive form descends into docker/postgres-*
+	# bind mounts (created by `make docker-setup`, owned by the
+	# postgres container's UID, unreadable from the host) and aborts
+	# the listing before the grep filter can run.
+	$(GOBIN)/gotestsum -- -v ./build/... ./server/... ./scripts/...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;
@@ -803,6 +808,30 @@ generate-pdfs: webapp/node_modules
 .PHONY: generate-error-codes
 generate-error-codes:
 	go run ./scripts/generate-error-codes
+
+## Regenerate schema/crossguard.schema.json from schema/crossguard.xsd.
+## The XSD remains the authoritative compliance contract; the JSON
+## Schema is a mechanical translation by build/xsd2jsonschema. Re-run
+## after editing the XSD and commit both files together.
+.PHONY: generate-json-schema
+generate-json-schema:
+	go run ./build/xsd2jsonschema schema/crossguard.xsd > schema/crossguard.schema.json
+
+## CI gate that fails if schema/crossguard.schema.json is stale
+## relative to schema/crossguard.xsd. Run 'make generate-json-schema'
+## locally and commit the result if this fails.
+.PHONY: check-json-schema
+check-json-schema:
+	@tmp=$$(mktemp); \
+	trap 'rm -f $$tmp' EXIT; \
+	go run ./build/xsd2jsonschema schema/crossguard.xsd > $$tmp; \
+	if ! diff -u schema/crossguard.schema.json $$tmp; then \
+		echo ""; \
+		echo "ERROR: schema/crossguard.schema.json is stale."; \
+		echo "Run 'make generate-json-schema' and commit the result."; \
+		exit 1; \
+	fi
+	@echo "schema/crossguard.schema.json is fresh."
 
 # ====================================================================================
 # Help

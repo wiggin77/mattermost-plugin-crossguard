@@ -7,11 +7,11 @@ import (
 // PostAcknowledgement is the wire representation of an acknowledgement
 // of a post by a user. All upstream fields are carried.
 type PostAcknowledgement struct {
-	UserId         string `xml:"UserId"`
-	PostId         string `xml:"PostId"`
-	AcknowledgedAt int64  `xml:"AcknowledgedAt"`
-	ChannelId      string `xml:"ChannelId"`
-	RemoteId       string `xml:"RemoteId,omitempty"`
+	UserId         string `xml:"UserId"             json:"UserId"`
+	PostId         string `xml:"PostId"             json:"PostId"`
+	AcknowledgedAt int64  `xml:"AcknowledgedAt"     json:"AcknowledgedAt"`
+	ChannelId      string `xml:"ChannelId"          json:"ChannelId"`
+	RemoteId       string `xml:"RemoteId,omitempty" json:"RemoteId,omitempty"`
 }
 
 // PostAcknowledgementFromModel converts an upstream PostAcknowledgement

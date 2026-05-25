@@ -84,21 +84,63 @@ docker-integration-test: docker-check servicebus-probe-run docker-deploy
 	@$(GO_TEST_INTEGRATION)
 
 ## Same as docker-integration-test but with the wire-validation gate
-## enabled: every outbound envelope the plugin emits during the suite
-## is captured to /mattermost/wire-archive in each container, copied
-## back via `docker compose exec cat`, and validated against
-## schema/crossguard.xsd with xmllint. Adds one tmpfs write per
-## envelope plus an xmllint exec per envelope at teardown; otherwise
-## identical to docker-integration-test.
+## enabled: every outbound envelope is captured to
+## /mattermost/wire-archive in each container and validated against
+## schema/crossguard.xsd at the end of the run. JSON envelopes are
+## converted to XML through the wire types before validation (see
+## build/wire-archive-validate).
+##
+## WIRE_FORMAT (optional) forces every outbound connection's
+## message_format to "xml" or "json" before the test pass runs. Empty
+## (default) uses each connection's declared message_format from
+## build/devbaseline.
+##
+## For full XML + JSON coverage, run this target twice:
+##
+##   WIRE_FORMAT=xml  make docker-integration-test-validate-wire
+##   WIRE_FORMAT=json make docker-integration-test-validate-wire
+##
+## Each invocation runs the suite once and validates the archive
+## additions from its own run. The plugin picks up the wire-format
+## change without a rebuild or redeploy because message_format only
+## affects encoding at marshal time, not transport plumbing.
+WIRE_FORMAT ?=
+
 .PHONY: docker-integration-test-validate-wire
-docker-integration-test-validate-wire:
+docker-integration-test-validate-wire: docker-check servicebus-probe-run docker-deploy
 	@command -v xmllint >/dev/null 2>&1 || { \
 		echo >&2 "ERROR: xmllint not found on PATH (required for CROSSGUARD_WIRE_VALIDATE=1)."; \
 		echo >&2 "Install: sudo apt install libxml2-utils  (Debian/Ubuntu)"; \
 		echo >&2 "         brew install libxml2            (macOS)"; \
 		exit 1; \
 	}
-	@$(MAKE) CROSSGUARD_WIRE_VALIDATE=1 docker-integration-test
+	@case '$(WIRE_FORMAT)' in \
+		'') echo "WIRE_FORMAT not set: using each connection's declared message_format from build/devbaseline" ;; \
+		xml|json) \
+			echo "WIRE_FORMAT=$(WIRE_FORMAT): forcing every outbound connection's message_format to '$(WIRE_FORMAT)'" ;; \
+		*) \
+			echo >&2 "ERROR: WIRE_FORMAT must be empty, \"xml\", or \"json\" (got '$(WIRE_FORMAT)')"; \
+			exit 2 ;; \
+	esac
+	@TOKEN_A=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_A)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	PATCH_A=$$(go run ./build/configure-baseline -side a -format '$(WIRE_FORMAT)') && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_A)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_A" \
+		-H "Content-Type: application/json" \
+		-d "$$PATCH_A" >/dev/null && \
+	echo "Server A: outbound message_format set" && \
+	TOKEN_B=$$(curl -sf -X POST http://$(MM_HOST):$(MM_PORT_B)/api/v4/users/login \
+		-d '{"login_id":"admin","password":"password"}' -i 2>/dev/null \
+		| grep -i '^Token:' | awk '{print $$2}' | tr -d '\r') && \
+	PATCH_B=$$(go run ./build/configure-baseline -side b -format '$(WIRE_FORMAT)') && \
+	curl -sf -X PUT http://$(MM_HOST):$(MM_PORT_B)/api/v4/config/patch \
+		-H "Authorization: Bearer $$TOKEN_B" \
+		-H "Content-Type: application/json" \
+		-d "$$PATCH_B" >/dev/null && \
+	echo "Server B: outbound message_format set"
+	@CROSSGUARD_WIRE_VALIDATE=1 $(GO_TEST_INTEGRATION)
 
 # ---------------------------------------------------------------------
 # Single-test wrappers.

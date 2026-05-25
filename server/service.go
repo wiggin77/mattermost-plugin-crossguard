@@ -51,8 +51,14 @@ type RedactedConnection struct {
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode,omitempty"`
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
-	QueueName           string `json:"queue_name,omitempty"`
-	BlobContainerName   string `json:"blob_container_name,omitempty"`
+	// MessageFormat is the resolved per-connection wire format ("xml"
+	// or "json" for outbound; "auto" for inbound, which auto-detects).
+	// Surfaced in the slash-command status table so operators can see
+	// the configured wire encoding at a glance without inspecting the
+	// raw connection config.
+	MessageFormat     string `json:"message_format,omitempty"`
+	QueueName         string `json:"queue_name,omitempty"`
+	BlobContainerName string `json:"blob_container_name,omitempty"`
 
 	// Service Principal-related fields. These are operational identifiers
 	// (which AAD identity is in use, which cloud, which namespace), NOT
@@ -332,6 +338,7 @@ func (p *Plugin) getTeamStatus(teamID string, callingUser *model.User) (*TeamSta
 			FileTransferEnabled: cc.FileTransferEnabled,
 			FileFilterMode:      cc.FileFilterMode,
 			FileFilterTypes:     cc.FileFilterTypes,
+			MessageFormat:       statusMessageFormat(tc.Direction, cc.MessageFormat),
 		}
 		if checkPending && !isLinked {
 			req, reqErr := p.kvstore.GetConnectionRequest(teamID, key)
@@ -446,7 +453,31 @@ type ConnectionStatus struct {
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode,omitempty"`
 	FileFilterTypes     string `json:"file_filter_types,omitempty"`
-	RequestPending      bool   `json:"request_pending,omitempty"`
+	// MessageFormat surfaces the outbound wire encoding (xml or json)
+	// in the slash-command status table. Empty for inbound rows since
+	// inbound auto-detects format on a per-envelope basis.
+	MessageFormat  string `json:"message_format,omitempty"`
+	RequestPending bool   `json:"request_pending,omitempty"`
+}
+
+// statusMessageFormat resolves a ConnectionConfig.MessageFormat value
+// to the label shown in /crossguard status. Outbound connections
+// report the parsed wire format ("xml" or "json"); inbound connections
+// report "auto" because the inbound side auto-detects format from the
+// envelope bytes rather than from configuration. The defaulting is
+// the same as ParseWireFormat: empty maps to "xml".
+func statusMessageFormat(direction, configured string) string {
+	if direction == "inbound" {
+		return "auto"
+	}
+	format, err := ParseWireFormat(configured)
+	if err != nil {
+		// Invalid value caught by validateConnectionList at save time;
+		// fall back to the default rather than dragging the status
+		// table into an error path.
+		return FormatXML.String()
+	}
+	return format.String()
 }
 
 // getChannelStatus returns the connection status for a channel, showing
@@ -532,6 +563,7 @@ func (p *Plugin) getChannelStatus(channelID string, callingUser *model.User) (*C
 			FileTransferEnabled: cc.FileTransferEnabled,
 			FileFilterMode:      cc.FileFilterMode,
 			FileFilterTypes:     cc.FileFilterTypes,
+			MessageFormat:       statusMessageFormat(tc.Direction, cc.MessageFormat),
 		}
 		if checkChanPending && !isLinked {
 			req, reqErr := p.kvstore.GetChannelConnectionRequest(channelID, key)
@@ -1031,6 +1063,7 @@ func redactConnection(conn ConnectionConfig, direction string) RedactedConnectio
 		FileTransferEnabled: conn.FileTransferEnabled,
 		FileFilterMode:      conn.FileFilterMode,
 		FileFilterTypes:     conn.FileFilterTypes,
+		MessageFormat:       statusMessageFormat(direction, conn.MessageFormat),
 	}
 	if conn.NATS != nil {
 		rc.Address = conn.NATS.Address

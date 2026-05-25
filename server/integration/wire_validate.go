@@ -3,10 +3,14 @@
 package integration
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	wirearchive "github.com/MattermostFederal/mattermost-plugin-crossguard/build/wire-archive-validate"
 )
 
 // wireValidateEnv enables the wire-envelope validation gate when set
@@ -52,8 +56,14 @@ func (h *Harness) snapshotWireArchive(t *testing.T) {
 
 // validateWireArchive copies each server's archive to a fresh host
 // temp dir, walks it, skips envelopes that were already present at
-// snapshot time, and runs xmllint against schema/crossguard.xsd on
-// each new file. Fails the test on any validation error.
+// snapshot time, and validates each new file against
+// schema/crossguard.xsd. Dispatches on file extension:
+//
+//   - .xml: piped directly through xmllint.
+//   - .json: decoded via the build/wire-archive-validate helper into
+//     a TransportEnvelope-shaped value, re-encoded as XML through
+//     the wire types, then piped through xmllint. The XSD remains
+//     the universal final-gate regardless of encoding.
 //
 // Fails the test if zero new envelopes were observed across both
 // servers: a passing run that never produced a wire envelope is
@@ -82,12 +92,7 @@ func (h *Harness) validateWireArchive(t *testing.T) {
 			}
 			total++
 			path := filepath.Join(dir, e.Name())
-			cmd := exec.Command(xmllint, "--noout", "--schema", schema, path) //nolint:gosec // paths derived from test-controlled temp dir and repo-anchored schema constant
-			out, valErr := cmd.CombinedOutput()
-			if valErr != nil {
-				contents, _ := os.ReadFile(path) //nolint:gosec // path is the same temp-dir-rooted path we just validated
-				t.Errorf("envelope %s on %s failed schema validation:\n%s--- envelope ---\n%s",
-					e.Name(), s.Container, string(out), string(contents))
+			if !validateOneArchiveFile(t, xmllint, schema, path, s.Container, e.Name()) {
 				failed++
 			}
 		}
@@ -97,6 +102,50 @@ func (h *Harness) validateWireArchive(t *testing.T) {
 		return
 	}
 	t.Logf("wire-validate: %d envelope(s) validated against schema/crossguard.xsd, %d failure(s)", total, failed)
+}
+
+// validateOneArchiveFile validates a single archived envelope against
+// the XSD. XML files are piped through xmllint directly; JSON files
+// are converted to XML via the wire-archive-validate helper first.
+// Returns true on success.
+func validateOneArchiveFile(t *testing.T, xmllint, schema, path, container, name string) bool {
+	t.Helper()
+	contents, readErr := os.ReadFile(path) //nolint:gosec // path is the same temp-dir-rooted path the caller just walked
+	if readErr != nil {
+		t.Errorf("archive read %s on %s: %v", name, container, readErr)
+		return false
+	}
+
+	xmlBytes := contents
+	switch {
+	case strings.HasSuffix(name, ".json"):
+		converted, convErr := wirearchive.JSONToXML(contents)
+		if convErr != nil {
+			t.Errorf("envelope %s on %s: JSON re-encode failed: %v\n--- envelope ---\n%s",
+				name, container, convErr, string(contents))
+			return false
+		}
+		xmlBytes = converted
+	case strings.HasSuffix(name, ".xml"):
+		// Validate the bytes as-is.
+	default:
+		// The archiver only ever writes .xml or .json. An unrecognized
+		// extension is a plumbing bug; surface it as a test failure
+		// rather than silently skipping.
+		t.Errorf("envelope %s on %s has unrecognized extension; archiver should only emit .xml or .json",
+			name, container)
+		return false
+	}
+
+	cmd := exec.Command(xmllint, "--noout", "--schema", schema, "-") //nolint:gosec // xmllint resolved via LookPath; schema is a repo constant
+	cmd.Stdin = bytes.NewReader(xmlBytes)
+	out, valErr := cmd.CombinedOutput()
+	if valErr != nil {
+		t.Errorf("envelope %s on %s failed schema validation:\n%s--- envelope ---\n%s",
+			name, container, string(out), string(contents))
+		return false
+	}
+	return true
 }
 
 // readArchiveNames copies the container's archive to a fresh host

@@ -8,11 +8,11 @@ import (
 // ActiveChannel is intentionally dropped: the channel ID is local to
 // the source server and has no meaning on the receiver.
 type Status struct {
-	UserId         string `xml:"UserId"`
-	Status         string `xml:"Status"`
-	Manual         bool   `xml:"Manual"`
-	LastActivityAt int64  `xml:"LastActivityAt"`
-	DNDEndTime     int64  `xml:"DNDEndTime"`
+	UserId         string `xml:"UserId"         json:"UserId"`
+	Status         string `xml:"Status"         json:"Status"`
+	Manual         bool   `xml:"Manual"         json:"Manual"`
+	LastActivityAt int64  `xml:"LastActivityAt" json:"LastActivityAt"`
+	DNDEndTime     int64  `xml:"DNDEndTime"     json:"DNDEndTime"`
 }
 
 // StatusFromModel converts an upstream Status to its wire form.

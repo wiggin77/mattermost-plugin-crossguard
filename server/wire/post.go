@@ -12,6 +12,11 @@ import (
 // when empty (Go's xml.Encoder emits an empty <FileIds></FileIds>
 // wrapper for the `xml:"FileIds>Id"` shorthand even when the slice
 // is nil, which we do not want on the wire).
+//
+// On JSON the wire shape is a flat array of strings, which is what
+// encoding/json produces from []string by default; no custom JSON
+// marshaler is required. The parent Post field's omitempty tag
+// suppresses an empty or nil slice.
 type FileIDs []string
 
 // MarshalXML implements xml.Marshaler.
@@ -84,21 +89,21 @@ const (
 // see implementation-plans/26-05-11-02-plugin-owned-wire-types.md for
 // the per-key rationale.
 type PostProps struct {
-	FromWebhook              bool   `xml:"FromWebhook,omitempty"`
-	FromBot                  bool   `xml:"FromBot,omitempty"`
-	FromPlugin               bool   `xml:"FromPlugin,omitempty"`
-	FromOAuthApp             bool   `xml:"FromOAuthApp,omitempty"`
-	OverrideUsername         string `xml:"OverrideUsername,omitempty"`
-	OverrideIconURL          string `xml:"OverrideIconURL,omitempty"`
-	OverrideIconEmoji        string `xml:"OverrideIconEmoji,omitempty"`
-	WebhookDisplayName       string `xml:"WebhookDisplayName,omitempty"`
-	AddedUserId              string `xml:"AddedUserId,omitempty"`
-	DeleteBy                 string `xml:"DeleteBy,omitempty"`
-	AddChannelMember         string `xml:"AddChannelMember,omitempty"`
-	MentionHighlightDisabled bool   `xml:"MentionHighlightDisabled,omitempty"`
-	DisableGroupHighlight    bool   `xml:"DisableGroupHighlight,omitempty"`
-	AIGeneratedByUserId      string `xml:"AIGeneratedByUserId,omitempty"`
-	AIGeneratedByUsername    string `xml:"AIGeneratedByUsername,omitempty"`
+	FromWebhook              bool   `xml:"FromWebhook,omitempty"              json:"FromWebhook,omitempty"`
+	FromBot                  bool   `xml:"FromBot,omitempty"                  json:"FromBot,omitempty"`
+	FromPlugin               bool   `xml:"FromPlugin,omitempty"               json:"FromPlugin,omitempty"`
+	FromOAuthApp             bool   `xml:"FromOAuthApp,omitempty"             json:"FromOAuthApp,omitempty"`
+	OverrideUsername         string `xml:"OverrideUsername,omitempty"         json:"OverrideUsername,omitempty"`
+	OverrideIconURL          string `xml:"OverrideIconURL,omitempty"          json:"OverrideIconURL,omitempty"`
+	OverrideIconEmoji        string `xml:"OverrideIconEmoji,omitempty"        json:"OverrideIconEmoji,omitempty"`
+	WebhookDisplayName       string `xml:"WebhookDisplayName,omitempty"       json:"WebhookDisplayName,omitempty"`
+	AddedUserId              string `xml:"AddedUserId,omitempty"              json:"AddedUserId,omitempty"`
+	DeleteBy                 string `xml:"DeleteBy,omitempty"                 json:"DeleteBy,omitempty"`
+	AddChannelMember         string `xml:"AddChannelMember,omitempty"         json:"AddChannelMember,omitempty"`
+	MentionHighlightDisabled bool   `xml:"MentionHighlightDisabled,omitempty" json:"MentionHighlightDisabled,omitempty"`
+	DisableGroupHighlight    bool   `xml:"DisableGroupHighlight,omitempty"    json:"DisableGroupHighlight,omitempty"`
+	AIGeneratedByUserId      string `xml:"AIGeneratedByUserId,omitempty"      json:"AIGeneratedByUserId,omitempty"`
+	AIGeneratedByUsername    string `xml:"AIGeneratedByUsername,omitempty"    json:"AIGeneratedByUsername,omitempty"`
 }
 
 // PostPropsFromModel extracts the whitelisted keys from an upstream
@@ -237,23 +242,23 @@ func stripEmojiColons(s string) string {
 // Participants, IsFollowing) and pre-server-processing artifacts
 // (MessageSource, PendingPostId) are dropped.
 type Post struct {
-	Id           string     `xml:"Id"`
-	CreateAt     int64      `xml:"CreateAt"`
-	UpdateAt     int64      `xml:"UpdateAt"`
-	EditAt       int64      `xml:"EditAt,omitempty"`
-	DeleteAt     int64      `xml:"DeleteAt"`
-	UserId       string     `xml:"UserId"`
-	ChannelId    string     `xml:"ChannelId"`
-	RootId       string     `xml:"RootId,omitempty"`
-	OriginalId   string     `xml:"OriginalId,omitempty"`
-	Message      string     `xml:"Message"`
-	Type         string     `xml:"Type,omitempty"`
-	Props        *PostProps `xml:"Props,omitempty"`
-	Hashtags     string     `xml:"Hashtags,omitempty"`
-	FileIds      FileIDs    `xml:"FileIds,omitempty"`
-	HasReactions bool       `xml:"HasReactions,omitempty"`
-	RemoteId     string     `xml:"RemoteId,omitempty"`
-	IsPinned     bool       `xml:"IsPinned,omitempty"`
+	Id           string     `xml:"Id"                    json:"Id"`
+	CreateAt     int64      `xml:"CreateAt"              json:"CreateAt"`
+	UpdateAt     int64      `xml:"UpdateAt"              json:"UpdateAt"`
+	EditAt       int64      `xml:"EditAt,omitempty"      json:"EditAt,omitempty"`
+	DeleteAt     int64      `xml:"DeleteAt"              json:"DeleteAt"`
+	UserId       string     `xml:"UserId"                json:"UserId"`
+	ChannelId    string     `xml:"ChannelId"             json:"ChannelId"`
+	RootId       string     `xml:"RootId,omitempty"      json:"RootId,omitempty"`
+	OriginalId   string     `xml:"OriginalId,omitempty"  json:"OriginalId,omitempty"`
+	Message      string     `xml:"Message"               json:"Message"`
+	Type         string     `xml:"Type,omitempty"        json:"Type,omitempty"`
+	Props        *PostProps `xml:"Props,omitempty"       json:"Props,omitempty"`
+	Hashtags     string     `xml:"Hashtags,omitempty"    json:"Hashtags,omitempty"`
+	FileIds      FileIDs    `xml:"FileIds,omitempty"     json:"FileIds,omitempty"`
+	HasReactions bool       `xml:"HasReactions,omitempty" json:"HasReactions,omitempty"`
+	RemoteId     string     `xml:"RemoteId,omitempty"    json:"RemoteId,omitempty"`
+	IsPinned     bool       `xml:"IsPinned,omitempty"    json:"IsPinned,omitempty"`
 }
 
 // PostFromModel converts an upstream Post to its wire form. Dropped

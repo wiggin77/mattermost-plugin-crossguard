@@ -473,11 +473,15 @@ func (s *inboundSequencer) TickGapDeadlines(now time.Time) []*TransportEnvelope 
 }
 
 // estimateEnvelopeBytes is the default byte estimator for buffered
-// envelopes. It returns the marshaled XML size; an error in marshaling
-// falls back to a per-envelope overhead. The estimator is replaceable
-// in tests via the bytesPerEnvelope field.
+// envelopes. It returns the marshaled XML size as a stable reference
+// point regardless of the wire format the original envelope arrived
+// in: the buffer-size accounting needs deterministic numbers across
+// nodes and across format flips, and the XSD remains the authoritative
+// shape contract. An error in marshaling falls back to a per-envelope
+// overhead. The estimator is replaceable in tests via the
+// bytesPerEnvelope field.
 func estimateEnvelopeBytes(env *TransportEnvelope) int {
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, FormatXML)
 	if err != nil {
 		return 1024
 	}

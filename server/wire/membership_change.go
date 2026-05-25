@@ -9,11 +9,11 @@ import (
 // element name drops the redundant "Msg" suffix from upstream's
 // MembershipChangeMsg.
 type MembershipChange struct {
-	ChannelId  string `xml:"ChannelId"`
-	UserId     string `xml:"UserId"`
-	IsAdd      bool   `xml:"IsAdd"`
-	RemoteId   string `xml:"RemoteId,omitempty"`
-	ChangeTime int64  `xml:"ChangeTime"`
+	ChannelId  string `xml:"ChannelId"          json:"ChannelId"`
+	UserId     string `xml:"UserId"             json:"UserId"`
+	IsAdd      bool   `xml:"IsAdd"              json:"IsAdd"`
+	RemoteId   string `xml:"RemoteId,omitempty" json:"RemoteId,omitempty"`
+	ChangeTime int64  `xml:"ChangeTime"         json:"ChangeTime"`
 }
 
 // MembershipChangeFromModel converts an upstream MembershipChangeMsg

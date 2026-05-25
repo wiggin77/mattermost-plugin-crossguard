@@ -8,9 +8,9 @@ async function getCalls(page: any): Promise<{onChange: Array<{id: string; value:
     return page.evaluate(() => (window as any).__testCalls);
 }
 
-const natsConn = {name: 'test-conn', provider: 'nats', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', nats: {address: 'nats://localhost:4222', subject: 'crossguard.test-conn', tls_enabled: false, auth_type: 'none', token: '', username: '', password: '', client_cert: '', client_key: '', ca_cert: ''}};
-const azureConn = {name: 'azure-conn', provider: 'azure-queue', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', azure_queue: {queue_service_url: 'https://test.queue.core.windows.net', blob_service_url: '', account_name: 'test', account_key: 'dGVzdA==', queue_name: 'test-queue', blob_container_name: ''}};
-const serviceBusConn = {name: 'sb-conn', provider: 'azure-servicebus', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'json', azure_servicebus: {connection_string: 'Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=root;SharedAccessKey=abc', queue_name: 'sb-queue', blob_service_url: '', blob_account_name: '', blob_account_key: '', blob_container_name: ''}};
+const natsConn = {name: 'test-conn', provider: 'nats', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'xml', nats: {address: 'nats://localhost:4222', subject: 'crossguard.test-conn', tls_enabled: false, auth_type: 'none', token: '', username: '', password: '', client_cert: '', client_key: '', ca_cert: ''}};
+const azureConn = {name: 'azure-conn', provider: 'azure-queue', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'xml', azure_queue: {queue_service_url: 'https://test.queue.core.windows.net', blob_service_url: '', account_name: 'test', account_key: 'dGVzdA==', queue_name: 'test-queue', blob_container_name: ''}};
+const serviceBusConn = {name: 'sb-conn', provider: 'azure-servicebus', file_transfer_enabled: false, file_filter_mode: '', file_filter_types: '', message_format: 'xml', azure_servicebus: {connection_string: 'Endpoint=sb://example.servicebus.windows.net/;SharedAccessKeyName=root;SharedAccessKey=abc', queue_name: 'sb-queue', blob_service_url: '', blob_account_name: '', blob_account_key: '', blob_container_name: ''}};
 
 function defaultProps(overrides?: Partial<{id: string; value: string; disabled: boolean}>) {
     return {
@@ -721,9 +721,10 @@ test.describe('ConnectionSettings Edge Cases', () => {
             await expect(component.getByText('XML', {exact: true}).first()).toBeVisible();
         });
 
-        test('Outbound card with message_format json does NOT show XML badge', async ({mount}) => {
+        test('Outbound card with message_format json shows JSON badge and not XML badge', async ({mount}) => {
             const jsonConn = {...natsConn, name: 'json-out', message_format: 'json' as const};
             const component = await mount(<ConnectionSettingsStory {...defaultProps({id: 'OutboundConnections', value: JSON.stringify([jsonConn])})}/>);
+            await expect(component.getByText('JSON', {exact: true}).first()).toBeVisible();
             const xmlBadges = component.locator('span').filter({hasText: /^XML$/});
             await expect(xmlBadges).toHaveCount(0);
         });

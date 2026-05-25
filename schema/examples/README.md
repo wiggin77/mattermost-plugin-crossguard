@@ -1,9 +1,18 @@
 # Cross Guard wire-format examples
 
 Schema-valid sample payloads for the plugin-owned wire format defined in
-[`../crossguard.xsd`](../crossguard.xsd) and produced by `server/wire/`.
-Each file is a single `<CrossGuardEnvelope>` exactly as the plugin puts it on
-the wire (no indentation, content escaped, byte-for-byte stable).
+[`../crossguard.xsd`](../crossguard.xsd) (XML) and
+[`../crossguard.schema.json`](../crossguard.schema.json) (JSON), produced by
+`server/wire/`. Each `.xml` file is a single `<CrossGuardEnvelope>` exactly as
+the plugin puts it on the wire (no indentation, content escaped,
+byte-for-byte stable). Each `.json` file is the same envelope in the JSON
+encoding.
+
+Every numbered fixture ships in both encodings (`NN_*.xml` and `NN_*.json`).
+The two siblings are produced from the same in-test envelope, so a compliance
+reviewer approving the JSON spec sees every element shape, pruning case, and
+deterministic-ordering behavior the XML reviewer sees. The JSON set must not
+be a representative subset.
 
 The first 11 are intentionally written as a single coherent timeline on
 2024-04-12 so they read top-to-bottom: Alice posts a standup note, then a
@@ -40,30 +49,33 @@ and arriving at the receiver in seq order.
 
 ## Files
 
-| #  | File                                       | Exercises                                                  |
-|----|--------------------------------------------|------------------------------------------------------------|
-| 01 | `01_post_simple.xml`                       | Minimal top-level post; one user inline                    |
-| 02 | `02_post_markdown_rich.xml`                | Headings, lists, bold/italic, inline code, mentions        |
-| 03 | `03_post_code_blocks.xml`                  | Fenced code block with embedded `<Tag>` text (escaped)     |
-| 04 | `04_post_table_and_links.xml`              | GFM table, links                                           |
-| 05 | `05_post_thread_reply.xml`                 | Threaded reply (`RootId` set to parent post ID)            |
-| 06 | `06_post_incident_report.xml`              | Multi-line post-mortem with newlines escaped as `&#xA;`    |
-| 07 | `07_update_edited_post.xml`                | Edit of an earlier post (`EditAt` set)                     |
-| 08 | `08_delete.xml`                            | Deletion (`DeleteAt` set, `Message` empty)                 |
-| 09 | `09_reaction_add.xml`                      | Standard emoji (`thumbsup`) reaction                       |
-| 10 | `10_reaction_remove.xml`                   | Same reaction removed (`DeleteAt` set)                     |
-| 11 | `11_reaction_custom_emoji.xml`             | Custom emoji name (`shipit_squirrel`)                      |
-| 12 | `12_test.xml`                              | Connectivity-check envelope (`type="test"`, no `SyncMsg`)  |
-| 13 | `13_membership_change_join.xml`            | `<MembershipChange>` join (`IsAdd=true`)                   |
-| 14 | `14_membership_change_leave.xml`           | `<MembershipChange>` leave (`IsAdd=false`)                 |
-| 15 | `15_status_dnd.xml`                        | `<Status>` DND with `DNDEndTime`; `ActiveChannel` dropped  |
-| 16 | `16_post_acknowledgement.xml`              | `<PostAcknowledgement>` carrying ack-at timestamp          |
-| 17 | `17_mention_transforms.xml`                | `<MentionTransforms>` sorted-key map                       |
-| 18 | `18_post_with_props_webhook.xml`           | Typed `<Props>` with webhook + AI provenance keys          |
-| 19 | `19_user_with_timezone_and_props.xml`      | User `<Timezone>` (open map) and typed `<Props>`           |
-| 20 | `20_bot_user.xml`                          | Bot user (`IsBot`, `BotDescription`, `BotLastIconUpdate`)  |
-| 21 | `21_metadata_orphan_reaction.xml`          | Metadata envelope: no `<Post>`, one orphan reaction        |
-| 22 | `22_system_add_to_channel.xml`             | System message (`Type=system_add_to_channel`) with Props   |
+Each row below names the numbered fixture; both `NN_<name>.xml` and
+`NN_<name>.json` ship the same envelope in their respective encoding.
+
+| #  | Fixture                                | Exercises                                                  |
+|----|----------------------------------------|------------------------------------------------------------|
+| 01 | `01_post_simple`                       | Minimal top-level post; one user inline                    |
+| 02 | `02_post_markdown_rich`                | Headings, lists, bold/italic, inline code, mentions        |
+| 03 | `03_post_code_blocks`                  | Fenced code block with embedded `<Tag>` text (escaped)     |
+| 04 | `04_post_table_and_links`              | GFM table, links                                           |
+| 05 | `05_post_thread_reply`                 | Threaded reply (`RootId` set to parent post ID)            |
+| 06 | `06_post_incident_report`              | Multi-line post-mortem with newlines escaped as `&#xA;`    |
+| 07 | `07_update_edited_post`                | Edit of an earlier post (`EditAt` set)                     |
+| 08 | `08_delete`                            | Deletion (`DeleteAt` set, `Message` empty)                 |
+| 09 | `09_reaction_add`                      | Standard emoji (`thumbsup`) reaction                       |
+| 10 | `10_reaction_remove`                   | Same reaction removed (`DeleteAt` set)                     |
+| 11 | `11_reaction_custom_emoji`             | Custom emoji name (`shipit_squirrel`)                      |
+| 12 | `12_test`                              | Connectivity-check envelope (`type="test"`, no `SyncMsg`)  |
+| 13 | `13_membership_change_join`            | `<MembershipChange>` join (`IsAdd=true`)                   |
+| 14 | `14_membership_change_leave`           | `<MembershipChange>` leave (`IsAdd=false`)                 |
+| 15 | `15_status_dnd`                        | `<Status>` DND with `DNDEndTime`; `ActiveChannel` dropped  |
+| 16 | `16_post_acknowledgement`              | `<PostAcknowledgement>` carrying ack-at timestamp          |
+| 17 | `17_mention_transforms`                | `<MentionTransforms>` sorted-key map                       |
+| 18 | `18_post_with_props_webhook`           | Typed `<Props>` with webhook + AI provenance keys          |
+| 19 | `19_user_with_timezone_and_props`      | User `<Timezone>` (open map) and typed `<Props>`           |
+| 20 | `20_bot_user`                          | Bot user (`IsBot`, `BotDescription`, `BotLastIconUpdate`)  |
+| 21 | `21_metadata_orphan_reaction`          | Metadata envelope: no `<Post>`, one orphan reaction        |
+| 22 | `22_system_add_to_channel`             | System message (`Type=system_add_to_channel`) with Props   |
 
 ## What the examples prove
 
@@ -138,17 +150,28 @@ lives in the receiver.
 
 ## Regenerate
 
-If a wire-type struct changes, regenerate the fixtures and re-validate:
+If a wire-type struct changes, regenerate both sibling sets and re-validate:
 
 ```sh
 UPDATE_EXAMPLES=1 go test -run TestExampleFiles ./server/
+UPDATE_EXAMPLES_JSON=1 go test -run TestExampleFilesJSON ./server/
 for f in schema/examples/*.xml; do
   xmllint --noout --schema schema/crossguard.xsd "$f"
 done
 ```
 
 `xmllint` is the same validator used by `make docker-integration-test-validate-wire`,
-so a clean run here matches the integration-time contract.
+so a clean run here matches the integration-time contract. The JSON siblings
+are validated two ways: `TestExampleFilesJSONValidateAgainstJSONSchema`
+runs each `.json` file directly through a JSON Schema validator against
+`schema/crossguard.schema.json` (the standalone JSON-side compliance gate),
+and `TestExampleFilesJSONValidateAgainstSchema` re-encodes each `.json` to
+XML through the wire types and pipes the result through `xmllint` against
+the XSD. `TestExampleFilesJSONXMLEquivalence` then asserts the JSON and
+XML siblings carry the same envelope.
 
-Both must succeed before a wire-type change is merged. After regeneration the
-new XSD also needs compliance re-review.
+All gates (XML byte equality, XSD validation of XML fixtures, JSON byte
+equality, JSON Schema validation of JSON fixtures, XSD validation of
+JSON-to-XML re-encodes, JSON/XML equivalence) must succeed before a
+wire-type change is merged. After regeneration the new XSD and JSON
+Schema also need compliance re-review.

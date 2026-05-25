@@ -148,6 +148,17 @@ const (
 	InboundSeqCheckpointLoaded     = 15401
 	InboundSeqCheckpointLoadFailed = 15402
 	InboundSeqCheckpointStale      = 15403
+
+	// Wire-format auto-detection (Phase 6: restore JSON wire format).
+	// InboundFormatXML and InboundFormatJSON are emitted at LogDebug
+	// per envelope so the operator-facing per-connection counters can
+	// be surfaced via /crossguard status; InboundFormatUnrecognized is
+	// LogWarn and indicates an envelope whose first non-whitespace
+	// byte (after BOM stripping) was neither '<' nor '{' (dropped, no
+	// redelivery).
+	InboundFormatXML          = 15500
+	InboundFormatJSON         = 15501
+	InboundFormatUnrecognized = 15502
 )
 
 // api.go (11000-11999)
@@ -536,6 +547,10 @@ var AllCodes = []int{
 	InboundSeqCheckpointLoaded,
 	InboundSeqCheckpointLoadFailed,
 	InboundSeqCheckpointStale,
+
+	InboundFormatXML,
+	InboundFormatJSON,
+	InboundFormatUnrecognized,
 
 	ConnectionsParseOutboundFailed,
 	ConnectionsConnectOutboundFailed,

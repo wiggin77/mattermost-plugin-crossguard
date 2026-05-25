@@ -12,7 +12,7 @@ const natsConnection = {
     file_transfer_enabled: false,
     file_filter_mode: '',
     file_filter_types: '',
-    message_format: 'json',
+    message_format: 'xml',
     nats: {address: 'nats://localhost:4222', subject: 'crossguard.test-nats', tls_enabled: false, auth_type: 'none', token: '', username: '', password: '', client_cert: '', client_key: '', ca_cert: ''},
 };
 
@@ -22,7 +22,7 @@ const azureConnection = {
     file_transfer_enabled: false,
     file_filter_mode: '',
     file_filter_types: '',
-    message_format: 'json',
+    message_format: 'xml',
     azure_queue: {queue_service_url: 'https://test.queue.core.windows.net', blob_service_url: 'https://test.blob.core.windows.net', account_name: 'test', account_key: 'abc', queue_name: 'test-queue', blob_container_name: ''},
 };
 
@@ -833,14 +833,14 @@ test.describe('ConnectionSettings', () => {
             await expect(component.getByText('Message Format')).not.toBeVisible();
         });
 
-        test('Message Format defaults to JSON', async ({mount}) => {
+        test('Message Format defaults to XML', async ({mount}) => {
             const component = await mount(<ConnectionSettingsStory {...defaultProps({id: 'OutboundConnections'})}/>);
             await component.getByRole('button', {name: '+ Add Connection'}).click();
 
             // The Message Format select contains an option with value "xml", which distinguishes it
             // from the Provider and Auth Type selects. Use a child locator scoped within the filter.
             const formatSelect = component.locator('select:has(option[value="xml"])');
-            await expect(formatSelect).toHaveValue('json');
+            await expect(formatSelect).toHaveValue('xml');
         });
     });
 

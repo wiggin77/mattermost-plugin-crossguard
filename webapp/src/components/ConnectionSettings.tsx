@@ -187,7 +187,7 @@ const emptyConnection: Connection = {
     file_transfer_enabled: false,
     file_filter_mode: '',
     file_filter_types: '',
-    message_format: 'json',
+    message_format: 'xml',
     nats: {...emptyNATSConfig},
 };
 
@@ -336,7 +336,7 @@ function normalizeConnection(conn: Record<string, unknown>): Connection {
         file_transfer_enabled: Boolean(conn.file_transfer_enabled),
         file_filter_mode: (conn.file_filter_mode as '' | 'allow' | 'deny') || '',
         file_filter_types: (conn.file_filter_types as string) || '',
-        message_format: (conn.message_format as 'json' | 'xml') || 'json',
+        message_format: (conn.message_format as 'json' | 'xml') || 'xml',
         nats: {
             address: (conn.address as string) || DEFAULT_NATS_ADDRESS,
             subject: (conn.subject as string) || '',
@@ -1621,8 +1621,8 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                 onChange={(e) => handleFormChange('message_format', e.target.value)}
                                 disabled={disabled}
                             >
-                                <option value='json'>{'JSON'}</option>
                                 <option value='xml'>{'XML (for Cross Domain Solutions)'}</option>
+                                <option value='json'>{'JSON'}</option>
                             </select>
                             <div style={styles.helpText}>
                                 {'Wire format for outbound messages. Use XML when sending through a Cross Domain Solution. Inbound messages are auto-detected.'}
@@ -1897,6 +1897,11 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                                 {'XML'}
                             </span>
                         )}
+                        {!isInbound && conn.message_format === 'json' && (
+                            <span style={{...styles.badge, ...styles.badgeTls}}>
+                                {'JSON'}
+                            </span>
+                        )}
                     </div>
                 </div>
                 <div style={styles.cardMeta}>
@@ -1938,10 +1943,10 @@ const ConnectionSettings: React.FC<CustomSettingProps> = ({
                             {conn.file_filter_mode === '' && 'All types allowed'}
                         </div>
                     )}
-                    {!isInbound && conn.message_format === 'xml' && (
+                    {!isInbound && (conn.message_format === 'xml' || conn.message_format === 'json') && (
                         <div style={styles.cardMetaItem}>
                             <span style={styles.cardMetaLabel}>{'Format'}</span>
-                            {'XML'}
+                            {conn.message_format === 'json' ? 'JSON' : 'XML'}
                         </div>
                     )}
                 </div>

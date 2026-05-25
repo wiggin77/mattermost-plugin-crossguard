@@ -103,7 +103,7 @@ func TestExampleFiles(t *testing.T) {
 	for _, tc := range exampleCases() {
 		t.Run(tc.file, func(t *testing.T) {
 			env := tc.env()
-			data, err := MarshalEnvelope(env)
+			data, err := MarshalEnvelope(env, FormatXML)
 			require.NoError(t, err)
 			want := make([]byte, 0, len(data)+1)
 			want = append(want, data...)
@@ -150,7 +150,7 @@ func TestExampleFilesRoundTrip(t *testing.T) {
 		t.Run(tc.file, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join(dir, tc.file)) //nolint:gosec // example fixture path is a constant under the repo
 			require.NoError(t, err)
-			env, err := UnmarshalEnvelope(data)
+			env, _, err := UnmarshalEnvelope(data)
 			require.NoError(t, err)
 
 			assert.Equal(t, 1, env.Version)

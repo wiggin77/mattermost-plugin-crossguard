@@ -55,8 +55,10 @@ func (p *Plugin) nextOutboundSeq(connName, channelID string) uint64 {
 // also stamped into TeamName and ChannelName so the envelope satisfies
 // the constrained wire-schema's SlugType requirement on those fields;
 // the receiver ignores team/channel scope on test envelopes
-// (inbound.go logs only conn_name and test_id).
-func buildTestEnvelope(connName, epoch string) (*TransportEnvelope, []byte, string, error) {
+// (inbound.go logs only conn_name and test_id). The format argument
+// picks the wire encoding; callers pull it from the outbound
+// connection config (ParseWireFormat(conn.MessageFormat)).
+func buildTestEnvelope(connName, epoch string, format WireFormat) (*TransportEnvelope, []byte, string, error) {
 	msgID := mmModel.NewId()
 	env := &TransportEnvelope{
 		Version:     1,
@@ -67,7 +69,7 @@ func buildTestEnvelope(connName, epoch string) (*TransportEnvelope, []byte, stri
 		ChannelName: connName,
 		TestID:      msgID,
 	}
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, format)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -166,7 +168,19 @@ func (p *Plugin) publishToOutboundConn(ctx context.Context, env *TransportEnvelo
 		env.Sequence = p.nextOutboundSeq(connName, env.SyncMsg.ChannelId)
 	}
 
-	data, marshalErr := MarshalEnvelope(env)
+	// Pick the wire encoding from the outbound connection's config. A
+	// missing config falls back to FormatXML; an unparseable
+	// message_format value (which validateConnectionList catches at
+	// save time) also falls back to FormatXML rather than failing the
+	// publish, since the publish path is hot.
+	format := FormatXML
+	if cfg, ok := p.outboundConnConfigByName(connName); ok {
+		if parsed, err := ParseWireFormat(cfg.MessageFormat); err == nil {
+			format = parsed
+		}
+	}
+
+	data, marshalErr := MarshalEnvelope(env, format)
 	if marshalErr != nil {
 		p.API.LogError("Failed to serialize outbound envelope",
 			"error_code", errcode.ConnectionsSerializePartFailed,

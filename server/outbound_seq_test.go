@@ -186,7 +186,7 @@ func TestOutboundInboundRoundTrip(t *testing.T) {
 		if env.Type == TransportTypeSyncMsg && env.SyncMsg != nil {
 			env.Sequence = sender.nextOutboundSeq("conn", env.SyncMsg.ChannelId)
 		}
-		data, err := MarshalEnvelope(env)
+		data, err := MarshalEnvelope(env, FormatXML)
 		require.NoError(t, err)
 		onWire = append(onWire, data)
 	}
@@ -195,7 +195,7 @@ func TestOutboundInboundRoundTrip(t *testing.T) {
 	seq, _ := newTestSequencer(t)
 	dispatched := []*TransportEnvelope{}
 	for _, data := range onWire {
-		env, err := UnmarshalEnvelope(data)
+		env, _, err := UnmarshalEnvelope(data)
 		require.NoError(t, err)
 		dispatched = append(dispatched, seq.Admit("conn", env)...)
 	}
@@ -262,7 +262,7 @@ func TestOutboundInboundRoundTripAcrossSenderRestart(t *testing.T) {
 	// Feed session 1 envelopes through normally.
 	dispatched := []*TransportEnvelope{}
 	for _, data := range session1Wire {
-		env, err := UnmarshalEnvelope(data)
+		env, _, err := UnmarshalEnvelope(data)
 		require.NoError(t, err)
 		dispatched = append(dispatched, seq.Admit("conn", env)...)
 	}
@@ -279,7 +279,7 @@ func TestOutboundInboundRoundTripAcrossSenderRestart(t *testing.T) {
 	// Session 2 envelopes (new epoch, counter resets to 1) must
 	// dispatch immediately, not stall in a 30 s gap wait.
 	for _, data := range session2Wire {
-		env, err := UnmarshalEnvelope(data)
+		env, _, err := UnmarshalEnvelope(data)
 		require.NoError(t, err)
 		dispatched = append(dispatched, seq.Admit("conn", env)...)
 	}
@@ -303,7 +303,7 @@ func publishOnWire(t *testing.T, sender *Plugin, template *TransportEnvelope, ms
 			if env.Type == TransportTypeSyncMsg && env.SyncMsg != nil {
 				env.Sequence = sender.nextOutboundSeq(template.ConnName, env.SyncMsg.ChannelId)
 			}
-			data, err := MarshalEnvelope(env)
+			data, err := MarshalEnvelope(env, FormatXML)
 			require.NoError(t, err)
 			out = append(out, data)
 		}

@@ -324,6 +324,37 @@ func TestConfigurationValidate(t *testing.T) {
 		assert.Contains(t, err.Error(), "inbound")
 		assert.Contains(t, err.Error(), "outbound")
 	})
+
+	t.Run("message_format defaults to empty (parsed as xml)", func(t *testing.T) {
+		conns := []ConnectionConfig{
+			{Name: "c1", Provider: "nats", NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
+		}
+		data, _ := json.Marshal(conns)
+		cfg := &configuration{OutboundConnections: string(data)}
+		assert.NoError(t, cfg.validate())
+	})
+
+	t.Run("message_format xml and json validate", func(t *testing.T) {
+		for _, mf := range []string{"xml", "json", "XML", "JSON", "  json  "} {
+			conns := []ConnectionConfig{
+				{Name: "c1", Provider: "nats", MessageFormat: mf, NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
+			}
+			data, _ := json.Marshal(conns)
+			cfg := &configuration{OutboundConnections: string(data)}
+			assert.NoError(t, cfg.validate(), "message_format=%q should validate", mf)
+		}
+	})
+
+	t.Run("unknown message_format fails", func(t *testing.T) {
+		conns := []ConnectionConfig{
+			{Name: "c1", Provider: "nats", MessageFormat: "yaml", NATS: &NATSProviderConfig{Address: "nats://localhost:4222", Subject: "crossguard.sub", AuthType: "none"}},
+		}
+		data, _ := json.Marshal(conns)
+		cfg := &configuration{OutboundConnections: string(data)}
+		err := cfg.validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "message_format must be")
+	})
 }
 
 func TestIsRestrictedToSystemAdmins(t *testing.T) {
@@ -442,7 +473,7 @@ func TestIsChannelRequestMode(t *testing.T) {
 func TestIsTestMessage(t *testing.T) {
 	t.Run("test envelope is detected", func(t *testing.T) {
 		env := &TransportEnvelope{Type: TransportTypeTest, TestID: "abc-123"}
-		data, err := MarshalEnvelope(env)
+		data, err := MarshalEnvelope(env, FormatXML)
 		require.NoError(t, err)
 
 		id, ok := isTestMessage(data)
@@ -452,7 +483,7 @@ func TestIsTestMessage(t *testing.T) {
 
 	t.Run("non-test envelope is not detected", func(t *testing.T) {
 		env := &TransportEnvelope{Type: TransportTypeSyncMsg}
-		data, err := MarshalEnvelope(env)
+		data, err := MarshalEnvelope(env, FormatXML)
 		require.NoError(t, err)
 
 		_, ok := isTestMessage(data)
@@ -567,7 +598,7 @@ func TestBuildTestEnvelope(t *testing.T) {
 		epoch    = "abcdef0123456789abcdef0123"
 		connName = "nats-low-to-high"
 	)
-	env, data, msgID, err := buildTestEnvelope(connName, epoch)
+	env, data, msgID, err := buildTestEnvelope(connName, epoch, FormatXML)
 	require.NoError(t, err)
 	require.NotEmpty(t, msgID)
 	require.NotEmpty(t, data)
@@ -580,7 +611,7 @@ func TestBuildTestEnvelope(t *testing.T) {
 	assert.Equal(t, connName, env.ChannelName, "test envelope reuses ConnName for SlugType-conforming ChannelName")
 	assert.Equal(t, uint64(0), env.Sequence, "test envelopes never carry a Sequence")
 
-	got, err := UnmarshalEnvelope(data)
+	got, _, err := UnmarshalEnvelope(data)
 	require.NoError(t, err)
 	assert.Equal(t, TransportTypeTest, got.Type)
 	assert.Equal(t, msgID, got.TestID)

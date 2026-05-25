@@ -45,18 +45,23 @@ var envelopeArchiveFirstErrOnce sync.Once
 // envelope was archived per scenario, which catches a fully broken
 // plumbing.
 //
-// Filename shape: <unix_nano>_<seq6>_<conn>_<type>.xml. Both unix_nano
+// Filename shape: <unix_nano>_<seq6>_<conn>_<type>.<ext> where <ext>
+// is "xml" or "json" matching the wire format that produced the
+// bytes. The wire-archive validator dispatches on the extension to
+// pipe XML directly through xmllint and to round-trip JSON via the
+// wire types before validating the re-encoded XML. Both unix_nano
 // and seq are zero-padded so a lexicographic sort matches emission
 // order even when many envelopes share a nanosecond.
-func archiveEnvelope(env *TransportEnvelope, data []byte) {
+func archiveEnvelope(env *TransportEnvelope, data []byte, format WireFormat) {
 	if envelopeArchiveDir == "" || env == nil {
 		return
 	}
 	seq := envelopeArchiveSeq.Add(1)
-	name := fmt.Sprintf("%019d_%06d_%s_%s.xml",
+	name := fmt.Sprintf("%019d_%06d_%s_%s.%s",
 		time.Now().UnixNano(), seq,
 		archiveSanitizeSegment(env.ConnName),
-		archiveSanitizeSegment(env.Type))
+		archiveSanitizeSegment(env.Type),
+		format)
 	path := filepath.Join(envelopeArchiveDir, name)
 	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // test instrumentation; container path is mode-permissive on purpose
 		envelopeArchiveFirstErrOnce.Do(func() {

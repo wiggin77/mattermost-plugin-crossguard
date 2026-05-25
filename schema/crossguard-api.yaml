@@ -14,7 +14,7 @@ info:
     detection). JSON field names exactly mirror the XML element and
     attribute names defined in `crossguard.xsd`, so the two
     serializations are field-for-field equivalent.
-  version: 1.1.0
+  version: 1.2.0
   contact:
     name: Mattermost Federal
 
@@ -706,14 +706,18 @@ components:
         message_format:
           type: string
           enum:
-            - json
             - xml
+            - json
           description: >
-            Wire format for outbound messages. Use XML when sending
-            through a Cross Domain Solution (CDS). Inbound messages are
-            auto-detected regardless of this setting. Only applies to
-            outbound connections.
-          default: "json"
+            Wire format for outbound messages. Defaults to `xml`, which
+            is the format used by Cross Domain Solutions (CDS). Set to
+            `json` to emit the same envelope content as JSON; the JSON
+            shape is defined by `crossguard.schema.json` (a mechanical
+            translation of `crossguard.xsd`). Empty resolves to `xml`.
+            Inbound messages are auto-detected on the first
+            non-whitespace byte (`<` selects XML, `{` selects JSON) and
+            ignore this setting; only outbound connections consult it.
+          default: "xml"
         nats:
           $ref: "#/components/schemas/NATSProviderConfig"
           description: >
@@ -1198,6 +1202,10 @@ components:
           type: string
         message_format:
           type: string
+          description: >
+            Resolved per-connection wire format reported by the status
+            endpoint: `xml` or `json` for outbound rows, `auto` for
+            inbound rows (which auto-detect from envelope bytes).
         remote_team_name:
           type: string
 

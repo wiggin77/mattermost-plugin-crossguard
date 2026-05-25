@@ -11,6 +11,14 @@
 // tooling and from integration tests (whose own files are guarded by
 // //go:build integration). It also pulls in no runtime plugin code, so
 // the build helper does not transitively compile the plugin.
+//
+// Wire format: no connection in this baseline declares an explicit
+// message_format. Every outbound connection defaults to XML at
+// publish time; `make docker-integration-test-validate-wire` overrides
+// every outbound connection's message_format to the chosen
+// WIRE_FORMAT (xml or json) before running the suite. Integration
+// tests therefore exercise whichever format the run was invoked
+// with, never a hardcoded one.
 package devbaseline
 
 // Connection names. Each name identifies a connection that lives on both
@@ -23,7 +31,6 @@ package devbaseline
 // poster users, not via dedicated connections.
 const (
 	NATSLowToHighName       = "low-to-high"
-	NATSXMLLowToHighName    = "xml-low-to-high"
 	NATSHighToLowName       = "high-to-low"
 	AzureQueueLowToHighName = "azure-low-to-high"
 	AzureBlobLowToHighName  = "azure-blob-low-to-high"
@@ -60,9 +67,10 @@ const (
 )
 
 // natsConn builds a NATS connection config map. fileTransfer toggles
-// file_transfer_enabled; format is "" (plugin default) or "xml".
-func natsConn(name, subject, format string, fileTransfer bool) map[string]any {
-	c := map[string]any{
+// file_transfer_enabled. No message_format is set: the wire format is
+// controlled at deploy/test time via configure-baseline's -format flag.
+func natsConn(name, subject string, fileTransfer bool) map[string]any {
+	return map[string]any{
 		"name":                  name,
 		"provider":              "nats",
 		"file_transfer_enabled": fileTransfer,
@@ -72,17 +80,12 @@ func natsConn(name, subject, format string, fileTransfer bool) map[string]any {
 			"auth_type": "none",
 		},
 	}
-	if format != "" {
-		c["message_format"] = format
-	}
-	return c
 }
 
 func azureQueueConn(name string) map[string]any {
 	return map[string]any{
 		"name":                  name,
 		"provider":              "azure-queue",
-		"message_format":        "xml",
 		"file_transfer_enabled": true,
 		"azure_queue": map[string]any{
 			"queue_service_url":          azuriteQueueURL,
@@ -101,7 +104,6 @@ func azureBlobConn(name string) map[string]any {
 	return map[string]any{
 		"name":                  name,
 		"provider":              "azure-blob",
-		"message_format":        "json",
 		"file_transfer_enabled": true,
 		"azure_blob": map[string]any{
 			"service_url":                 azuriteBlobURL,
@@ -118,7 +120,6 @@ func servicebusConn(name string) map[string]any {
 	return map[string]any{
 		"name":                  name,
 		"provider":              "azure-servicebus",
-		"message_format":        "xml",
 		"file_transfer_enabled": true,
 		"azure_servicebus": map[string]any{
 			"connection_string":          servicebusConnStr,
@@ -133,21 +134,20 @@ func servicebusConn(name string) map[string]any {
 }
 
 // Outbound returns the outbound connection list for the given dev side.
-// Server A is the sender for the "low-to-high" family (NATS, NATS XML, the
-// three Azure providers) plus reverse-direction receiver for high-to-low.
-// Server B is the inverse.
+// Server A is the sender for the low-to-high family (one NATS, plus the
+// three Azure providers) and the reverse-direction receiver for
+// high-to-low. Server B is the inverse.
 func Outbound(side Side) []map[string]any {
 	if side == SideA {
 		return []map[string]any{
-			natsConn(NATSLowToHighName, "crossguard.relay", "", true),
-			natsConn(NATSXMLLowToHighName, "crossguard.relay.xml", "xml", false),
+			natsConn(NATSLowToHighName, "crossguard.relay", true),
 			azureQueueConn(AzureQueueLowToHighName),
 			azureBlobConn(AzureBlobLowToHighName),
 			servicebusConn(ServiceBusLowToHighName),
 		}
 	}
 	return []map[string]any{
-		natsConn(NATSHighToLowName, "crossguard.relay.reverse", "", true),
+		natsConn(NATSHighToLowName, "crossguard.relay.reverse", true),
 	}
 }
 
@@ -155,12 +155,11 @@ func Outbound(side Side) []map[string]any {
 func Inbound(side Side) []map[string]any {
 	if side == SideA {
 		return []map[string]any{
-			natsConn(NATSHighToLowName, "crossguard.relay.reverse", "", true),
+			natsConn(NATSHighToLowName, "crossguard.relay.reverse", true),
 		}
 	}
 	return []map[string]any{
-		natsConn(NATSLowToHighName, "crossguard.relay", "", true),
-		natsConn(NATSXMLLowToHighName, "crossguard.relay.xml", "xml", false),
+		natsConn(NATSLowToHighName, "crossguard.relay", true),
 		azureQueueConn(AzureQueueLowToHighName),
 		azureBlobConn(AzureBlobLowToHighName),
 		servicebusConn(ServiceBusLowToHighName),

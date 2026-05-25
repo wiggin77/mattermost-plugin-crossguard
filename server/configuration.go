@@ -183,6 +183,12 @@ type ConnectionConfig struct {
 	// remoteID for loop prevention and synthetic user tagging.
 	SiteURL string `json:"site_url,omitempty"`
 
+	// MessageFormat selects the outbound wire encoding: "xml" (default)
+	// or "json". Empty defaults to "xml" at publish time. Ignored on
+	// inbound connections, which auto-detect the format from the first
+	// non-whitespace byte of each incoming envelope.
+	MessageFormat string `json:"message_format,omitempty"`
+
 	// Common fields
 	FileTransferEnabled bool   `json:"file_transfer_enabled"`
 	FileFilterMode      string `json:"file_filter_mode"`  // "", "allow", "deny"
@@ -526,6 +532,13 @@ func validateConnectionList(connections []ConnectionConfig, direction string, al
 		if (conn.FileFilterMode == fileFilterModeAllow || conn.FileFilterMode == fileFilterModeDeny) && strings.TrimSpace(conn.FileFilterTypes) == "" {
 			errs = append(errs, fmt.Sprintf("%s: file_filter_types is required when file_filter_mode is set", prefix))
 		}
+
+		switch strings.ToLower(strings.TrimSpace(conn.MessageFormat)) {
+		case "", "xml", "json":
+			// valid; empty defaults to "xml" at publish time
+		default:
+			errs = append(errs, fmt.Sprintf("%s: message_format must be \"xml\" or \"json\"", prefix))
+		}
 	}
 
 	return errs
@@ -843,9 +856,11 @@ func validateAzureServiceBusConnection(conn ConnectionConfig, prefix string) []s
 
 // isTestMessage returns the TestID and true when data is a TransportEnvelope
 // of Type "test". Used by NATS file watcher and inbound paths to recognize
-// test-connection probes.
+// test-connection probes. The wire-format detection is delegated to
+// UnmarshalEnvelope so the function correctly accepts both XML and JSON
+// test envelopes.
 func isTestMessage(data []byte) (string, bool) {
-	env, err := UnmarshalEnvelope(data)
+	env, _, err := UnmarshalEnvelope(data)
 	if err != nil {
 		return "", false
 	}

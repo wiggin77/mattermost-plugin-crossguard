@@ -21,10 +21,10 @@ const (
 // User.Props StringMap. Only keys that the framework or compliance
 // review have approved cross domain boundaries are represented.
 type UserProps struct {
-	CustomStatus     string `xml:"CustomStatus,omitempty"`
-	RemoteUsername   string `xml:"RemoteUsername,omitempty"`
-	RemoteEmail      string `xml:"RemoteEmail,omitempty"`
-	OriginalRemoteId string `xml:"OriginalRemoteId,omitempty"`
+	CustomStatus     string `xml:"CustomStatus,omitempty"     json:"CustomStatus,omitempty"`
+	RemoteUsername   string `xml:"RemoteUsername,omitempty"   json:"RemoteUsername,omitempty"`
+	RemoteEmail      string `xml:"RemoteEmail,omitempty"      json:"RemoteEmail,omitempty"`
+	OriginalRemoteId string `xml:"OriginalRemoteId,omitempty" json:"OriginalRemoteId,omitempty"`
 }
 
 // UserPropsFromModel extracts the whitelisted keys from an upstream
@@ -99,24 +99,24 @@ func (p *UserProps) ToModel() mmModel.StringMap {
 // MfaActive) and local-only fields (TermsOfServiceId,
 // DisableWelcomeEmail, LastLogin) are dropped.
 type User struct {
-	Id                string     `xml:"Id"`
-	CreateAt          int64      `xml:"CreateAt,omitempty"`
-	UpdateAt          int64      `xml:"UpdateAt,omitempty"`
-	DeleteAt          int64      `xml:"DeleteAt"`
-	Username          string     `xml:"Username"`
-	Email             string     `xml:"Email"`
-	Nickname          string     `xml:"Nickname,omitempty"`
-	FirstName         string     `xml:"FirstName,omitempty"`
-	LastName          string     `xml:"LastName,omitempty"`
-	Position          string     `xml:"Position,omitempty"`
-	Roles             string     `xml:"Roles"`
-	Locale            string     `xml:"Locale,omitempty"`
-	Timezone          StringMap  `xml:"Timezone,omitempty"`
-	Props             *UserProps `xml:"Props,omitempty"`
-	RemoteId          string     `xml:"RemoteId,omitempty"`
-	IsBot             bool       `xml:"IsBot,omitempty"`
-	BotDescription    string     `xml:"BotDescription,omitempty"`
-	BotLastIconUpdate int64      `xml:"BotLastIconUpdate,omitempty"`
+	Id                string     `xml:"Id"                          json:"Id"`
+	CreateAt          int64      `xml:"CreateAt,omitempty"          json:"CreateAt,omitempty"`
+	UpdateAt          int64      `xml:"UpdateAt,omitempty"          json:"UpdateAt,omitempty"`
+	DeleteAt          int64      `xml:"DeleteAt"                    json:"DeleteAt"`
+	Username          string     `xml:"Username"                    json:"Username"`
+	Email             string     `xml:"Email"                       json:"Email"`
+	Nickname          string     `xml:"Nickname,omitempty"          json:"Nickname,omitempty"`
+	FirstName         string     `xml:"FirstName,omitempty"         json:"FirstName,omitempty"`
+	LastName          string     `xml:"LastName,omitempty"          json:"LastName,omitempty"`
+	Position          string     `xml:"Position,omitempty"          json:"Position,omitempty"`
+	Roles             string     `xml:"Roles"                       json:"Roles"`
+	Locale            string     `xml:"Locale,omitempty"            json:"Locale,omitempty"`
+	Timezone          StringMap  `xml:"Timezone,omitempty"          json:"Timezone,omitempty"`
+	Props             *UserProps `xml:"Props,omitempty"             json:"Props,omitempty"`
+	RemoteId          string     `xml:"RemoteId,omitempty"          json:"RemoteId,omitempty"`
+	IsBot             bool       `xml:"IsBot,omitempty"             json:"IsBot,omitempty"`
+	BotDescription    string     `xml:"BotDescription,omitempty"    json:"BotDescription,omitempty"`
+	BotLastIconUpdate int64      `xml:"BotLastIconUpdate,omitempty" json:"BotLastIconUpdate,omitempty"`
 }
 
 // UserFromModel converts an upstream User to its wire form. Dropped

@@ -7,14 +7,14 @@ import (
 // Reaction is the wire representation of an emoji reaction on a post.
 // All upstream fields are carried; the type is already minimal.
 type Reaction struct {
-	UserId    string `xml:"UserId"`
-	PostId    string `xml:"PostId"`
-	EmojiName string `xml:"EmojiName"`
-	CreateAt  int64  `xml:"CreateAt"`
-	UpdateAt  int64  `xml:"UpdateAt"`
-	DeleteAt  int64  `xml:"DeleteAt"`
-	RemoteId  string `xml:"RemoteId,omitempty"`
-	ChannelId string `xml:"ChannelId"`
+	UserId    string `xml:"UserId"             json:"UserId"`
+	PostId    string `xml:"PostId"             json:"PostId"`
+	EmojiName string `xml:"EmojiName"          json:"EmojiName"`
+	CreateAt  int64  `xml:"CreateAt"           json:"CreateAt"`
+	UpdateAt  int64  `xml:"UpdateAt"           json:"UpdateAt"`
+	DeleteAt  int64  `xml:"DeleteAt"           json:"DeleteAt"`
+	RemoteId  string `xml:"RemoteId,omitempty" json:"RemoteId,omitempty"`
+	ChannelId string `xml:"ChannelId"          json:"ChannelId"`
 }
 
 // ReactionFromModel converts an upstream Reaction to its wire form.

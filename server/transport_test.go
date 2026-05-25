@@ -38,11 +38,11 @@ func TestTransportEnvelopeMarshalRoundTrip(t *testing.T) {
 		}, wire.NewRecordingLogger()),
 	}
 
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(data), xml.Header))
 
-	got, err := UnmarshalEnvelope(data)
+	got, _, err := UnmarshalEnvelope(data)
 	require.NoError(t, err)
 
 	assert.Equal(t, env.Version, got.Version)
@@ -79,13 +79,13 @@ func TestTransportEnvelopeEpochSequenceOmittedWhenZero(t *testing.T) {
 		}, wire.NewRecordingLogger()),
 	}
 
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
 
 	assert.NotContains(t, string(data), "<Epoch>")
 	assert.NotContains(t, string(data), "<Sequence>")
 
-	got, err := UnmarshalEnvelope(data)
+	got, _, err := UnmarshalEnvelope(data)
 	require.NoError(t, err)
 	assert.Empty(t, got.Epoch)
 	assert.Zero(t, got.Sequence)
@@ -93,7 +93,7 @@ func TestTransportEnvelopeEpochSequenceOmittedWhenZero(t *testing.T) {
 
 func TestTransportEnvelopeDefaultsTimestamp(t *testing.T) {
 	env := &TransportEnvelope{Type: TransportTypeTest, TestID: "x"}
-	_, err := MarshalEnvelope(env)
+	_, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
 	require.NotEmpty(t, env.Timestamp, "MarshalEnvelope should default Timestamp when empty")
 	_, err = time.Parse(time.RFC3339, env.Timestamp)
@@ -103,7 +103,7 @@ func TestTransportEnvelopeDefaultsTimestamp(t *testing.T) {
 func TestTransportEnvelopePreservesTimestamp(t *testing.T) {
 	want := "2026-01-02T03:04:05Z"
 	env := &TransportEnvelope{Type: TransportTypeTest, TestID: "x", Timestamp: want}
-	_, err := MarshalEnvelope(env)
+	_, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
 	assert.Equal(t, want, env.Timestamp)
 }
@@ -113,9 +113,9 @@ func TestTransportEnvelopeMarshalTest(t *testing.T) {
 		Type:   TransportTypeTest,
 		TestID: "abc123",
 	}
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
-	got, err := UnmarshalEnvelope(data)
+	got, _, err := UnmarshalEnvelope(data)
 	require.NoError(t, err)
 	assert.Equal(t, "test", got.Type)
 	assert.Equal(t, "abc123", got.TestID)
@@ -442,7 +442,7 @@ func TestTransportEnvelopeXMLReadable(t *testing.T) {
 			ChannelId: "ch1",
 		}, wire.NewRecordingLogger()),
 	}
-	data, err := MarshalEnvelope(env)
+	data, err := MarshalEnvelope(env, FormatXML)
 	require.NoError(t, err)
 	out := string(data)
 	assert.Contains(t, out, "<CrossGuardEnvelope")

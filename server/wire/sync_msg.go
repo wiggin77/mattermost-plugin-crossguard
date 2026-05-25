@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"maps"
 	"sort"
@@ -24,26 +26,32 @@ type MentionTransforms map[string]string
 // sync message. It composes the seven inner content types and carries
 // the channel-level identifiers (Id, ChannelId).
 //
-// SyncMsg has custom MarshalXML/UnmarshalXML so empty containers (no
-// posts, no reactions, etc.) are not emitted as empty wrappers. The
-// resulting wire format omits any container with no children, which
-// the strict XSD declares with minOccurs=0.
+// SyncMsg has custom MarshalXML/UnmarshalXML (and parallel MarshalJSON/
+// UnmarshalJSON) so empty containers (no posts, no reactions, etc.)
+// are not emitted as empty wrappers in either encoding. The resulting
+// wire format omits any container with no children, which the strict
+// XSD declares with minOccurs=0.
+//
+// The json tags on the struct fields document the property names but
+// are not consulted at runtime: the custom MarshalJSON walks the
+// fields explicitly to apply the same empty-container suppression as
+// MarshalXML.
 type SyncMsg struct {
-	Id        string
-	ChannelId string
-	Users     UserMap
+	Id        string  `json:"Id"`
+	ChannelId string  `json:"ChannelId"`
+	Users     UserMap `json:"Users,omitempty"`
 	// Post is at most one per envelope. The sender's split policy emits
 	// one envelope per post so compliance content-inspection tools can
 	// reject the specific post that triggered classification without
 	// dropping unrelated content as collateral. Non-post content
 	// (reactions, acks, memberships, statuses) rides with the relevant
 	// post or in a separate metadata envelope that has no Post field.
-	Post              *Post
-	Reactions         []*Reaction
-	Statuses          []*Status
-	MembershipChanges []*MembershipChange
-	Acknowledgements  []*PostAcknowledgement
-	MentionTransforms MentionTransforms
+	Post              *Post                  `json:"Post,omitempty"`
+	Reactions         []*Reaction            `json:"Reactions,omitempty"`
+	Statuses          []*Status              `json:"Statuses,omitempty"`
+	MembershipChanges []*MembershipChange    `json:"MembershipChanges,omitempty"`
+	Acknowledgements  []*PostAcknowledgement `json:"Acknowledgements,omitempty"`
+	MentionTransforms MentionTransforms      `json:"MentionTransforms,omitempty"`
 }
 
 // MarshalXML implements xml.Marshaler. Element order matches the order
@@ -466,4 +474,170 @@ func (m *MentionTransforms) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) err
 			return nil
 		}
 	}
+}
+
+// ----------------------------------------------------------------------
+// JSON encoding. The shapes mirror the XML wire format one-for-one:
+//   * UserMap         -> array of User objects with "id" sibling key
+//   * MentionTransforms -> array of {"key":..., "value":...}
+//   * SyncMsg         -> object, empty containers suppressed
+// All three sort by key for deterministic, byte-comparable output.
+// ----------------------------------------------------------------------
+
+// userMapEntryJSON is the JSON shape for one UserMap entry. The "id"
+// attribute is first; the embedded *User contributes the rest. Field
+// declaration order is preserved by encoding/json for struct types,
+// so "id" reliably appears before User's "Id" element.
+type userMapEntryJSON struct {
+	ID string `json:"id"`
+	*User
+}
+
+// MarshalJSON implements json.Marshaler for UserMap. Emits an array of
+// User objects with the map key as the "id" sibling key, sorted by
+// key. Nil entries are skipped.
+func (m UserMap) MarshalJSON() ([]byte, error) {
+	if len(m) == 0 {
+		return []byte("[]"), nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]userMapEntryJSON, 0, len(keys))
+	for _, k := range keys {
+		u := m[k]
+		if u == nil {
+			continue
+		}
+		out = append(out, userMapEntryJSON{ID: k, User: u})
+	}
+	return json.Marshal(out)
+}
+
+// UnmarshalJSON implements json.Unmarshaler for UserMap.
+func (m *UserMap) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	// Decode into a slice of objects with an "id" attribute alongside
+	// the User's own fields. Using a value-embedded User (not *User)
+	// avoids requiring callers to pre-allocate.
+	var entries []struct {
+		ID string `json:"id"`
+		User
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+	if *m == nil {
+		*m = make(UserMap, len(entries))
+	}
+	for i := range entries {
+		u := entries[i].User
+		(*m)[entries[i].ID] = &u
+	}
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler for MentionTransforms. Emits a
+// JSON array of {"key":..., "value":...} objects, sorted by key.
+func (m MentionTransforms) MarshalJSON() ([]byte, error) {
+	if len(m) == 0 {
+		return []byte("[]"), nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	entries := make([]kvEntry, len(keys))
+	for i, k := range keys {
+		entries[i] = kvEntry{Key: k, Value: m[k]}
+	}
+	return json.Marshal(entries)
+}
+
+// UnmarshalJSON implements json.Unmarshaler for MentionTransforms.
+func (m *MentionTransforms) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+	var entries []kvEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+	if *m == nil {
+		*m = make(MentionTransforms, len(entries))
+	}
+	for _, e := range entries {
+		(*m)[e.Key] = e.Value
+	}
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler for SyncMsg. Emits an object
+// with fields in struct declaration order, suppressing empty
+// containers (Users, Reactions, Statuses, MembershipChanges,
+// Acknowledgements, MentionTransforms) and a nil Post so the JSON
+// shape matches the XSD's minOccurs=0 wrappers exactly.
+func (m *SyncMsg) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
+	// syncMsgJSON is the field set in declaration order. It uses
+	// pointer/slice/map types so empty values are reliably elided by
+	// omitempty.
+	type syncMsgJSON struct {
+		Id                string                 `json:"Id"`
+		ChannelId         string                 `json:"ChannelId"`
+		Users             UserMap                `json:"Users,omitempty"`
+		Post              *Post                  `json:"Post,omitempty"`
+		Reactions         []*Reaction            `json:"Reactions,omitempty"`
+		Statuses          []*Status              `json:"Statuses,omitempty"`
+		MembershipChanges []*MembershipChange    `json:"MembershipChanges,omitempty"`
+		Acknowledgements  []*PostAcknowledgement `json:"Acknowledgements,omitempty"`
+		MentionTransforms MentionTransforms      `json:"MentionTransforms,omitempty"`
+	}
+	return json.Marshal(syncMsgJSON{
+		Id:                m.Id,
+		ChannelId:         m.ChannelId,
+		Users:             m.Users,
+		Post:              m.Post,
+		Reactions:         m.Reactions,
+		Statuses:          m.Statuses,
+		MembershipChanges: m.MembershipChanges,
+		Acknowledgements:  m.Acknowledgements,
+		MentionTransforms: m.MentionTransforms,
+	})
+}
+
+// UnmarshalJSON implements json.Unmarshaler for SyncMsg.
+func (m *SyncMsg) UnmarshalJSON(data []byte) error {
+	type syncMsgJSON struct {
+		Id                string                 `json:"Id"`
+		ChannelId         string                 `json:"ChannelId"`
+		Users             UserMap                `json:"Users"`
+		Post              *Post                  `json:"Post"`
+		Reactions         []*Reaction            `json:"Reactions"`
+		Statuses          []*Status              `json:"Statuses"`
+		MembershipChanges []*MembershipChange    `json:"MembershipChanges"`
+		Acknowledgements  []*PostAcknowledgement `json:"Acknowledgements"`
+		MentionTransforms MentionTransforms      `json:"MentionTransforms"`
+	}
+	var aux syncMsgJSON
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	m.Id = aux.Id
+	m.ChannelId = aux.ChannelId
+	m.Users = aux.Users
+	m.Post = aux.Post
+	m.Reactions = aux.Reactions
+	m.Statuses = aux.Statuses
+	m.MembershipChanges = aux.MembershipChanges
+	m.Acknowledgements = aux.Acknowledgements
+	m.MentionTransforms = aux.MentionTransforms
+	return nil
 }

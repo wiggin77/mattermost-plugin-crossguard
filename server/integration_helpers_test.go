@@ -78,7 +78,7 @@ func (s *senderProcess) SendSyncMsg(t *testing.T, channelID string, msg *mmModel
 		env.Sequence = s.seqs[key]
 		env.Epoch = s.epoch
 		s.seqMu.Unlock()
-		data, err := MarshalEnvelope(env)
+		data, err := MarshalEnvelope(env, FormatXML)
 		require.NoError(t, err)
 		require.NoError(t, s.wrapped.Publish(context.Background(), data))
 	}
@@ -112,7 +112,7 @@ func newReceiverProcess(connName string, gapTimeout time.Duration) *receiverProc
 // handle is the NATS callback installed by Subscribe(). It unmarshals
 // the envelope, runs it through Admit, and records dispatched output.
 func (r *receiverProcess) handle(data []byte) {
-	env, err := UnmarshalEnvelope(data)
+	env, _, err := UnmarshalEnvelope(data)
 	if err != nil {
 		// Malformed envelope; in production this would be audited as
 		// InboundUnmarshalFailed. For the integration tests we just
