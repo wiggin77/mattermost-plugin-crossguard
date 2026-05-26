@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -820,4 +823,129 @@ func TestServiceBusMaxMessageSize(t *testing.T) {
 		p := &azureServiceBusProvider{maxMsgSize: 1000000}
 		assert.Equal(t, 1000000, p.MaxMessageSize())
 	})
+}
+
+// ----- Service Principal coverage (ported from upstream) -----
+
+func validSPServiceBusCfg() AzureServiceBusProviderConfig {
+	return AzureServiceBusProviderConfig{
+		QueueName:           "myqueue",
+		AuthMode:            AzureAuthServicePrincipal,
+		AzureCloud:          AzureCloudPublic,
+		ServiceBusNamespace: "myns.servicebus.windows.net",
+		TenantID:            "11111111-2222-3333-4444-555555555555",
+		ClientID:            "client-uuid",
+		ClientSecret:        "topsec",
+	}
+}
+
+func TestNewAzureServiceBusProvider_SPMode_HappyPath(t *testing.T) {
+	api := &plugintest.API{}
+	defer api.AssertExpectations(t)
+	// SP construction emits the audit log line. No AAD round-trip; no
+	// blob sidecar (BlobContainerName empty).
+	api.On("LogInfo", "Azure auth (service-principal): credential constructed",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return().Once()
+
+	p, err := newAzureServiceBusProvider(t.Context(), validSPServiceBusCfg(), api)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	t.Cleanup(func() { _ = p.Close() })
+}
+
+func TestNewAzureServiceBusProvider_SPMode_BadCloud(t *testing.T) {
+	cfg := validSPServiceBusCfg()
+	cfg.AzureCloud = "atlantis"
+	_, err := newAzureServiceBusProvider(t.Context(), cfg, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "service bus config")
+	assert.Contains(t, err.Error(), "unknown azure_cloud")
+}
+
+func TestNewAzureServiceBusProvider_SPMode_BadTenant(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("LogError", "Service Bus: service principal credential failed",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return().Once()
+	defer api.AssertExpectations(t)
+
+	cfg := validSPServiceBusCfg()
+	cfg.TenantID = ""
+	_, err := newAzureServiceBusProvider(t.Context(), cfg, api)
+	require.Error(t, err)
+}
+
+func TestNewAzureServiceBusProvider_UnknownAuthMode(t *testing.T) {
+	cfg := validSPServiceBusCfg()
+	cfg.AuthMode = "weird-mode"
+	_, err := newAzureServiceBusProvider(t.Context(), cfg, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown auth_mode")
+}
+
+// ----- newServiceBusBlobSidecar coverage -----
+
+func TestNewServiceBusBlobSidecar_SPMode_NilCredential_InternalBug(t *testing.T) {
+	// The internal-bug guard fires when SP mode is selected but the
+	// caller forgot to pass a credential (would happen only via a code
+	// regression).
+	cfg := AzureServiceBusProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+	}
+	_, err := newServiceBusBlobSidecar(t.Context(), cfg, AzureAuthServicePrincipal, cloud.AzurePublic, nil, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SP credential is nil")
+}
+
+func TestNewServiceBusBlobSidecar_ConnectionStringMode_BadKey(t *testing.T) {
+	cfg := AzureServiceBusProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+		BlobAccountName:   "acct",
+		BlobAccountKey:    "not-valid-base64-!!!",
+	}
+	_, err := newServiceBusBlobSidecar(t.Context(), cfg, AzureAuthConnectionString, cloud.AzurePublic, nil, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shared key")
+}
+
+func TestNewServiceBusBlobSidecar_UnknownAuthMode(t *testing.T) {
+	cfg := AzureServiceBusProviderConfig{
+		BlobServiceURL:    "https://acct.blob.core.windows.net",
+		BlobContainerName: "c1",
+	}
+	_, err := newServiceBusBlobSidecar(t.Context(), cfg, "weird-mode", cloud.AzurePublic, nil, &plugintest.API{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "service bus blob sidecar: unknown auth_mode")
+}
+
+// ----- testAzureServiceBusConnection SP branch coverage -----
+
+func TestTestAzureServiceBusConnection_BadCloud(t *testing.T) {
+	cfg := validSPServiceBusCfg()
+	cfg.AzureCloud = "atlantis"
+	err := testAzureServiceBusConnection(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "service bus config")
+}
+
+func TestTestAzureServiceBusConnection_SPMode_BadTenant(t *testing.T) {
+	cfg := validSPServiceBusCfg()
+	cfg.TenantID = ""
+	err := testAzureServiceBusConnection(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azidentity NewClientSecretCredential")
+}
+
+func TestTestAzureServiceBusConnection_UnknownAuthMode(t *testing.T) {
+	cfg := validSPServiceBusCfg()
+	cfg.AuthMode = "weird-mode"
+	err := testAzureServiceBusConnection(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown auth_mode")
 }
