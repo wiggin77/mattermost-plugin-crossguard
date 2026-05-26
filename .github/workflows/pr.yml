@@ -31,6 +31,9 @@ jobs:
       - name: Install webapp dependencies
         run: cd webapp && npm install
 
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
+
       - name: Run style checks
         run: make check-style
 
