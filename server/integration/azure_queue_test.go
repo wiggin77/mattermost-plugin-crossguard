@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MattermostFederal/mattermost-plugin-crossguard/build/devbaseline"
+	"github.com/mattermost/mattermost/server/public/model"
 )
 
 // TestAzureQueue exercises the azure-queue provider end-to-end against the
@@ -85,7 +86,13 @@ func TestAzureQueue(t *testing.T) {
 			return struct{}{}, len(p.FileIds) > 0
 		})
 
-		files := postMetadataFiles(t, h, channelB.Id, relayed.Id)
+		// FileIds may appear on the post record before the corresponding
+		// FileInfo metadata is fully materialized on the receiver. Poll
+		// until at least one FileInfo is queryable.
+		files := Eventually(t, 90*time.Second, "materialized files on "+relayed.Id, func() ([]*model.FileInfo, bool) {
+			f := postMetadataFiles(t, h, channelB.Id, relayed.Id)
+			return f, len(f) > 0
+		})
 		if len(files) == 0 {
 			t.Fatalf("expected at least one materialized file on %s, got none (file_ids=%s)",
 				relayed.Id, strings.Join(relayedFileIDs(h, channelB.Id, relayed.Id), ","))
